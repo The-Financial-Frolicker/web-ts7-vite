@@ -1,0 +1,12 @@
+{
+  "tasks": {
+    "build": "bash scripts/build.sh",
+    "test:wasm": "node wasm/test.mjs",
+    "test:wasm:published": "node scripts/test-wasm-published.mjs",
+    "check:worker": "tsc --project worker/tsconfig.json",
+    "check:worker-types": "bash scripts/worker-types.sh --check",
+    "types:worker": "bash scripts/worker-types.sh",
+    "deploy": "bash scripts/deploy.sh",
+    "deploy:dry-run": "bash scripts/deploy.sh --dry-run"
+    }
+}

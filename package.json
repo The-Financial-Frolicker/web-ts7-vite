@@ -1,0 +1,23 @@
+{
+  "name": "web-ts7-vite",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "bash scripts/build.sh",
+    "test:wasm": "node wasm/test.mjs",
+    "test:wasm:published": "node scripts/test-wasm-published.mjs",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "1.66.0",
+    "typescript": "~7.0.2",
+    "vite": "^8.3.5",
+    "wrangler": "4.156.0"
+  }
+}
+
