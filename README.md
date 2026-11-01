@@ -62,3 +62,21 @@ mise exec -- deno task test:wasm:published# published (dist/client) WASM smoke t
 your shell, the plain `deno task …` / `npm run …` forms work too. The `#!/usr/bin/env node`
 shims in `node_modules/.bin` (used by `tsc` and `vite`) and the `node …` test commands all
 resolve to the mise-managed Node when run from an activated project environment.
+
+### Published WASM smoke test
+
+`deno task test:wasm:published` (run as `mise exec -- deno task test:wasm:published`)
+verifies the **final deployment artifact** after Vite has built it. It loads
+`dist/client/wasm/wasm_math.js` together with its companion `wasm_math.wasm`, instantiates
+the module, and calls `_add(19, 23)`.
+
+A successful run prints:
+
+```
+published dist/client 19 + 23 = 42
+```
+
+and exits with status `0`. This demonstrates that the built WASM binary and its JS glue
+were emitted to `dist/client/wasm`, are non-empty, load correctly in Node, and that the
+exported `_add` function returns the expected result (`42`). Run the full build
+(`deno task build`) first, since the test fails if the artifacts are missing or empty.

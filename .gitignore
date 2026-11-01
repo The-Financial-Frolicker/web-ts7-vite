@@ -27,3 +27,4 @@ dist-ssr
 /build-wasm/
 /.wrangler/
 /public/wasm/
+.aider*
