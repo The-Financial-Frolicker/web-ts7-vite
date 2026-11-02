@@ -1,2 +1,7 @@
 [tools]
 node = "24.19.0"
+deno = "2.9.8"
+# Emscripten 6.0.13 warns for cmake 4.2.0-4.3.3; wasm/CMakeLists.txt needs >= 4.2.
+cmake = "4.4.5"
+ninja = "1.13.2"
+emsdk = "6.0.13"

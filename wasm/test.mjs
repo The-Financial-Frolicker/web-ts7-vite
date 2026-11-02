@@ -7,5 +7,5 @@ const result = wasm._add(19, 23);
 console.log(`19 + 23 = ${result}`);
 
 if (result !== 42) {
-    throw new Error(`Unexpected result: ${result}`);
+  throw new Error(`Unexpected result: ${result}`);
 }

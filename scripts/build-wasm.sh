@@ -14,6 +14,25 @@ JS_SRC="$BUILD_DIR/wasm_math.js"
 WASM_SRC="$BUILD_DIR/wasm_math.wasm"
 
 configure() {
+    # Guard against a build tree configured against a different Emscripten SDK.
+    # CMake keeps CMAKE_TOOLCHAIN_FILE in its cache, so a leftover tree (for
+    # example one configured against /opt/emsdk) would silently keep compiling
+    # with that SDK even though we resolve a different one now.
+    local cache="$BUILD_DIR/CMakeCache.txt"
+    if [[ -f "$cache" ]]; then
+        local cached_toolchain=""
+        # awk rather than `sed | head`: a SIGPIPE under `set -o pipefail` would
+        # abort the build instead of reporting the mismatch.
+        cached_toolchain="$(awk '/^CMAKE_TOOLCHAIN_FILE:/{sub(/^[^=]*=/,""); print; exit}' "$cache")"
+        if [[ -n "$cached_toolchain" && "$cached_toolchain" != "$TOOLCHAIN" ]]; then
+            echo "==> build tree was configured against a different Emscripten SDK:" >&2
+            echo "      cached:   $cached_toolchain" >&2
+            echo "      resolved: $TOOLCHAIN" >&2
+            echo "==> removing '$BUILD_DIR' and reconfiguring from scratch" >&2
+            rm -rf "$BUILD_DIR"
+        fi
+    fi
+
     cmake -S wasm -B "$BUILD_DIR" -G Ninja -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN"
 }
 

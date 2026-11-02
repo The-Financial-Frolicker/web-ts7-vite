@@ -6,12 +6,50 @@ cd "$PROJECT_ROOT"
 
 # --- Initialise emsdk ONCE for the entire build process -------------------
 # EMSDK_ROOT is the single source of truth for the SDK location.
-EMSDK_ROOT="${EMSDK_ROOT:-/opt/emsdk}"
-EMSDK_ENV="$EMSDK_ROOT/emsdk_env.sh"
+#
+# Resolution order (first match wins):
+#   1. EMSDK_ROOT  — explicit override (e.g. a shared /opt/emsdk install)
+#   2. EMSDK      — exported by mise for the pinned `emsdk` tool in .mise.toml
+#   3. emcc on PATH — derive the root from <root>/upstream/emscripten/emcc
+#   4. /opt/emsdk  — legacy default
+resolve_emsdk_root() {
+    if [[ -n "${EMSDK_ROOT:-}" ]]; then
+        printf '%s\n' "$EMSDK_ROOT"
+        return 0
+    fi
 
-if [[ ! -f "$EMSDK_ENV" ]]; then
-    echo "ERROR: emsdk environment script not found: $EMSDK_ENV" >&2
-    echo "Set EMSDK_ROOT to your emsdk installation." >&2
+    if [[ -n "${EMSDK:-}" ]]; then
+        printf '%s\n' "$EMSDK"
+        return 0
+    fi
+
+    local emcc_path=""
+    local candidate=""
+    if emcc_path="$(command -v emcc 2>/dev/null)" && [[ -n "$emcc_path" ]]; then
+        # mise/asdf expose compilers through shims; resolve to the real binary.
+        emcc_path="$(readlink -f "$emcc_path" 2>/dev/null || printf '%s' "$emcc_path")"
+        candidate="$(cd "$(dirname "$emcc_path")/../../.." 2>/dev/null && pwd || true)"
+        if [[ -n "$candidate" && -f "$candidate/upstream/emscripten/emcc" ]]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    fi
+
+    printf '%s\n' "/opt/emsdk"
+}
+
+EMSDK_ROOT="$(resolve_emsdk_root)"
+EMSDK_ENV="$EMSDK_ROOT/emsdk_env.sh"
+# Keep an unclobberable copy: emsdk_env.sh clears EMSDK_ROOT when it is sourced.
+PROJECT_EMSDK_ROOT="$EMSDK_ROOT"
+
+if [[ ! -d "$EMSDK_ROOT" ]]; then
+    echo "ERROR: Emscripten SDK not found at '$EMSDK_ROOT'." >&2
+    echo >&2
+    echo "This project pins emsdk in .mise.toml. Install the pinned toolchain:" >&2
+    echo "    mise install" >&2
+    echo >&2
+    echo "Alternatively point EMSDK_ROOT at an existing emsdk installation." >&2
     exit 1
 fi
 
@@ -69,8 +107,20 @@ fi
 export PROJECT_NODE_DIR
 
 # `source` runs in THIS shell; set -e makes any failure abort immediately.
-# shellcheck disable=SC1090
-source "$EMSDK_ENV"
+# A mise-managed emsdk also ships emsdk_env.sh; if it is absent we rely on the
+# environment mise already exported (EMSDK / EMSCRIPTEN_ROOT / EM_CONFIG / PATH).
+if [[ -f "$EMSDK_ENV" ]]; then
+    # shellcheck disable=SC1090
+    source "$EMSDK_ENV"
+else
+    echo "==> emsdk_env.sh not found under $EMSDK_ROOT; using the environment provided by mise"
+fi
+
+# emsdk_env.sh unsets EMSDK_ROOT while sourcing it. Restore the value we resolved
+# above so the rest of the script (and every child process) sees one consistent
+# SDK location.
+EMSDK_ROOT="$PROJECT_EMSDK_ROOT"
+export EMSDK_ROOT
 
 # Re-assert project Node precedence: emsdk may have prepended its own Node to
 # PATH. Put the project Node directory back in front so `node` (and the
@@ -90,15 +140,24 @@ if [[ -n "$PROJECT_NODE_DIR" ]]; then
 fi
 
 # --- Validate the toolchain is usable ------------------------------------
+# em++ comes from emsdk; cmake and ninja are separate mise-managed tools.
 for tool in em++ cmake ninja; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         echo "ERROR: required tool not on PATH after emsdk init: $tool" >&2
+        echo "       Install the pinned toolchain with: mise install" >&2
         exit 1
     fi
 done
 
-# Derive the toolchain path from EMSDK_ROOT (not a separately inferred EMSDK value).
-TOOLCHAIN="$EMSDK_ROOT/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake"
+# Derive the toolchain path from the SDK we resolved above. EMSDK_ROOT is
+# authoritative: mise also exports EMSCRIPTEN_ROOT, which would otherwise win
+# even when the caller deliberately overrides EMSDK_ROOT (e.g. to use a shared
+# /opt/emsdk). Only fall back to EMSCRIPTEN_ROOT if the expected layout is absent.
+EMSCRIPTEN_DIR="$EMSDK_ROOT/upstream/emscripten"
+if [[ ! -d "$EMSCRIPTEN_DIR" && -n "${EMSCRIPTEN_ROOT:-}" ]]; then
+    EMSCRIPTEN_DIR="$EMSCRIPTEN_ROOT"
+fi
+TOOLCHAIN="$EMSCRIPTEN_DIR/cmake/Modules/Platform/Emscripten.cmake"
 if [[ ! -f "$TOOLCHAIN" ]]; then
     echo "ERROR: Emscripten CMake toolchain not found: $TOOLCHAIN" >&2
     exit 1
@@ -106,6 +165,11 @@ fi
 export TOOLCHAIN
 
 echo "==> [1/9] emsdk initialised (EMSDK_ROOT=$EMSDK_ROOT)"
+echo "          node   $(node --version)"
+echo "          deno   $((deno --version 2>/dev/null || echo 'not found') | head -1)"
+echo "          emcc   $((emcc --version 2>/dev/null || echo 'not found') | head -1)"
+echo "          cmake  $((cmake --version 2>/dev/null || echo 'not found') | head -1)"
+echo "          ninja  $(ninja --version 2>/dev/null || echo 'not found')"
 echo "==> [2/9] Configure CMake"
 bash scripts/build-wasm.sh configure
 echo "==> [3/9] Build WASM (Ninja incremental)"

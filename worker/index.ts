@@ -5,7 +5,7 @@ export default {
     if (url.pathname === "/api/health") {
       return Response.json({
         status: "ok",
-        service: "web-ts7-vite-worker",
+        service: "__PROJECT_NAME__-worker",
         runtime: "cloudflare-workers",
         timestamp: new Date().toISOString(),
       });

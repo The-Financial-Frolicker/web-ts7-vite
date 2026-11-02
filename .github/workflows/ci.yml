@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# This workflow only validates the repository. It never deploys and needs no
+# secrets, so the token is read-only.
+permissions:
+  contents: read
+
+# A newer run for the same branch supersedes an in-progress one.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Keep the pinned toolchain install non-interactive.
+  MISE_YES: "1"
+  # Deno's update check adds noise and is pointless on a pinned toolchain.
+  DENO_NO_UPDATE_CHECK: "1"
+
+jobs:
+  validate:
+    name: Validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          # The workflow only reads the repository.
+          persist-credentials: false
+
+      - name: Install the pinned toolchain with mise
+        uses: jdx/mise-action@v5
+        with:
+          # Installs every tool pinned in .mise.toml at its exact version,
+          # including the Emscripten SDK. The action caches mise's data
+          # directory (installs and downloads) under a key derived from
+          # .mise.toml, so the ~1.7 GB emsdk download is reused across runs.
+          # Saving in the post step also captures Emscripten's compiler cache,
+          # which is generated inside the SDK during the build.
+          cache: true
+          cache_save_post: true
+          install: true
+
+      - name: Verify the pinned toolchain
+        run: |
+          mise exec -- node --version
+          mise exec -- deno --version
+          mise exec -- cmake --version | head -n 1
+          mise exec -- ninja --version
+          mise exec -- emcc --version | head -n 1
+
+      - name: Cache Deno's npm download cache
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/deno
+          key: deno-npm-${{ runner.os }}-${{ hashFiles('deno.lock') }}
+          restore-keys: |
+            deno-npm-${{ runner.os }}-
+
+      - name: Install npm dependencies
+        run: mise exec -- deno install --frozen
+
+      - name: Formatting check
+        run: mise exec -- deno task fmt:check
+
+      - name: Lint check
+        run: mise exec -- deno task lint
+
+      - name: Client typecheck
+        run: mise exec -- deno task check:client
+
+      - name: Worker typecheck
+        run: mise exec -- deno task check:worker
+
+      - name: Project initialisation tests
+        run: mise exec -- deno task test:init
+
+      # The template's identity placeholder is not a valid Cloudflare Worker
+      # name, so this stage builds a throwaway initialised copy: worker types
+      # freshness check, WASM build, build-tree and published-artifact smoke
+      # tests, and `wrangler deploy --dry-run`. It never deploys.
+      - name: Generated types, WASM build, smoke tests and deployment dry run
+        run: mise exec -- bash scripts/ci.sh build

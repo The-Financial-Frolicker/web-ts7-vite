@@ -10,7 +10,9 @@ const wasmPath = resolve("dist/client/wasm/wasm_math.wasm");
 
 for (const p of [jsPath, wasmPath]) {
   if (!existsSync(p) || statSync(p).size === 0) {
-    throw new Error(`Missing/empty built artifact: ${p}\nRun the full build (scripts/build.sh) first.`);
+    throw new Error(
+      `Missing/empty built artifact: ${p}\nRun the full build (scripts/build.sh) first.`,
+    );
   }
 }
 
@@ -18,4 +20,6 @@ const { default: createWasmMath } = await import(pathToFileURL(jsPath).href);
 const wasm = await createWasmMath();
 const result = wasm._add(19, 23);
 console.log("published dist/client 19 + 23 =", result);
-if (result !== 42) throw new Error(`Published artifact produced wrong result: ${result}`);
+if (result !== 42) {
+  throw new Error(`Published artifact produced wrong result: ${result}`);
+}

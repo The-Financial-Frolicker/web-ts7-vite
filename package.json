@@ -1,5 +1,5 @@
 {
-  "name": "web-ts7-vite",
+  "name": "__PROJECT_NAME__",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -9,6 +9,15 @@
   "scripts": {
     "dev": "vite",
     "build": "bash scripts/build.sh",
+    "fmt": "deno fmt",
+    "fmt:check": "deno fmt --check",
+    "lint": "deno lint",
+    "check:client": "tsc",
+    "check:worker": "tsc --project worker/tsconfig.json",
+    "validate": "deno task validate",
+    "ci": "bash scripts/ci.sh",
+    "init:project": "node scripts/init-project.mjs",
+    "test:init": "node --test scripts/init-project.test.mjs",
     "test:wasm": "node wasm/test.mjs",
     "test:wasm:published": "node scripts/test-wasm-published.mjs",
     "preview": "vite preview"
@@ -20,4 +29,3 @@
     "wrangler": "4.156.0"
   }
 }
-

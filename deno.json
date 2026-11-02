@@ -1,12 +1,31 @@
 {
+  "fmt": {
+    "exclude": [
+      "worker-configuration.d.ts",
+      "README.md"
+    ]
+  },
+  "lint": {
+    "exclude": [
+      "worker-configuration.d.ts"
+    ]
+  },
   "tasks": {
     "build": "bash scripts/build.sh",
-    "test:wasm": "node wasm/test.mjs",
-    "test:wasm:published": "node scripts/test-wasm-published.mjs",
+    "fmt": "deno fmt",
+    "fmt:check": "deno fmt --check",
+    "lint": "deno lint",
+    "check:client": "tsc",
     "check:worker": "tsc --project worker/tsconfig.json",
     "check:worker-types": "bash scripts/worker-types.sh --check",
     "types:worker": "bash scripts/worker-types.sh",
+    "init:project": "node scripts/init-project.mjs",
+    "test:init": "node --test scripts/init-project.test.mjs",
+    "test:wasm": "node wasm/test.mjs",
+    "test:wasm:published": "node scripts/test-wasm-published.mjs",
+    "validate": "deno task fmt:check && deno task lint && deno task check:client && deno task check:worker && deno task test:init",
+    "ci": "bash scripts/ci.sh",
     "deploy": "bash scripts/deploy.sh",
     "deploy:dry-run": "bash scripts/deploy.sh --dry-run"
-    }
+  }
 }

@@ -1,10 +1,10 @@
-import './style.css'
-import heroImg from './assets/hero.png'
-import typescriptLogo from './assets/typescript.svg'
-import viteLogo from './assets/vite.svg'
-import { setupCounter } from './counter.ts'
+import "./style.css";
+import heroImg from "./assets/hero.png";
+import typescriptLogo from "./assets/typescript.svg";
+import viteLogo from "./assets/vite.svg";
+import { setupCounter } from "./counter.ts";
 
-document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
+document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
 <section id="center">
   <div class="hero">
     <img src="${heroImg}" class="base" width="170" height="179">
@@ -55,73 +55,73 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
 
 <div class="ticks"></div>
 <section id="spacer"></section>
-`
+`;
 
-setupCounter(document.querySelector<HTMLButtonElement>('#counter')!)
+setupCounter(document.querySelector<HTMLButtonElement>("#counter")!);
 type WasmMathModule = {
-    _add(a: number, b: number): number;
+  _add(a: number, b: number): number;
 };
 
 type WasmMathFactory = () => Promise<WasmMathModule>;
 
-const wasmOutput = document.createElement('p');
-wasmOutput.id = 'wasm-result';
-wasmOutput.textContent = 'Loading WebAssembly...';
+const wasmOutput = document.createElement("p");
+wasmOutput.id = "wasm-result";
+wasmOutput.textContent = "Loading WebAssembly...";
 
-document.querySelector('#app')?.append(wasmOutput);
+document.querySelector("#app")?.append(wasmOutput);
 
 async function initialiseWasm(): Promise<void> {
-    try {
-        const moduleUrl = new URL(
-            '/wasm/wasm_math.js',
-            window.location.href
-        );
+  try {
+    const moduleUrl = new URL(
+      "/wasm/wasm_math.js",
+      globalThis.location.href,
+    );
 
-        const wasmModule = await import(
-            /* @vite-ignore */ moduleUrl.href
-        ) as { default: WasmMathFactory };
+    const wasmModule = await import(
+      /* @vite-ignore */ moduleUrl.href
+    ) as { default: WasmMathFactory };
 
-        const wasm = await wasmModule.default();
+    const wasm = await wasmModule.default();
 
-        const result = wasm._add(19, 23);
+    const result = wasm._add(19, 23);
 
-        wasmOutput.textContent = `WebAssembly result: 19 + 23 = ${result}`;
-    } catch (error) {
-        wasmOutput.textContent = 'WebAssembly initialisation failed.';
-        console.error('WASM initialisation error:', error);
-    }
+    wasmOutput.textContent = `WebAssembly result: 19 + 23 = ${result}`;
+  } catch (error) {
+    wasmOutput.textContent = "WebAssembly initialisation failed.";
+    console.error("WASM initialisation error:", error);
+  }
 }
 
 void initialiseWasm();
 
 type WorkerHealth = {
-    status: string;
-    service: string;
-    runtime: string;
-    timestamp: string;
+  status: string;
+  service: string;
+  runtime: string;
+  timestamp: string;
 };
 
-const workerOutput = document.createElement('p');
-workerOutput.id = 'worker-health';
-workerOutput.textContent = 'Checking Cloudflare Worker...';
-document.querySelector('#app')?.append(workerOutput);
+const workerOutput = document.createElement("p");
+workerOutput.id = "worker-health";
+workerOutput.textContent = "Checking Cloudflare Worker...";
+document.querySelector("#app")?.append(workerOutput);
 
 async function checkWorker(): Promise<void> {
-    try {
-        const response = await fetch('/api/health');
+  try {
+    const response = await fetch("/api/health");
 
-        if (!response.ok) {
-            throw new Error(`HTTP ${response.status}`);
-        }
-
-        const health = await response.json() as WorkerHealth;
-
-        workerOutput.textContent =
-            `Worker: ${health.status} | ${health.runtime} | ${health.timestamp}`;
-    } catch (error) {
-        workerOutput.textContent = 'Cloudflare Worker request failed.';
-        console.error('Worker health check:', error);
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
     }
+
+    const health = await response.json() as WorkerHealth;
+
+    workerOutput.textContent =
+      `Worker: ${health.status} | ${health.runtime} | ${health.timestamp}`;
+  } catch (error) {
+    workerOutput.textContent = "Cloudflare Worker request failed.";
+    console.error("Worker health check:", error);
+  }
 }
 
 void checkWorker();
