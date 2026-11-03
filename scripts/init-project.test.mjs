@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import {
   chmodSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import os from "node:os";
@@ -14,6 +17,7 @@ import path from "node:path";
 import { after, describe, it } from "node:test";
 
 import {
+  applyChanges,
   deriveWorkerServiceName,
   EXIT_OK,
   EXIT_STATE,
@@ -67,14 +71,8 @@ function initialisedFiles(name) {
   return files;
 }
 
-/**
- * Create a temporary project fixture. Pass `null` as a file's contents to omit
- * that file.
- */
-function makeProject(overrides = {}) {
-  const root = mkdtempSync(path.join(os.tmpdir(), "init-project-"));
-  temporaryRoots.push(root);
-
+/** Write the fixture files into an existing directory. */
+function writeProject(root, overrides = {}) {
   for (
     const [file, contents] of Object.entries({ ...baseFiles(), ...overrides })
   ) {
@@ -84,6 +82,16 @@ function makeProject(overrides = {}) {
     mkdirSync(path.dirname(absolute), { recursive: true });
     writeFileSync(absolute, contents);
   }
+}
+
+/**
+ * Create a temporary project fixture. Pass `null` as a file's contents to omit
+ * that file.
+ */
+function makeProject(overrides = {}) {
+  const root = mkdtempSync(path.join(os.tmpdir(), "init-project-"));
+  temporaryRoots.push(root);
+  writeProject(root, overrides);
 
   return root;
 }
@@ -160,6 +168,38 @@ function expectInitError(fn, exitCode, pattern) {
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
+
+/** Set when the process runs with privileges that bypass permission bits. */
+const permissionSkip = typeof process.getuid === "function" &&
+    process.getuid() === 0
+  ? "requires a non-root user"
+  : false;
+
+/** Set when the platform cannot create symbolic links. */
+const symlinkSkip = (() => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), "init-project-links-"));
+  temporaryRoots.push(directory);
+
+  try {
+    symlinkSync("target", path.join(directory, "link"));
+    return false;
+  } catch {
+    return "requires symbolic link support";
+  }
+})();
+
+/** True when fixtures in the temp directory are scanned through git. */
+const tempDirIsGitCheckout = (() => {
+  try {
+    execFileSync("git", ["rev-parse", "--is-inside-work-tree"], {
+      cwd: os.tmpdir(),
+      stdio: "ignore",
+    });
+    return true;
+  } catch {
+    return false;
+  }
+})();
 
 describe("validateProjectName", () => {
   it("accepts names valid for both npm packages and Cloudflare Workers", () => {
@@ -346,6 +386,23 @@ describe("initialiseProject", () => {
     assert.match(stdout, /No files were changed/);
   });
 
+  it("validates project state during a dry run", () => {
+    const files = initialisedFiles("good-app");
+    files["wrangler.jsonc"] = files["wrangler.jsonc"].replace(
+      '"good-app"',
+      '"other-app"',
+    );
+    const root = makeProject(files);
+    const before = fileTree(root);
+
+    expectInitError(
+      () => init(root, "good-app", { dryRun: true }),
+      EXIT_STATE,
+      /identity values are inconsistent/,
+    );
+    assert.deepEqual(fileTree(root), before);
+  });
+
   it("is a no-op for a fully initialised project", () => {
     const root = makeProject(initialisedFiles("ready-app"));
     const before = fileTree(root);
@@ -392,6 +449,19 @@ describe("initialiseProject", () => {
     assert.deepEqual(fileTree(root), before);
   });
 
+  it("aborts when a required identity file is a directory", () => {
+    const root = makeProject({ "package.json": null });
+    mkdirSync(path.join(root, "package.json"));
+    const before = fileTree(root);
+
+    expectInitError(
+      () => init(root, "new-app"),
+      EXIT_STATE,
+      /package\.json is not a regular file/,
+    );
+    assert.deepEqual(fileTree(root), before);
+  });
+
   it("aborts when the placeholder appears outside the five declared files", () => {
     const root = makeProject({
       "docs/notes.md": `Copied from the template: ${PLACEHOLDER}\n`,
@@ -404,6 +474,38 @@ describe("initialiseProject", () => {
       /outside the 5 declared identity files[\s\S]*docs\/notes\.md \(1 occurrence/,
     );
     assert.deepEqual(fileTree(root), before);
+  });
+
+  it("ignores placeholders in generated and installed directories", () => {
+    const root = makeProject({
+      "node_modules/some-pkg/index.js": `// imported from ${PLACEHOLDER}\n`,
+      "dist/assets/app.js": `// built from ${PLACEHOLDER}\n`,
+    });
+    const before = fileTree(root);
+    const { result } = init(root, "new-app");
+
+    assert.equal(result.status, "initialised");
+    assert.match(
+      read(root, "node_modules/some-pkg/index.js"),
+      new RegExp(escapeRegExp(PLACEHOLDER)),
+    );
+    assert.deepEqual(
+      changedFiles(before, fileTree(root)),
+      TARGETS.map((target) => target.file).sort(),
+    );
+  });
+
+  it("ignores binary files that contain the placeholder bytes", () => {
+    const root = makeProject({
+      "public/logo.bin": Buffer.concat([
+        Buffer.from([0x00, 0x01, 0x02]),
+        Buffer.from(PLACEHOLDER),
+      ]),
+    });
+
+    const { result } = init(root, "new-app");
+
+    assert.equal(result.status, "initialised");
   });
 
   it("ignores the initialiser's own tooling file", () => {
@@ -445,6 +547,23 @@ describe("initialiseProject", () => {
     assert.deepEqual(fileTree(root), before);
   });
 
+  it("aborts when some files are untouched and others are initialised", () => {
+    const files = baseFiles();
+    files["package.json"] = files["package.json"].replace(
+      PLACEHOLDER,
+      "new-app",
+    );
+    const root = makeProject(files);
+    const before = fileTree(root);
+
+    expectInitError(
+      () => init(root, "new-app"),
+      EXIT_STATE,
+      /has unexpected placeholder counts[\s\S]*package\.json: 0 placeholder/,
+    );
+    assert.deepEqual(fileTree(root), before);
+  });
+
   it("aborts when a placeholder is present but not in its identity field", () => {
     const root = makeProject({
       "package.json":
@@ -477,6 +596,26 @@ describe("initialiseProject", () => {
     assert.deepEqual(fileTree(root), before);
   });
 
+  it("aborts when an initialised project's name is not a valid project name", () => {
+    for (
+      const name of [
+        "Bad Name",
+        "my_app",
+        "a".repeat(MAX_BASE_NAME_LENGTH + 1),
+      ]
+    ) {
+      const root = makeProject(initialisedFiles(name));
+      const before = fileTree(root);
+
+      expectInitError(
+        () => init(root, "good-app"),
+        EXIT_STATE,
+        /declares a name this template cannot represent[\s\S]*Invalid project name/,
+      );
+      assert.deepEqual(fileTree(root), before);
+    }
+  });
+
   it("aborts when no placeholders remain but package.json has no usable name", () => {
     const files = initialisedFiles("good-app");
     files["package.json"] = `{\n  "private": true\n}\n`;
@@ -505,11 +644,7 @@ describe("initialiseProject", () => {
 
   it(
     "reports a write failure without leaving temporary files",
-    {
-      skip: typeof process.getuid === "function" && process.getuid() === 0
-        ? "requires a non-root user"
-        : false,
-    },
+    { skip: permissionSkip },
     () => {
       const root = makeProject();
       const before = fileTree(root);
@@ -529,6 +664,112 @@ describe("initialiseProject", () => {
     },
   );
 
+  it(
+    "reports an unreadable identity file without changing anything",
+    { skip: permissionSkip },
+    () => {
+      const root = makeProject();
+      const before = fileTree(root);
+      const file = path.join(root, "README.md");
+      const mode = statSync(file).mode & 0o777;
+      chmodSync(file, 0o000);
+
+      try {
+        expectInitError(
+          () => init(root, "new-app"),
+          EXIT_STATE,
+          /Cannot read README\.md/,
+        );
+      } finally {
+        chmodSync(file, mode);
+      }
+
+      assert.deepEqual(fileTree(root), before);
+    },
+  );
+
+  it(
+    "reports an unreadable directory found by the straggler scan",
+    {
+      skip: permissionSkip ||
+        (tempDirIsGitCheckout ? "requires walk-mode scanning" : false),
+    },
+    () => {
+      const root = makeProject({
+        "docs/notes.md": "Notes without identity.\n",
+      });
+      const before = fileTree(root);
+      const docs = path.join(root, "docs");
+      const mode = statSync(docs).mode & 0o777;
+      chmodSync(docs, 0o000);
+
+      try {
+        expectInitError(
+          () => init(root, "new-app"),
+          EXIT_STATE,
+          /Cannot scan the project for stray/,
+        );
+      } finally {
+        chmodSync(docs, mode);
+      }
+
+      assert.deepEqual(fileTree(root), before);
+    },
+  );
+
+  it(
+    "refuses identity files that resolve outside the project root",
+    { skip: symlinkSkip },
+    () => {
+      const outside = mkdtempSync(
+        path.join(os.tmpdir(), "init-project-outside-"),
+      );
+      temporaryRoots.push(outside);
+      writeFileSync(
+        path.join(outside, "index.ts"),
+        baseFiles()["worker/index.ts"],
+      );
+
+      const root = makeProject({ "worker/index.ts": null });
+      symlinkSync(outside, path.join(root, "worker"));
+
+      expectInitError(
+        () => init(root, "new-app"),
+        EXIT_STATE,
+        /worker\/index\.ts resolves to .*outside the project root/,
+      );
+      assert.deepEqual(readdirSync(outside), ["index.ts"]);
+    },
+  );
+
+  it(
+    "aborts when an identity file is a symbolic link",
+    { skip: symlinkSkip },
+    () => {
+      const root = makeProject();
+      // Keep the real contents in a directory the straggler scan ignores.
+      mkdirSync(path.join(root, "dist"));
+      writeFileSync(
+        path.join(root, "dist", "wrangler.real.jsonc"),
+        baseFiles()["wrangler.jsonc"],
+      );
+      rmSync(path.join(root, "wrangler.jsonc"));
+      symlinkSync(
+        "dist/wrangler.real.jsonc",
+        path.join(root, "wrangler.jsonc"),
+      );
+
+      const before = fileTree(root);
+
+      expectInitError(
+        () => init(root, "new-app"),
+        EXIT_STATE,
+        /wrangler\.jsonc is a symbolic link/,
+      );
+      assert.deepEqual(fileTree(root), before);
+    },
+  );
+
   it("rejects a directory that is not a template", () => {
     const root = mkdtempSync(path.join(os.tmpdir(), "init-project-empty-"));
     temporaryRoots.push(root);
@@ -537,6 +778,80 @@ describe("initialiseProject", () => {
       () => init(root, "new-app"),
       EXIT_STATE,
       /required identity file/,
+    );
+  });
+});
+
+describe("applyChanges", () => {
+  it(
+    "refuses a symbolic link introduced after validation",
+    { skip: symlinkSkip },
+    () => {
+      const root = makeProject();
+      const target = path.join(root, "wrangler.jsonc");
+      const before = read(root, "wrangler.jsonc");
+      rmSync(target);
+      symlinkSync("package.json", target);
+
+      expectInitError(
+        () =>
+          applyChanges(root, [
+            {
+              file: "wrangler.jsonc",
+              before,
+              after: '{\n  "name": "new-app"\n}\n',
+            },
+          ]),
+        EXIT_WRITE,
+        /wrangler\.jsonc is a symbolic link; refusing to replace it[\s\S]*No project files were modified/,
+      );
+
+      assert.equal(lstatSync(target).isSymbolicLink(), true);
+      assert.deepEqual(
+        readdirSync(root).filter((name) => name.includes(".init-project-")),
+        [],
+      );
+    },
+  );
+
+  it("rolls back renames that succeeded before a later rename failed", () => {
+    const root = makeProject();
+    const packageBefore = read(root, "package.json");
+    const wranglerBefore = read(root, "wrangler.jsonc");
+    const packageMode = statSync(path.join(root, "package.json")).mode & 0o777;
+    const replacement = '{\n  "name": "new-app"\n}\n';
+    const changes = [
+      {
+        file: "package.json",
+        before: packageBefore,
+        after: replacement,
+      },
+      {
+        file: "wrangler.jsonc",
+        before: wranglerBefore,
+        after: replacement,
+      },
+    ];
+
+    // Simulate an external change between validation and commit: the second
+    // target has become a directory, which a rename cannot replace.
+    rmSync(path.join(root, "wrangler.jsonc"));
+    mkdirSync(path.join(root, "wrangler.jsonc"));
+
+    expectInitError(
+      () => applyChanges(root, changes),
+      EXIT_WRITE,
+      /while replacing wrangler\.jsonc[\s\S]*rolled back: package\.json/,
+    );
+
+    assert.equal(read(root, "package.json"), packageBefore);
+    assert.equal(
+      statSync(path.join(root, "package.json")).mode & 0o777,
+      packageMode,
+    );
+    assert.deepEqual(
+      readdirSync(root).filter((name) => name.includes(".init-project-")),
+      [],
     );
   });
 });
@@ -626,11 +941,79 @@ describe("CLI", () => {
       root: "/tmp/x",
     });
 
+    assert.deepEqual(parseArgs(["--root", "/x", "--root", "/x", "my-app"]), {
+      dryRun: false,
+      help: false,
+      name: "my-app",
+      root: "/x",
+    });
+
+    expectInitError(
+      () => parseArgs(["--root", "/x", "--root", "/y", "my-app"]),
+      EXIT_USAGE,
+      /--root was given more than once with different values/,
+    );
+    // Values are compared literally, so equivalent spellings fail closed.
+    expectInitError(
+      () => parseArgs(["--root", "/x", "--root", "/x/", "my-app"]),
+      EXIT_USAGE,
+      /--root was given more than once with different values/,
+    );
+    expectInitError(
+      () => parseArgs(["--root", "--dry-run", "my-app"]),
+      EXIT_USAGE,
+      /--root requires a directory argument/,
+    );
+    expectInitError(
+      () => parseArgs(["--root=", "my-app"]),
+      EXIT_USAGE,
+      /--root requires a directory argument/,
+    );
     expectInitError(
       () => parseArgs(["one", "two"]),
       EXIT_USAGE,
       /Expected one project name/,
     );
     expectInitError(() => parseArgs(["--root"]), EXIT_USAGE, /--root requires/);
+  });
+
+  it("accepts a relative --root path containing spaces", () => {
+    const parent = mkdtempSync(path.join(os.tmpdir(), "init-project-space-"));
+    temporaryRoots.push(parent);
+    const root = path.join(parent, "project with spaces");
+    mkdirSync(root);
+    writeProject(root);
+
+    const output = capture();
+    const relative = path.relative(process.cwd(), root);
+
+    assert.equal(main(["new-app", "--root", relative], output.io), EXIT_OK);
+
+    assert.match(read(root, "package.json"), /"name": "new-app"/);
+    assert.equal(output.stderr.join("\n"), "");
+  });
+
+  it("returns 1 when --root is not a usable directory", () => {
+    const missing = mkdtempSync(path.join(os.tmpdir(), "init-project-gone-"));
+    rmSync(missing, { recursive: true, force: true });
+    const missingOutput = capture();
+
+    assert.equal(
+      main(["new-app", "--root", missing], missingOutput.io),
+      EXIT_USAGE,
+    );
+    assert.match(missingOutput.stderr.join("\n"), /Project root not found/);
+
+    const parent = mkdtempSync(path.join(os.tmpdir(), "init-project-file-"));
+    temporaryRoots.push(parent);
+    const file = path.join(parent, "not-a-directory");
+    writeFileSync(file, "not a project\n");
+    const fileOutput = capture();
+
+    assert.equal(main(["new-app", "--root", file], fileOutput.io), EXIT_USAGE);
+    assert.match(
+      fileOutput.stderr.join("\n"),
+      /Project root is not a directory/,
+    );
   });
 });

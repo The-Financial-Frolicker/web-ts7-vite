@@ -7,12 +7,19 @@
  *
  *   1. Read and validate the whole project state, then build every replacement
  *      in memory. Nothing is written during this phase.
- *   2. Stage the new contents in temporary files and atomically rename them
- *      over the targets.
+ *   2. Stage the new contents in temporary files next to their targets, then
+ *      rename each staged file over its target. Each individual rename is
+ *      atomic, but the five renames are not one transaction: a failure part
+ *      way through leaves some targets updated and is handled by best-effort
+ *      rollback, which can itself fail.
  *
  * Only an untouched template is initialised. A fully initialised project is a
  * no-op. Any other state (partially initialised, customised or inconsistent)
  * aborts without writing, so customised values are never overwritten.
+ *
+ * The filesystem checks below are snapshots, not locks. Initialisation assumes
+ * nothing else is modifying the project tree while it runs; see applyChanges
+ * for exactly what is and is not guaranteed.
  *
  * Exit codes: 0 success/no-op/dry-run, 1 usage/name error, 2 project state
  * error, 3 write failure.
@@ -26,6 +33,7 @@ import {
   lstatSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   renameSync,
   statSync,
   unlinkSync,
@@ -403,6 +411,90 @@ function describeTargets(counts, identity) {
   ).join("\n");
 }
 
+/** Resolve the project root once so redirected targets can be detected. */
+function realProjectRoot(root) {
+  try {
+    return realpathSync(root);
+  } catch (error) {
+    throw new InitError(
+      `Cannot read the project root ${root} (${error.message}). No files were changed.`,
+      EXIT_STATE,
+    );
+  }
+}
+
+/** True when `realTarget` is a file strictly inside `realRoot`. */
+function isInsideRoot(realRoot, realTarget) {
+  const relative = path.relative(realRoot, realTarget);
+
+  return relative !== "" &&
+    relative !== ".." &&
+    !relative.startsWith(`..${path.sep}`) &&
+    !path.isAbsolute(relative);
+}
+
+/**
+ * Read one identity file as it exists during inspection, rejecting symbolic
+ * links, directories and special files, and any path that currently resolves
+ * outside the project root (for example through a symlinked directory).
+ *
+ * These are inspection-time checks; they do not lock the tree (see
+ * applyChanges).
+ */
+function readTargetFile(root, target, realRoot) {
+  const absolute = path.join(root, target.file);
+  let stats;
+
+  try {
+    stats = lstatSync(absolute);
+  } catch (error) {
+    throw new InitError(
+      `Cannot read ${target.file} (${error.message}). No files were changed.`,
+      EXIT_STATE,
+    );
+  }
+
+  if (stats.isSymbolicLink()) {
+    throw new InitError(
+      `Cannot initialise: ${target.file} is a symbolic link. Identity files must be regular files; replace the link with the file it points to. No files were changed.`,
+      EXIT_STATE,
+    );
+  }
+
+  if (!stats.isFile()) {
+    throw new InitError(
+      `Cannot initialise: ${target.file} is not a regular file. Directories and special files cannot carry project identity. No files were changed.`,
+      EXIT_STATE,
+    );
+  }
+
+  let realTarget;
+  try {
+    realTarget = realpathSync(absolute);
+  } catch (error) {
+    throw new InitError(
+      `Cannot read ${target.file} (${error.message}). No files were changed.`,
+      EXIT_STATE,
+    );
+  }
+
+  if (!isInsideRoot(realRoot, realTarget)) {
+    throw new InitError(
+      `Cannot initialise: ${target.file} resolves to ${realTarget}, outside the project root ${realRoot}. Refusing to write through a symbolic link that leaves the project. No files were changed.`,
+      EXIT_STATE,
+    );
+  }
+
+  try {
+    return readFileSync(absolute, "utf8");
+  } catch (error) {
+    throw new InitError(
+      `Cannot read ${target.file} (${error.message}). No files were changed.`,
+      EXIT_STATE,
+    );
+  }
+}
+
 /**
  * Classify the project without modifying anything.
  *
@@ -412,7 +504,7 @@ function describeTargets(counts, identity) {
  *
  * Every other state throws an InitError with exit code 2.
  */
-export function inspectProject(root, files = listRepositoryFiles(root)) {
+export function inspectProject(root, files) {
   const missing = TARGETS.filter((target) =>
     !existsSync(path.join(root, target.file))
   ).map(
@@ -430,19 +522,10 @@ export function inspectProject(root, files = listRepositoryFiles(root)) {
     );
   }
 
+  const realRoot = realProjectRoot(root);
   const contents = new Map();
   for (const target of TARGETS) {
-    try {
-      contents.set(
-        target.file,
-        readFileSync(path.join(root, target.file), "utf8"),
-      );
-    } catch (error) {
-      throw new InitError(
-        `Cannot read ${target.file} (${error.message}). No files were changed.`,
-        EXIT_STATE,
-      );
-    }
+    contents.set(target.file, readTargetFile(root, target, realRoot));
   }
 
   const counts = new Map(
@@ -457,12 +540,21 @@ export function inspectProject(root, files = listRepositoryFiles(root)) {
   const selfFile = path.relative(root, fileURLToPath(import.meta.url)).split(
     path.sep,
   ).join("/");
-  const stragglers = scanForPlaceholders(root, files).filter(
-    (hit) =>
-      hit.file !== selfFile &&
-      !TEMPLATE_TOOLING_FILES.has(hit.file) &&
-      !TARGET_FILES.has(hit.file),
-  );
+  let stragglers;
+  try {
+    const scanned = files ?? listRepositoryFiles(root);
+    stragglers = scanForPlaceholders(root, scanned).filter(
+      (hit) =>
+        hit.file !== selfFile &&
+        !TEMPLATE_TOOLING_FILES.has(hit.file) &&
+        !TARGET_FILES.has(hit.file),
+    );
+  } catch (error) {
+    throw new InitError(
+      `Cannot scan the project for stray ${PLACEHOLDER} tokens (${error.message}). No files were changed.`,
+      EXIT_STATE,
+    );
+  }
 
   if (stragglers.length > 0) {
     const detail = stragglers
@@ -495,6 +587,18 @@ export function inspectProject(root, files = listRepositoryFiles(root)) {
     if (typeof declaredName !== "string" || declaredName.length === 0) {
       throw new InitError(
         `No placeholders remain, so the project may already be initialised, but package.json does not declare a usable "name". Cannot verify a consistent identity. No files were changed.`,
+        EXIT_STATE,
+      );
+    }
+
+    // A consistent identity is only a valid no-op if the agreed name would
+    // have been accepted by this initialiser in the first place.
+    try {
+      validateProjectName(declaredName);
+    } catch (error) {
+      if (!(error instanceof InitError)) throw error;
+      throw new InitError(
+        `No placeholders remain, so the project may already be initialised, but package.json declares a name this template cannot represent. ${error.message}\n\nRefusing to accept an invalid project identity. No files were changed.`,
         EXIT_STATE,
       );
     }
@@ -609,23 +713,24 @@ function stageFile(target, contents, mode) {
       directory,
       `.${base}.init-project-${randomUUID()}.tmp`,
     );
-    let created = false;
 
     try {
       writeFileSync(temporary, contents, { flag: "wx", mode: mode & 0o777 });
-      created = true;
       chmodSync(temporary, mode & 0o777);
       return temporary;
     } catch (error) {
-      if (created) {
-        try {
-          unlinkSync(temporary);
-        } catch {
-          // Best effort: the original error is more useful.
-        }
+      // EEXIST means the name was taken by something we must not delete.
+      if (error.code === "EEXIST") continue;
+
+      // The file may have been created (and partially written) even though
+      // the call failed, so remove it unconditionally. ENOENT is expected
+      // when creation itself failed.
+      try {
+        unlinkSync(temporary);
+      } catch {
+        // Best effort: the original error is more useful.
       }
 
-      if (!created && error.code === "EEXIST") continue;
       throw error;
     }
   }
@@ -634,16 +739,40 @@ function stageFile(target, contents, mode) {
 }
 
 /**
- * Phase 2b: stage every new file first, then atomically rename them over the
- * targets. If anything fails, remove staged files and best-effort roll back any
- * renames that already happened.
+ * Phase 2b: stage every new file first, then rename each staged file over its
+ * target.
+ *
+ * Each rename is atomic, but the set of renames is not a transaction: if one
+ * fails, targets renamed before it already contain new contents. The staged
+ * temporary files are removed and completed renames are rolled back in reverse
+ * order using the contents captured during validation. Rollback is best effort:
+ * it can fail too (for example if the directory has become read-only), and the
+ * error then names the files that may be partially initialised.
+ *
+ * Path safety: every operation re-resolves the lexical path from `root`, and
+ * Node has no renameat/openat equivalent, so the containment checks in
+ * `inspectProject` and the `lstatSync` below are snapshots rather than locks.
+ * The `lstatSync` refusal covers only a symbolic link at the final path
+ * component: it stops this code from replacing such a link, but it cannot see a
+ * parent directory that was replaced by a symbolic link after inspection.
+ * Consequently, a concurrent process that swaps a directory for a link can
+ * redirect staging, replacement or rollback outside the root. This function is
+ * not hardened against concurrent tampering with the tree.
+ *
+ * Rollback does not follow a symlink at the final component: `rename` replaces
+ * the link itself rather than its target. A redirected parent directory would
+ * still redirect rollback, as it would the original write.
+ *
+ * Exported so tests can exercise the commit and rollback path directly.
  */
-function applyChanges(root, changes) {
+export function applyChanges(root, changes) {
   const staged = [];
   const renamed = [];
+  let operation = "preparing the changes";
 
   try {
     for (const change of changes) {
+      operation = `staging ${change.file}`;
       const target = path.join(root, change.file);
       const linkStats = lstatSync(target);
 
@@ -661,6 +790,7 @@ function applyChanges(root, changes) {
     }
 
     for (const entry of staged) {
+      operation = `replacing ${entry.change.file}`;
       renameSync(entry.temporary, entry.target);
       renamed.push(entry);
     }
@@ -715,7 +845,7 @@ function applyChanges(root, changes) {
     }
 
     throw new InitError(
-      `Writing the initialised files failed: ${error.message} ${outcome}`,
+      `Writing the initialised files failed while ${operation}: ${error.message} ${outcome}`,
       EXIT_WRITE,
     );
   }
@@ -733,8 +863,21 @@ export function initialiseProject(options = {}) {
   const dryRun = options.dryRun === true;
   const log = typeof options.log === "function" ? options.log : () => {};
 
-  if (!existsSync(root) || !statSync(root).isDirectory()) {
-    throw new InitError(`Project root not found or not a directory: ${root}`);
+  if (!existsSync(root)) {
+    throw new InitError(`Project root not found: ${root}`);
+  }
+
+  let rootStats;
+  try {
+    rootStats = statSync(root);
+  } catch (error) {
+    throw new InitError(
+      `Project root cannot be inspected: ${root} (${error.message}).`,
+    );
+  }
+
+  if (!rootStats.isDirectory()) {
+    throw new InitError(`Project root is not a directory: ${root}`);
   }
 
   // Phase 1: read and validate all repository state. No writes happen here.
@@ -849,6 +992,24 @@ export function parseArgs(argv) {
   };
   const positional = [];
   let endOfOptions = false;
+  let rootSpecified = false;
+
+  const setRoot = (value) => {
+    // Compared literally: no canonicalisation, so equivalent spellings such as
+    // "/x" and "/x/" are treated as a conflict and fail closed.
+    if (rootSpecified && value !== options.root) {
+      throw new InitError(
+        `--root was given more than once with different values: ${
+          JSON.stringify(options.root)
+        } and ${
+          JSON.stringify(value)
+        }. Values are compared literally, so use one spelling.`,
+      );
+    }
+
+    options.root = value;
+    rootSpecified = true;
+  };
 
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
@@ -863,17 +1024,20 @@ export function parseArgs(argv) {
       options.help = true;
     } else if (argument === "--root") {
       const value = argv[index + 1];
-      if (value === undefined || value.length === 0) {
-        throw new InitError("--root requires a directory argument.");
+      // An option-like next token is a forgotten value, not a directory name.
+      if (value === undefined || value.length === 0 || value.startsWith("-")) {
+        throw new InitError(
+          '--root requires a directory argument. Use --root=DIR when the directory name itself begins with "-".',
+        );
       }
-      options.root = value;
+      setRoot(value);
       index += 1;
     } else if (argument.startsWith("--root=")) {
       const value = argument.slice("--root=".length);
       if (value.length === 0) {
         throw new InitError("--root requires a directory argument.");
       }
-      options.root = value;
+      setRoot(value);
     } else if (argument.startsWith("-")) {
       throw new InitError(
         `Unknown option ${JSON.stringify(argument)}.\n\n${usage()}`,
