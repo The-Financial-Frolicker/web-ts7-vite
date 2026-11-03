@@ -94,7 +94,7 @@ run_build_checks() {
     # The placeholder is not a valid Worker name, so Wrangler and the
     # Cloudflare Vite plugin refuse to run on an untouched template. An already
     # initialised project is a no-op here.
-    node scripts/init-project.mjs ci-smoke
+    deno task init:project ci-smoke
 
     echo "==> Generated Worker types freshness check"
     deno task check:worker-types

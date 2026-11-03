@@ -30,8 +30,8 @@ the shortest path is:
 mise trust
 mise install
 mise exec -- deno install --frozen
-mise exec -- node scripts/init-project.mjs my-app --dry-run
-mise exec -- node scripts/init-project.mjs my-app
+mise exec -- deno task init:project my-app --dry-run
+mise exec -- deno task init:project my-app
 mise exec -- deno task validate
 mise exec -- deno task build
 mise exec -- deno task deploy:dry-run
@@ -84,7 +84,7 @@ not become a requirement in another.
 | --- | --- | --- | --- |
 | Encapsulated toolchain | Emscripten 6.0.13 and everything it drives | its own Node, Python, LLVM, Binaryen | the toolchain itself |
 | External ecosystem | Vite 8.3.5 (Rolldown, lightningcss), Wrangler 4.156.0 (workerd, esbuild, miniflare) | Node | this project (`.mise.toml`) |
-| Project-owned infrastructure | Bash build scripts, Deno tasks and the Deno WASM harness, artefact validation, initialisation, CI | Deno | this project |
+| Project-owned infrastructure | Bash orchestration, Deno tasks, initialisation, boundary/deployment checks and tests, Deno WASM harness, CI | Deno; Node only for the invoked Vite/Wrangler tools | this project |
 | Delivered application | browser bundle, Worker bundle, WASM glue | browser / Worker capabilities only | this project |
 
 ### Encapsulated toolchain dependencies
@@ -114,11 +114,13 @@ same diagnostics and exit codes without involving the project Node.
 
 ### Project-owned infrastructure
 
-Deno is the preferred runtime: an explicit permission model, built-in formatter,
-linter, test runner and task runner, and one API surface to standardise on. The
-Deno WASM harness ([wasm/harness.ts](wasm/harness.ts)) is the first piece of
-infrastructure to run entirely on Deno. The remaining Node-based scripts and
-test suites are known, tracked work — not an endorsed target.
+Deno is the runtime for all project-owned infrastructure: the task runner,
+formatter/linter, TypeScript launcher, initialiser, boundary and deployment
+checkers, test suites and the WASM harness. Subprocesses are executed with
+`Deno.Command`; the tests construct a replacement environment explicitly with
+`clearEnv: true` where that is intended and check every exit status. The Bash
+scripts remain thin orchestration around Deno and the external Vite/Wrangler
+tools.
 
 ### Delivered application capabilities
 
@@ -129,11 +131,10 @@ is enforced by the checks described in
 
 ### This project is not Node-free
 
-Node remains installed because two external tools require a Node host, and part
-of the project-owned infrastructure still runs on it. The documented goal is
-narrower and precise: no delivered code, and no new project-owned
-infrastructure, depends on Node — while the Node-hosted ecosystem tools keep a
-supported host.
+Node remains installed because the external Vite and Wrangler tools require a
+Node host; project-owned scripts and tests run on Deno. The goal is precise:
+delivered code and project-owned checks and tests do not depend on Node, while
+the Bash build/deploy wrappers still invoke the Node-hosted tools.
 
 ## Node.js dependency boundary
 
@@ -295,18 +296,18 @@ install and download caches.
 
 | Tool                 | Pinned version | Used for                                                   |
 | -------------------- | -------------- | ---------------------------------------------------------- |
-| Node.js              | `24.19.0`      | Host for Vite and Wrangler, and for the Node-based scripts and test suites that have not moved to Deno yet |
-| Deno                 | `2.9.8`        | Task runner (`deno.json`) and npm dependency installation  |
+| Node.js              | `24.19.0`      | Host for the external Vite and Wrangler tools |
+| Deno                 | `2.9.8`        | Task runner, formatter/linter, test runner, project-owned scripts and the TypeScript launcher |
 | CMake                | `4.4.5`        | Configuring the C++26 → WebAssembly build                  |
 | Ninja                | `1.13.2`       | CMake generator for the WebAssembly build                  |
 | Emscripten (`emsdk`) | `6.0.13`       | C++26 compiler and CMake toolchain                         |
 | Python               | `3.13.18`      | Emscripten's Python-based `emcc`/`em++` driver             |
 
-`package.json` declares `engines.node >= 22.12.0` as the minimum supported
-Node version. `.mise.toml` pins the exact known-good version for reproducible
-builds. CMake is pinned to `4.4.5` because the Emscripten 6.0.13 toolchain
-warns for CMake `4.2.0`–`4.3.3`, while [wasm/CMakeLists.txt](wasm/CMakeLists.txt)
-requires at least CMake `4.2`.
+`package.json` declares `engines.node >= 22.12.0` as the minimum supported Node
+version for the Node-hosted Vite and Wrangler tools. `.mise.toml` pins the exact
+known-good version for reproducible builds. CMake is pinned to `4.4.5` because
+the Emscripten 6.0.13 toolchain warns for CMake `4.2.0`–`4.3.3`, while
+[wasm/CMakeLists.txt](wasm/CMakeLists.txt) requires at least CMake `4.2`.
 
 ### Install the npm dependencies
 
@@ -340,9 +341,9 @@ mise exec -- emcc --version     # ... 6.0.13 (...)
 mise exec -- python3 --version  # Python 3.13.18
 ```
 
-`mise exec --` runs a command with the pinned tools on `PATH`. The
-`node_modules/.bin` shims and `node …` commands therefore use the pinned Node
-rather than a host installation.
+`mise exec --` runs a command with the pinned tools on `PATH`. The Vite and
+Wrangler `node_modules/.bin` shims and their `node …` invocations therefore use
+the pinned Node; project-owned Deno tasks use the pinned Deno.
 
 ### Emscripten SDK resolution
 
@@ -402,13 +403,13 @@ template. Initialise once, before any of those commands.
 
 ```bash
 # preview every change; writes nothing
-mise exec -- node scripts/init-project.mjs my-app --dry-run
+mise exec -- deno task init:project my-app --dry-run
 
 # apply
-mise exec -- node scripts/init-project.mjs my-app
+mise exec -- deno task init:project my-app
 
 # placeholder, target files, name rules and exit codes
-mise exec -- node scripts/init-project.mjs --help
+mise exec -- deno task init:project --help
 ```
 
 Equivalent task-runner forms:
@@ -702,19 +703,19 @@ Run these from the project root with dependencies installed. Commands marked
 | `deno task lint` | Deno lint rules | Toolchain |
 | `deno task check:client` | Client TypeScript semantics (TypeScript 7 native checker, launched by Deno) | Dependencies |
 | `deno task check:worker` | Worker TypeScript semantics (same checker, `worker/tsconfig.json`) | Dependencies |
-| `deno task check:node-boundary` | Configuration invariants plus the narrow source policy (`node:`/`cloudflare:` ambient declarations, suppression directives) | Node |
-| `deno task test:init` | Initialiser unit tests in temporary fixtures | Node |
-| `deno task test:worker` | Worker handler tests, invoked directly | Node |
-| `deno task test:scripts` | Emscripten SDK-root resolution tests with fake layouts | Node and Bash |
-| `deno task test:deploy` | Deployment-artefact checker unit tests in temporary fixtures | Node |
-| `deno task test:boundary` | Invariants and source-policy rules, including negative canaries and Worker typecheck coverage | Node |
+| `deno task check:node-boundary` | Configuration invariants plus the narrow source policy (`node:`/`cloudflare:` ambient declarations, suppression directives) | Deno |
+| `deno task test:init` | Initialiser unit tests in temporary fixtures | Deno |
+| `deno task test:worker` | Worker handler tests, invoked directly | Deno |
+| `deno task test:scripts` | Emscripten SDK-root resolution tests with fake layouts | Deno and Bash |
+| `deno task test:deploy` | Deployment-artefact checker unit tests in temporary fixtures | Deno |
+| `deno task test:boundary` | Invariants and source-policy rules, including negative canaries and Worker typecheck coverage | Deno |
 | `deno task check:worker-types` | `worker-configuration.d.ts` is current | Initialised project, dependencies |
 | `deno task types:worker` | Regenerates `worker-configuration.d.ts` (writes) | Initialised project, dependencies |
 | `deno task test:wasm` | Build-tree WASM smoke test on Deno, Node globals hidden (`19 + 23 = 42`) | Build required |
 | `deno task test:wasm:published` | Published (`dist/client`) WASM smoke test on Deno (`19 + 23 = 42`) | Full build required |
 | `deno task check:deploy` | Generated config/artefact consistency, symlink containment and the Node boundary in the emitted bundles | Full build required |
 | `deno task deploy:dry-run` | Build, artefact check and `wrangler deploy --dry-run` | Initialised project, dependencies |
-| `deno task validate` | `fmt:check`, `lint`, client/Worker typechecks, the Node boundary check and the five Node test suites | Dependencies; works on the template |
+| `deno task validate` | `fmt:check`, `lint`, client/Worker typechecks, the Node boundary check and the five Deno test suites | Dependencies; works on the template |
 | `deno task ci` | `scripts/ci.sh all` (static checks plus isolated build validation) | Dependencies; works on the template |
 
 Deno tasks are canonical. `package.json` provides npm script equivalents for

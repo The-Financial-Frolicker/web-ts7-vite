@@ -25,8 +25,7 @@
  * error, 3 write failure.
  */
 
-import { execFileSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { run } from "./lib/command.mjs";
 import {
   chmodSync,
   existsSync,
@@ -38,10 +37,8 @@ import {
   statSync,
   unlinkSync,
   writeFileSync,
-} from "node:fs";
-import path from "node:path";
-import process from "node:process";
-import { fileURLToPath } from "node:url";
+} from "./lib/fs.mjs";
+import path, { fromFileUrl } from "./lib/path.mjs";
 
 export const PLACEHOLDER = "__PROJECT_NAME__";
 export const WORKER_SUFFIX = "-worker";
@@ -149,7 +146,7 @@ export function deriveWorkerServiceName(name) {
 export function validateProjectName(name) {
   if (typeof name !== "string" || name.length === 0) {
     throw new InitError(
-      "A project name is required. Pass it as the first argument, for example `node scripts/init-project.mjs my-app`.",
+      "A project name is required. Pass it as the first argument, for example `deno task init:project my-app`.",
     );
   }
 
@@ -241,17 +238,18 @@ export function countOccurrences(text, token) {
 /** List repository files, preferring git's view (tracked + untracked, not ignored). */
 export function listRepositoryFiles(root) {
   try {
-    const output = execFileSync(
-      "git",
-      ["ls-files", "-z", "--cached", "--others", "--exclude-standard"],
-      {
-        cwd: root,
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "ignore"],
-      },
-    );
+    const result = run("git", {
+      args: ["ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+      cwd: root,
+      stdout: "piped",
+      stderr: "null",
+    });
 
-    return output.split("\0").filter(Boolean);
+    if (result.code !== 0) {
+      throw new Error(`git ls-files exited with ${result.code}`);
+    }
+
+    return result.stdout.split("\0").filter(Boolean);
   } catch {
     // Not a git checkout (e.g. an exported copy or a test fixture): walk instead.
     return walkFiles(root);
@@ -293,7 +291,10 @@ export function scanForPlaceholders(root, files = listRepositoryFiles(root)) {
 
     if (contents.includes(0)) continue; // Binary file: identity is textual.
 
-    const count = countOccurrences(contents.toString("utf8"), PLACEHOLDER);
+    const count = countOccurrences(
+      new TextDecoder().decode(contents),
+      PLACEHOLDER,
+    );
     if (count > 0) hits.push({ file, count });
   }
 
@@ -537,7 +538,7 @@ export function inspectProject(root, files) {
     ]),
   );
 
-  const selfFile = path.relative(root, fileURLToPath(import.meta.url)).split(
+  const selfFile = path.relative(root, fromFileUrl(import.meta.url)).split(
     path.sep,
   ).join("/");
   let stragglers;
@@ -711,7 +712,7 @@ function stageFile(target, contents, mode) {
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const temporary = path.join(
       directory,
-      `.${base}.init-project-${randomUUID()}.tmp`,
+      `.${base}.init-project-${crypto.randomUUID()}.tmp`,
     );
 
     try {
@@ -719,8 +720,12 @@ function stageFile(target, contents, mode) {
       chmodSync(temporary, mode & 0o777);
       return temporary;
     } catch (error) {
-      // EEXIST means the name was taken by something we must not delete.
-      if (error.code === "EEXIST") continue;
+      // A create-new collision means the name was taken by something we must
+      // not delete.
+      if (
+        error instanceof Deno.errors.AlreadyExists ||
+        error.code === "EEXIST"
+      ) continue;
 
       // The file may have been created (and partially written) even though
       // the call failed, so remove it unconditionally. ENOENT is expected
@@ -750,7 +755,7 @@ function stageFile(target, contents, mode) {
  * error then names the files that may be partially initialised.
  *
  * Path safety: every operation re-resolves the lexical path from `root`, and
- * Node has no renameat/openat equivalent, so the containment checks in
+ * the runtime has no renameat/openat equivalent, so the containment checks in
  * `inspectProject` and the `lstatSync` below are snapshots rather than locks.
  * The `lstatSync` refusal covers only a symbolic link at the final path
  * component: it stops this code from replacing such a link, but it cannot see a
@@ -858,7 +863,7 @@ export function applyChanges(root, changes) {
  * object; throws InitError with a meaningful exit code on failure.
  */
 export function initialiseProject(options = {}) {
-  const root = path.resolve(options.root ?? process.cwd());
+  const root = path.resolve(options.root ?? Deno.cwd());
   const name = validateProjectName(options.name);
   const dryRun = options.dryRun === true;
   const log = typeof options.log === "function" ? options.log : () => {};
@@ -949,7 +954,7 @@ export function usage() {
     "Initialise a new project from this starter template.",
     "",
     "Usage:",
-    "  node scripts/init-project.mjs <project-name> [--dry-run] [--root DIR]",
+    "  deno task init:project <project-name> [--dry-run] [--root DIR]",
     "",
     `Replaces the template placeholder (${PLACEHOLDER}) in:`,
     ...TARGETS.map((target) => `  ${target.file.padEnd(18)} ${target.field}`),
@@ -988,7 +993,7 @@ export function parseArgs(argv) {
     dryRun: false,
     help: false,
     name: undefined,
-    root: process.cwd(),
+    root: Deno.cwd(),
   };
   const positional = [];
   let endOfOptions = false;
@@ -1062,7 +1067,7 @@ export function parseArgs(argv) {
 }
 
 /** CLI entry point; returns a process exit code instead of exiting directly. */
-export function main(argv = process.argv.slice(2), io = console) {
+export function main(argv = Deno.args, io = console) {
   try {
     const options = parseArgs(argv);
 
@@ -1091,7 +1096,6 @@ export function main(argv = process.argv.slice(2), io = console) {
   }
 }
 
-const entryPoint = process.argv[1] ? path.resolve(process.argv[1]) : "";
-if (entryPoint === fileURLToPath(import.meta.url)) {
-  process.exitCode = main();
+if (import.meta.main) {
+  Deno.exitCode = main();
 }

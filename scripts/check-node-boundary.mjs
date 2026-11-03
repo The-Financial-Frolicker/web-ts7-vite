@@ -23,10 +23,8 @@
  *
  * Exit codes: 0 no violation, 1 violation or usage error.
  */
-import { readdirSync, readFileSync, statSync } from "node:fs";
-import path from "node:path";
-import process from "node:process";
-import { fileURLToPath } from "node:url";
+import { readdirSync, readFileSync, statSync } from "./lib/fs.mjs";
+import path from "./lib/path.mjs";
 
 /** Directories holding delivered application source. */
 export const PROTECTED_ROOTS = Object.freeze(["src", "worker"]);
@@ -606,7 +604,7 @@ export function formatViolations(violations) {
  * listing every violation otherwise. An empty file list is an error: it would
  * mean the check passed without inspecting anything.
  */
-export function checkCapabilityBoundary(root = process.cwd()) {
+export function checkCapabilityBoundary(root = Deno.cwd()) {
   const projectRoot = path.resolve(root);
   const files = listSourceFiles(projectRoot);
 
@@ -631,10 +629,10 @@ export function checkCapabilityBoundary(root = process.cwd()) {
 }
 
 /** CLI entry point; returns a process exit code instead of exiting directly. */
-export function main(argv = process.argv.slice(2), io = console) {
+export function main(argv = Deno.args, io = console) {
   if (argv.length > 0) {
     io.error(
-      "Usage: node scripts/check-node-boundary.mjs\n\n" +
+      "Usage: deno run --allow-read --allow-env scripts/check-node-boundary.mjs\n\n" +
         "Run from the project root. No options are accepted.",
     );
     return 1;
@@ -659,7 +657,6 @@ export function main(argv = process.argv.slice(2), io = console) {
   }
 }
 
-const entryPoint = process.argv[1] ? path.resolve(process.argv[1]) : "";
-if (entryPoint === fileURLToPath(import.meta.url)) {
-  process.exitCode = main();
+if (import.meta.main) {
+  Deno.exitCode = main();
 }

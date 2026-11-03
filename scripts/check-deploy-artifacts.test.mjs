@@ -1,4 +1,4 @@
-import assert from "node:assert/strict";
+import assert from "./lib/assert.mjs";
 import {
   mkdirSync,
   mkdtempSync,
@@ -6,10 +6,10 @@ import {
   statSync,
   symlinkSync,
   writeFileSync,
-} from "node:fs";
-import os from "node:os";
-import path from "node:path";
-import { after, describe, it } from "node:test";
+} from "./lib/fs.mjs";
+import os from "./lib/os.mjs";
+import path from "./lib/path.mjs";
+import { after, describe, it } from "./lib/test.mjs";
 
 import {
   checkDeployArtifacts,

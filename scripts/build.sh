@@ -68,11 +68,11 @@ if [[ ! -d "$EMSDK_ROOT" ]]; then
 fi
 
 # --- Require the project-managed Node BEFORE sourcing emsdk --------------
-# The build's TypeScript/Vite steps run through `#!/usr/bin/env node` shims and
-# `node ...` commands, so a Node must be present up front. We must capture the
-# project Node (e.g. mise-managed) BEFORE sourcing emsdk, and we must NOT let
-# emsdk supply it: sourcing emsdk_env.sh may otherwise put Emscripten's bundled
-# Node on PATH and silently become the build runtime.
+# The build's Vite and Wrangler steps run through `#!/usr/bin/env node` shims,
+# so a Node must be present up front. We must capture the project Node (e.g.
+# mise-managed) BEFORE sourcing emsdk, and we must NOT let emsdk supply it:
+# sourcing emsdk_env.sh may otherwise put Emscripten's bundled Node on PATH and
+# silently become the build runtime.
 NODE_REQUIRED="22.12.0"
 
 PROJECT_NODE="$(command -v node 2>/dev/null || true)"

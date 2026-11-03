@@ -1,5 +1,5 @@
-import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import assert from "./lib/assert.mjs";
+import { run } from "./lib/command.mjs";
 import {
   chmodSync,
   lstatSync,
@@ -11,10 +11,10 @@ import {
   statSync,
   symlinkSync,
   writeFileSync,
-} from "node:fs";
-import os from "node:os";
-import path from "node:path";
-import { after, describe, it } from "node:test";
+} from "./lib/fs.mjs";
+import os from "./lib/os.mjs";
+import path from "./lib/path.mjs";
+import { after, describe, it } from "./lib/test.mjs";
 
 import {
   applyChanges,
@@ -100,6 +100,15 @@ function read(root, file) {
   return readFileSync(path.join(root, file), "utf8");
 }
 
+/** Encode bytes as base64 for the file-tree snapshot. */
+function base64(bytes) {
+  let binary = "";
+  for (let index = 0; index < bytes.length; index += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
+  }
+  return btoa(binary);
+}
+
 /** Snapshot every file (content and mode) so "no changes" can be asserted. */
 function fileTree(root, prefix = "") {
   const entries = {};
@@ -115,7 +124,7 @@ function fileTree(root, prefix = "") {
       const absolute = path.join(root, relative);
       entries[relative] = {
         mode: statSync(absolute).mode & 0o777,
-        content: readFileSync(absolute).toString("base64"),
+        content: base64(readFileSync(absolute)),
       };
     }
   }
@@ -170,10 +179,7 @@ function escapeRegExp(value) {
 }
 
 /** Set when the process runs with privileges that bypass permission bits. */
-const permissionSkip = typeof process.getuid === "function" &&
-    process.getuid() === 0
-  ? "requires a non-root user"
-  : false;
+const permissionSkip = Deno.uid() === 0 ? "requires a non-root user" : false;
 
 /** Set when the platform cannot create symbolic links. */
 const symlinkSkip = (() => {
@@ -191,11 +197,13 @@ const symlinkSkip = (() => {
 /** True when fixtures in the temp directory are scanned through git. */
 const tempDirIsGitCheckout = (() => {
   try {
-    execFileSync("git", ["rev-parse", "--is-inside-work-tree"], {
+    const result = run("git", {
+      args: ["rev-parse", "--is-inside-work-tree"],
       cwd: os.tmpdir(),
-      stdio: "ignore",
+      stdout: "null",
+      stderr: "null",
     });
-    return true;
+    return result.code === 0;
   } catch {
     return false;
   }
@@ -985,7 +993,7 @@ describe("CLI", () => {
     writeProject(root);
 
     const output = capture();
-    const relative = path.relative(process.cwd(), root);
+    const relative = path.relative(Deno.cwd(), root);
 
     assert.equal(main(["new-app", "--root", relative], output.io), EXIT_OK);
 

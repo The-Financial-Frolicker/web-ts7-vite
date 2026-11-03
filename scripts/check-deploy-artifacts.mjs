@@ -37,10 +37,13 @@
  * Exit codes: 0 all checks pass, 1 a check failed.
  */
 
-import { readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
-import path from "node:path";
-import process from "node:process";
-import { fileURLToPath } from "node:url";
+import {
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  statSync,
+} from "./lib/fs.mjs";
+import path from "./lib/path.mjs";
 
 export const DEPLOY_CONFIG = path.join("dist", "worker", "wrangler.json");
 
@@ -480,7 +483,7 @@ function readTextFile(file, label) {
  * Check the deployment artefacts under `root` and return a summary. Throws
  * DeployArtifactError with an actionable message on the first failure.
  */
-export function checkDeployArtifacts(root = process.cwd()) {
+export function checkDeployArtifacts(root = Deno.cwd()) {
   const projectRoot = path.resolve(root);
   const distRoot = path.join(projectRoot, "dist");
   const configFile = path.join(projectRoot, DEPLOY_CONFIG);
@@ -639,10 +642,10 @@ export function checkDeployArtifacts(root = process.cwd()) {
 }
 
 /** CLI entry point; returns a process exit code instead of exiting directly. */
-export function main(argv = process.argv.slice(2), io = console) {
+export function main(argv = Deno.args, io = console) {
   if (argv.length > 0) {
     io.error(
-      "Usage: node scripts/check-deploy-artifacts.mjs\n\n" +
+      "Usage: deno run --allow-read --allow-env scripts/check-deploy-artifacts.mjs\n\n" +
         "Run from the project root after `deno task build`.",
     );
     return 1;
@@ -652,8 +655,8 @@ export function main(argv = process.argv.slice(2), io = console) {
     const result = checkDeployArtifacts();
     io.log(
       `Deployment artefacts OK: Worker "${result.name}" ` +
-        `(${path.relative(process.cwd(), result.workerEntry)}), ` +
-        `assets ${path.relative(process.cwd(), result.assetsDirectory)} ` +
+        `(${path.relative(Deno.cwd(), result.workerEntry)}), ` +
+        `assets ${path.relative(Deno.cwd(), result.assetsDirectory)} ` +
         `(binding ${result.binding}).`,
     );
     io.log(
@@ -676,7 +679,6 @@ export function main(argv = process.argv.slice(2), io = console) {
   }
 }
 
-const entryPoint = process.argv[1] ? path.resolve(process.argv[1]) : "";
-if (entryPoint === fileURLToPath(import.meta.url)) {
-  process.exitCode = main();
+if (import.meta.main) {
+  Deno.exitCode = main();
 }

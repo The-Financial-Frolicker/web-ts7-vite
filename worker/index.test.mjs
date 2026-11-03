@@ -2,24 +2,23 @@
  * Runtime tests for the Cloudflare Worker handler in `./index.ts`.
  *
  * The handler is invoked directly with standard `Request` objects, so the tests
- * are deterministic and need no server, no network access and no bindings. Node
- * strips the handler's TypeScript annotations on import, which is why this test
- * file can stay plain JavaScript like the other `node --test` suites in this
- * repository.
+ * are deterministic and need no server, no network access and no bindings. Deno
+ * executes the handler's TypeScript directly, so the test file needs no
+ * transpilation step or Node runtime.
  *
  * The assertions describe the handler's current contract, which is the source
  * of truth for them: `worker/index.ts` routes on `URL.pathname` alone and
  * returns either the `/api/health` payload or a JSON 404 fallback.
  *
- * Node's `Request` and `Response` are standards-compliant stand-ins rather than
+ * Deno's `Request` and `Response` are standards-compliant stand-ins rather than
  * workerd itself, so what is established here is the handler's routing and
  * payloads. Cloudflare-runtime details that a direct call cannot model - HEAD
  * body stripping, header normalisation, asset routing and the `run_worker_first`
  * patterns - are deliberately not asserted.
  */
-import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { describe, it } from "node:test";
+import assert from "../scripts/lib/assert.mjs";
+import { readFileSync } from "../scripts/lib/fs.mjs";
+import { describe, it } from "../scripts/lib/test.mjs";
 
 import worker from "./index.ts";
 

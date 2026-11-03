@@ -1,5 +1,5 @@
-import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import assert from "./lib/assert.mjs";
+import { run } from "./lib/command.mjs";
 import {
   chmodSync,
   mkdirSync,
@@ -7,10 +7,10 @@ import {
   rmSync,
   symlinkSync,
   writeFileSync,
-} from "node:fs";
-import os from "node:os";
-import path from "node:path";
-import { after, describe, it } from "node:test";
+} from "./lib/fs.mjs";
+import os from "./lib/os.mjs";
+import path from "./lib/path.mjs";
+import { after, describe, it } from "./lib/test.mjs";
 
 const projectRoot = path.resolve(import.meta.dirname, "..");
 const buildScript = path.join(projectRoot, "scripts", "build.sh");
@@ -51,9 +51,9 @@ function makeSdk(parent, version = "") {
 function coreutilsPath() {
   const directory = makeTempDir("init-build-bin-");
   for (const tool of ["dirname", "readlink"]) {
-    const resolved = execFileSync("sh", ["-c", `command -v ${tool}`], {
-      encoding: "utf8",
-    }).trim();
+    const result = run("sh", { args: ["-c", `command -v ${tool}`] });
+    assert.equal(result.code, 0, result.stderr);
+    const resolved = result.stdout.trim();
     symlinkSync(resolved, path.join(directory, tool));
   }
   return directory;
@@ -67,11 +67,13 @@ function resolveRoot({ emsdkRoot, emsdk, pathDirs = [] }) {
   if (emsdkRoot !== undefined) env.EMSDK_ROOT = emsdkRoot;
   if (emsdk !== undefined) env.EMSDK = emsdk;
 
-  return execFileSync(
-    bash,
-    ["--noprofile", "--norc", buildScript, "--print-emsdk-root"],
-    { env, encoding: "utf8" },
-  ).trim();
+  const result = run(bash, {
+    args: ["--noprofile", "--norc", buildScript, "--print-emsdk-root"],
+    env,
+    clearEnv: true,
+  });
+  assert.equal(result.code, 0, result.stderr);
+  return result.stdout.trim();
 }
 
 describe("Emscripten SDK root resolution", () => {

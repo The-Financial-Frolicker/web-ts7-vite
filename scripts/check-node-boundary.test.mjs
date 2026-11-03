@@ -1,5 +1,5 @@
-import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import assert from "./lib/assert.mjs";
+import { run } from "./lib/command.mjs";
 import {
   mkdirSync,
   mkdtempSync,
@@ -7,10 +7,10 @@ import {
   rmSync,
   symlinkSync,
   writeFileSync,
-} from "node:fs";
-import os from "node:os";
-import path from "node:path";
-import { after, describe, it } from "node:test";
+} from "./lib/fs.mjs";
+import os from "./lib/os.mjs";
+import path from "./lib/path.mjs";
+import { after, describe, it } from "./lib/test.mjs";
 
 import {
   checkCapabilityBoundary,
@@ -525,7 +525,10 @@ describe("main", () => {
     };
 
     assert.equal(main(["--root", "/tmp"], io), 1);
-    assert.match(lines[0], /^Usage: node scripts\/check-node-boundary\.mjs/);
+    assert.match(
+      lines[0],
+      /^Usage: deno run --allow-read --allow-env scripts\/check-node-boundary\.mjs/,
+    );
   });
 });
 
@@ -573,13 +576,10 @@ describe("Worker typecheck coverage", () => {
   }
 
   function typecheck(root) {
-    const result = spawnSync("deno", TYPECHECK, {
-      cwd: root,
-      encoding: "utf8",
-    });
+    const result = run(Deno.execPath(), { args: TYPECHECK, cwd: root });
     return {
-      status: result.status,
-      output: `${result.stdout ?? ""}${result.stderr ?? ""}`,
+      status: result.code,
+      output: `${result.stdout}${result.stderr}`,
     };
   }
 

@@ -55,7 +55,7 @@ if [[ ! -f "$WRANGLER_CONFIG" ]]; then
 fi
 
 echo "Checking deployment artefacts..."
-"$NODE_BIN" "$PROJECT_ROOT/scripts/check-deploy-artifacts.mjs"
+deno task check:deploy
 
 echo "Running Wrangler..."
 "$NODE_BIN" "$WRANGLER_ENTRY" deploy \
