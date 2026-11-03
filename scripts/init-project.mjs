@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 /**
  * Initialise a new project from this starter template.
  *

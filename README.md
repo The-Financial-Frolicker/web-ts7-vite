@@ -65,7 +65,10 @@ The host provides:
 - `mise` itself, installed separately;
 - a POSIX shell, `git`, `curl` and the Linux utilities listed above;
 - network access for the first toolchain and dependency installation;
-- a Cloudflare account for a real deployment (not for builds or dry runs).
+- a Cloudflare account for a real deployment (not for builds or dry runs);
+- optionally, a host Node.js `>=22.12` for real deployment and Vite
+  dev/preview. It is not installed by `.mise.toml` and is not required for the
+  project-owned build, validation, tests or dry-run.
 
 The repository provides the pinned tools through [`.mise.toml`](.mise.toml)
 (including the Python interpreter used by Emscripten), the dependency graph
@@ -83,8 +86,8 @@ not become a requirement in another.
 | Category | Members | Runtime required | Supplied by |
 | --- | --- | --- | --- |
 | Encapsulated toolchain | Emscripten 6.0.13 and everything it drives | its own Node, Python, LLVM, Binaryen | the toolchain itself |
-| External ecosystem | Vite 8.3.5 (Rolldown, lightningcss), Wrangler 4.156.0 (workerd, esbuild, miniflare) | Node | this project (`.mise.toml`) |
-| Project-owned infrastructure | Bash orchestration, Deno tasks, initialisation, boundary/deployment checks and tests, Deno WASM harness, CI | Deno; Node only for the invoked Vite/Wrangler tools | this project |
+| External ecosystem | Vite 8.3.5 (Rolldown, lightningcss), Wrangler 4.156.0 (workerd, esbuild, miniflare) | Deno for Vite, Wrangler type generation and dry-run; host Node for real deployment/dev | this project (packages); host (Node) |
+| Project-owned infrastructure | Bash orchestration, Deno tasks, Deno Vite/Wrangler-types/Wrangler-dry-run launchers, initialisation, boundary/deployment checks and tests, Deno WASM harness, CI | Deno; Node only for real deployment | this project |
 | Delivered application | browser bundle, Worker bundle, WASM glue | browser / Worker capabilities only | this project |
 
 ### Encapsulated toolchain dependencies
@@ -92,18 +95,24 @@ not become a requirement in another.
 Emscripten 6.0.13 is a self-contained SDK. It ships and pins **its own** Node
 24.19.0 — `NODE_JS` is an absolute path in its private `.emscripten`
 configuration — and uses it internally for `tools/compiler.mjs`,
-`tools/preprocessor.mjs` and the JavaScript optimiser. It never uses the Node
-this project installs, and this project never invokes Emscripten's copy. That
-Node is therefore **not** a requirement for project-installed Node. Python,
+`tools/preprocessor.mjs` and the JavaScript optimiser. That Node is private to
+the SDK: it is not declared in [`.mise.toml`](.mise.toml), it is not offered to
+project-owned execution, and this project never invokes it directly. Python,
 LLVM, Binaryen, CMake and Ninja belong to the toolchain in the same way.
 
 ### External ecosystem tools
 
-Vite and Wrangler are Node-hosted: both declare `engines.node`, and Vite's
-Rolldown and lightningcss components are native bindings loaded by a Node
-process. The project installs Node in [`.mise.toml`](.mise.toml) **as their
-host**. That is a deliberate external-tooling dependency, not a claim that the
-application needs Node.
+Vite 8.3.5 and Wrangler 4.156.0 are Node-oriented packages, but their runtime
+requirements differ in this project. The Vite production build, Wrangler type
+generation and Wrangler dry-run run in separate Deno processes through
+`scripts/vite-build.mjs`, `scripts/wrangler-types.mjs` and
+`scripts/wrangler-dry-run.mjs`. Rolldown and lightningcss are native N-API
+bindings loaded with path-scoped Deno FFI permission; Wrangler types use scoped
+workerd and esbuild executables; dry-run uses only scoped esbuild. Real Wrangler
+deployment remains invoked through its Node executable in this stage. A host
+Node may be used for real deployment and Vite dev/preview; it is not installed
+by mise. Emscripten has its own embedded Node. This is a deliberate
+external-tooling dependency, not a claim that the application needs Node.
 
 TypeScript is different in kind. Its semantic checker is a **native Go
 executable**; the `tsc` npm entry point is a launcher that resolves that
@@ -112,15 +121,27 @@ the checker runs through Deno (`deno task check:client`,
 `deno task check:worker`) against the same `tsconfig.json` files, producing the
 same diagnostics and exit codes without involving the project Node.
 
+That handover uses `node:child_process`, and Deno provides no `process.execve`,
+so `execFileSync` is always the path taken. The spawn therefore needs
+`--allow-run`, and Deno accepts only an **exact executable path** for a scoped
+run permission — a directory prefix, a relative path and the bare name `tsc` are
+all refused. That path is version- and platform-stamped
+(`@typescript/typescript-<platform>/lib/tsc`) and is only knowable at run time,
+so the typecheck tasks keep an unrestricted `--allow-run` rather than growing a
+launcher layer to compute it. The residual authority is recorded rather than
+hidden: the pinned, lock-verified `typescript@7.0.2` launcher may start any
+executable, and it starts exactly the resolved native compiler. If Deno
+implements `process.execve`, the permission can be dropped entirely.
+
 ### Project-owned infrastructure
 
 Deno is the runtime for all project-owned infrastructure: the task runner,
-formatter/linter, TypeScript launcher, initialiser, boundary and deployment
-checkers, test suites and the WASM harness. Subprocesses are executed with
-`Deno.Command`; the tests construct a replacement environment explicitly with
-`clearEnv: true` where that is intended and check every exit status. The Bash
-scripts remain thin orchestration around Deno and the external Vite/Wrangler
-tools.
+formatter/linter, TypeScript launcher, Vite, Wrangler-types and Wrangler dry-run
+launchers, initialiser, boundary/deployment checks and tests, test suites and the
+WASM harness. Subprocesses are executed with `Deno.Command`; the tests construct
+a replacement environment explicitly with `clearEnv: true` where that is intended
+and check every exit status. The Bash scripts remain thin orchestration around
+Deno and the remaining external real-deployment path.
 
 ### Delivered application capabilities
 
@@ -131,10 +152,56 @@ is enforced by the checks described in
 
 ### This project is not Node-free
 
-Node remains installed because the external Vite and Wrangler tools require a
-Node host; project-owned scripts and tests run on Deno. The goal is precise:
-delivered code and project-owned checks and tests do not depend on Node, while
-the Bash build/deploy wrappers still invoke the Node-hosted tools.
+Node is not installed by [`.mise.toml`](.mise.toml). Four different Node
+provenances are involved, and they must not be conflated:
+
+| Provenance | Role | Controlled by |
+| --- | --- | --- |
+| Emscripten's bundled Node | Private to the SDK; drives `emcc` internals through an absolute `NODE_JS` path | Emscripten 6.0.13 |
+| Host Node | Real Wrangler deployment (`deno task deploy`) and Vite dev/preview (`npm run dev`/`preview`) | The developer or CI image; version declared as `engines.node` compatibility in `package.json` |
+| Project-owned Deno execution | Tasks, tests, checks, Vite production build, Wrangler type generation, Wrangler dry-run, CI | Deno, under the PATH tripwire below |
+| GitHub-hosted runner Node | Present on the runner image; not installed or used by the workflow | GitHub Actions |
+
+The goal is precise: delivered code, project-owned checks, the Vite production
+build, type generation and dry-run do not depend on Node, while the real
+deployment path may invoke a host Node.
+
+### Node-exclusion policy
+
+Project-owned execution uses `scripts/deno-no-node.sh` as a common PATH
+tripwire. It prepends a temporary directory containing failing `node` and
+`nodejs` shims, then executes the supplied command. An attempted command-name
+Node invocation prints a diagnostic and exits 127. The wrapper preserves the
+rest of PATH, argument forwarding, exit status and the caller's shell
+environment.
+
+The wrapper is applied to every project-owned task, including the top level of
+`deno task validate` and `deno task ci`. `validate` is wrapped as a whole rather
+than relying on its children alone, so a task added to the chain later does not
+escape the policy. When a wrapped task starts another wrapped task, the
+`DENO_NO_NODE_ACTIVE` marker makes the inner invocation run the command directly
+instead of nesting a second tripwire. `scripts/build.sh`, `scripts/ci.sh`,
+`scripts/deploy-dry-run.sh` and `scripts/worker-types.sh` also enter the wrapper
+when invoked directly, so the shell entry points and the Deno tasks behave
+identically. `deno task test:no-node` exercises the tripwire.
+
+`scripts/vite-build.mjs`, `scripts/wrangler-types.mjs` and
+`scripts/wrangler-dry-run.mjs` are internal launchers for those wrapped scripts,
+not standalone entry points; they are invoked by `scripts/build.sh`,
+`scripts/worker-types.sh` and `scripts/deploy-dry-run.sh` respectively.
+
+This is not an OS sandbox. It catches `node`/`nodejs` resolved through PATH. It
+does not catch an absolute path such as `/usr/bin/node`, a command that replaces
+PATH itself, native code or FFI libraries that launch Node internally, or
+Emscripten's embedded Node. The `DENO_NO_NODE_ACTIVE` marker is a recursion
+guard, not an unforgeable token: a caller that sets it skips the wrapper.
+
+Explicit exceptions:
+
+- **Real deployment** (`deno task deploy` → `scripts/deploy.sh`) remains
+  Node-hosted and is deliberately not wrapped.
+- **Vite dev/preview** (`npm run dev`, `npm run preview`) remain Node-hosted
+  external-tool paths and are not part of the Deno-controlled production path.
 
 ## Node.js dependency boundary
 
@@ -144,32 +211,38 @@ easy to confuse are treated differently:
 - **The delivered application** — `src/`, `worker/` and everything the build
   emits into `dist/` — runs in a browser and on Cloudflare Workers. It must not
   import a Node built-in module, read a Node global, or rely on CommonJS.
-- **The development toolchain** — the Bash scripts in `scripts/`, the Node
-  scripts they run, `vite.config.ts`, and the ecosystem tools pinned in
-  [`.mise.toml`](.mise.toml) — is not governed by this boundary. Vite and
-  Wrangler need a Node host; Emscripten brings its own. See
+- **The development toolchain** — the Bash and Deno scripts in `scripts/`,
+  `vite.config.ts`, and the external Vite/Wrangler/TypeScript packages whose
+  versions are declared in `package.json` and locked in
+  [deno.lock](deno.lock) — is not governed by this boundary. The Vite production
+  build, Wrangler type generation and Wrangler dry-run run under Deno; real
+  Wrangler deployment needs a host Node; Emscripten brings its own Node. See
   [Runtime ownership](#runtime-ownership).
 
-The policy is therefore narrower than "this repository is Node-free": **Node may
-be installed because external tools require it, but project-owned application
-code and the delivered application must not acquire a functional dependency on
-Node.js or its standard library.**
+The policy is therefore narrower than "this repository is Node-free": **Node is
+not a project-managed tool, and project-owned execution does not depend on it,
+but external tools may still require it and project-owned application code and
+the delivered application must not acquire a functional dependency on Node.js or
+its standard library.**
 
 ### What is enforced
 
-The boundary is enforced in four layers, each proving something different:
+The boundary is enforced by three mechanisms, each proving something different:
 
-| Layer | Mechanism | Scope | Where it runs |
+| # | Mechanism | Scope | Where it runs |
 | --- | --- | --- | --- |
 | 1. Configuration invariants | `deno task check:node-boundary` | `package.json`, `deno.lock`, both `tsconfig.json` files, `wrangler.jsonc` | `validate`, `scripts/ci.sh static`, CI |
 | 2. Compiler diagnostics | `deno task check:client`, `check:worker` | `src/`, every `worker/*.ts` module | `validate`, `scripts/ci.sh static`, CI |
-| 3. Narrow source policy | `deno task check:node-boundary` | `src/`, `worker/` (`*.d.ts` included, test files excluded) | `validate`, `scripts/ci.sh static`, CI |
-| 4. Delivered artefacts | `deno task check:deploy` | `dist/worker`, `dist/client`, published WASM glue, generated Wrangler configuration | `scripts/ci.sh build`, `deno task deploy`, CI |
+| 3. Delivered artefacts | `deno task check:deploy` | `dist/worker`, `dist/client`, published WASM glue, generated Wrangler configuration | `scripts/ci.sh build`, `deno task deploy`, CI |
 
-`deno task test:boundary` tests layers 1 and 3 (including negative canaries and a
-Worker-typecheck coverage canary); `deno task test:deploy` tests layer 4.
+`deno task test:boundary` tests mechanism 1 (including negative canaries and a
+Worker-typecheck coverage canary for mechanism 2); `deno task test:deploy` tests
+mechanism 3. Source text is deliberately not scanned: textual matching cannot
+tell a capability from a mention of one, and a home-grown tokeniser would imply
+semantic assurance it cannot provide. The compiler resolves the program, and
+`check:deploy` inspects what is actually shipped.
 
-**Layer 1 — configuration invariants.** The type checker enforces the boundary
+**1. Configuration invariants.** The type checker enforces the boundary
 only because Node's ambient types are absent. Those assumptions are asserted
 explicitly, because a check that depends on configuration must verify its own
 premise:
@@ -180,29 +253,15 @@ premise:
 - `worker/tsconfig.json` declares `types: []`;
 - no `lib` entry names a Node library;
 - `wrangler.jsonc` enables no `nodejs_compat*` flag (the generated configuration is
-  checked again by layer 4).
+  checked again by mechanism 3).
 
-**Layer 2 — compiler diagnostics.** The compiler resolves imports, aliases and
+**2. Compiler diagnostics.** The compiler resolves imports, aliases and
 ambient declarations, and reports `node:fs` as `TS2591` and `process` as
 `TS2591`/`TS7017` in both projects. `worker/tsconfig.json` includes
 `./**/*.ts`, so a new Worker module is typechecked instead of being silently
 ignored.
 
-**Layer 3 — narrow source policy.** Two holes the compiler cannot see: a local
-ambient module declaration can legitimise a `node:`/`cloudflare:` module, and a
-suppression directive can silence the diagnostic layer 2 depends on. Only these
-are rejected:
-
-- `declare module "node:*"` and `declare module "cloudflare:*"` in our own
-  sources, including `.d.ts` files;
-- `@ts-ignore` and `@ts-expect-error`.
-
-Comments, string/template literals and regex literals are excluded, and
-directives are matched only inside comments, so text that merely mentions one
-cannot fail the check. There is no allowlist: a legitimate need requires changing
-the checker, so it is reviewed.
-
-**Layer 4 — delivered artefacts.** Emitted bundles are checked for `node:`
+**3. Delivered artefacts.** Emitted bundles are checked for `node:`
 specifiers, `cloudflare:node` references, `require(...)`, bare `process` access,
 `process` reached through `globalThis`/`window`/`self`, `Buffer`,
 `module.exports`, `__dirname`/`__filename` and `setImmediate`. A property that
@@ -243,23 +302,26 @@ would make Node globals available in the Worker and so hide a real dependency.
 
 ### Limits
 
+- **Source text is not scanned.** An ambient `declare module "node:*"` that is
+  never imported, and an authoring-time `@ts-ignore`, are not reported. Their
+  delivered consequence has to reach an emitted bundle to matter, and mechanism 3
+  inspects those; what is lost is early feedback, not the boundary itself. A
+  deliberate `@ts-nocheck` would disable mechanism 2 for one file — review it if
+  it ever appears.
 - **Computed dynamic imports are not statically prohibited.** A specifier built
   from a run-time value (`import(name)`, `"node:" + "fs"`) is not evaluated by any
-  layer; its target is a run-time decision. This is a deliberate gap of the
-  current stage, not an oversight.
-- **`declare global` augmentations are not rejected** by layer 3. If such a
-  capability is actually used, layer 4 still sees the emitted reference.
-- **`@ts-nocheck` is not prohibited.** Policy names only `@ts-ignore` and
-  `@ts-expect-error`; a file-level `@ts-nocheck` would disable layer 2 for that
-  file. Review it if it ever appears.
-- **Artifact inspection proves only the references it covers.** Layer 4 can show
-  that a listed reference is present; it cannot show that no runtime capability
-  exists. Generated code that builds a capability without those literal shapes is
-  outside its reach.
-- Layer 3 is a narrow textual rule set, not a type-aware analysis: it suppresses
-  matches inside comments, strings, templates and regexes, but it is not a parser.
-- `check:deploy` needs a build. A change that only affects `src/` or `worker/`
-  is caught earlier by layers 1–3.
+  mechanism; its target is a run-time decision. This is a deliberate gap, not an
+  oversight.
+- **`declare global` augmentations are not rejected.** If such a capability is
+  actually used, mechanism 3 still sees the emitted reference.
+- **Artifact inspection proves only the references it covers.** Mechanism 3 can
+  show that a listed reference is present; it cannot show that no runtime
+  capability exists. Generated code that builds a capability without those literal
+  shapes is outside its reach. A reference that a bundler defines away — for
+  example a `process.env` expression replaced at build time — never appears in the
+  emitted bundle at all.
+- `check:deploy` needs a build. A change that only affects `src/` or `worker/` is
+  caught earlier by mechanisms 1 and 2.
 
 ## Get the repository
 
@@ -296,17 +358,21 @@ install and download caches.
 
 | Tool                 | Pinned version | Used for                                                   |
 | -------------------- | -------------- | ---------------------------------------------------------- |
-| Node.js              | `24.19.0`      | Host for the external Vite and Wrangler tools |
-| Deno                 | `2.9.8`        | Task runner, formatter/linter, test runner, project-owned scripts and the TypeScript launcher |
+| Deno                 | `2.9.8`        | Task runner, formatter/linter, test runner, project-owned scripts, Vite/Wrangler-types/Wrangler-dry-run launchers and the TypeScript launcher |
 | CMake                | `4.4.5`        | Configuring the C++26 → WebAssembly build                  |
 | Ninja                | `1.13.2`       | CMake generator for the WebAssembly build                  |
-| Emscripten (`emsdk`) | `6.0.13`       | C++26 compiler and CMake toolchain                         |
+| Emscripten (`emsdk`) | `6.0.13`       | C++26 compiler and CMake toolchain; supplies its own Node |
 | Python               | `3.13.18`      | Emscripten's Python-based `emcc`/`em++` driver             |
 
-`package.json` declares `engines.node >= 22.12.0` as the minimum supported Node
-version for the Node-hosted Vite and Wrangler tools. `.mise.toml` pins the exact
-known-good version for reproducible builds. CMake is pinned to `4.4.5` because
-the Emscripten 6.0.13 toolchain warns for CMake `4.2.0`–`4.3.3`, while
+Node.js is intentionally **not** a project-managed tool. Emscripten supplies
+its own Node for its internal JavaScript tooling. Real Wrangler deployment and
+Vite dev/preview may use a host-provided Node; none of the project-owned build,
+validation, test or dry-run paths install or require one.
+
+`package.json` declares `engines.node >= 22.12.0` as the host compatibility
+declaration for real Wrangler deployment and Vite dev/preview. It does not cause
+mise to install Node. CMake is pinned to `4.4.5` because the Emscripten 6.0.13
+toolchain warns for CMake `4.2.0`–`4.3.3`, while
 [wasm/CMakeLists.txt](wasm/CMakeLists.txt) requires at least CMake `4.2`.
 
 ### Install the npm dependencies
@@ -333,7 +399,6 @@ best-effort and time-bounded, so an offline dry run still succeeds.
 ### Verify the toolchain
 
 ```bash
-mise exec -- node --version     # v24.19.0
 mise exec -- deno --version     # deno 2.9.8
 mise exec -- cmake --version    # cmake version 4.4.5
 mise exec -- ninja --version    # 1.13.2
@@ -341,9 +406,10 @@ mise exec -- emcc --version     # ... 6.0.13 (...)
 mise exec -- python3 --version  # Python 3.13.18
 ```
 
-`mise exec --` runs a command with the pinned tools on `PATH`. The Vite and
-Wrangler `node_modules/.bin` shims and their `node …` invocations therefore use
-the pinned Node; project-owned Deno tasks use the pinned Deno.
+`mise exec --` runs a command with the pinned tools on `PATH`. Project-owned
+Deno tasks use the pinned Deno. A host Node, when present for real deployment or
+Vite dev/preview, is not supplied or pinned by mise; Emscripten’s own embedded
+Node remains internal to its toolchain.
 
 ### Emscripten SDK resolution
 
@@ -364,9 +430,9 @@ mise exec -- bash scripts/build.sh --print-emsdk-root
 
 The full build also prints `EMSDK_ROOT=…` at stage `[1/9]`. If a different SDK
 is intentionally required, set `EMSDK_ROOT`; the CMake cache in `build-wasm/`
-detects a toolchain change and triggers a clean reconfigure. The build keeps
-the project-managed Node ahead of Emscripten's bundled Node and refuses to run
-on the bundled Node.
+detects a toolchain change and triggers a clean reconfigure. The build does not
+use a project Node; Emscripten uses its own embedded Node as an encapsulated
+toolchain detail.
 
 Emscripten's `emcc`/`em++` drivers are Python programs, and the pinned emsdk
 does not bundle an interpreter. `.mise.toml` pins Python 3.13.18; Emscripten
@@ -384,7 +450,7 @@ activated mise shell put the pinned Python on `PATH`.
 | `EMSDK` | `scripts/build.sh` | SDK root normally exported by mise |
 | `EMSCRIPTEN_ROOT` | `scripts/build.sh` | Fallback when the expected SDK layout is absent |
 | `EMSDK_PYTHON` | `scripts/build.sh`, Emscripten `emcc` | Python interpreter for `emcc`; the build exports the resolved value and respects an explicit override |
-| `NODE_BIN` | `scripts/worker-types.sh`, `scripts/deploy.sh` | Explicit Node executable override; normally unset |
+| `NODE_BIN` | `scripts/deploy.sh` | Explicit Node executable override; normally unset |
 | `CLOUDFLARE_API_TOKEN` | Wrangler | Non-interactive Cloudflare authentication |
 | `TMPDIR` / `RUNNER_TEMP` | `scripts/ci.sh` | Parent directory for the temporary build copy |
 | `MISE_YES`, `DENO_NO_UPDATE_CHECK` | GitHub Actions workflow | Non-interactive tool install and quieter Deno output |
@@ -567,6 +633,11 @@ of this documentation if it remains useful.
 | `wrangler.jsonc` | Worker entry, deployed name placeholder, compatibility date, source maps, asset binding, SPA fallback and `/api/*` routing |
 | `vite.config.ts` | Vite plus `@cloudflare/vite-plugin`: client and Worker environments, Worker source maps |
 | `scripts/` | Build, Worker types, deployment, CI, initialiser, deployment-artefact checker and their tests |
+| `scripts/vite-build.mjs` | Deno-owned Vite launcher, invoked by `scripts/build.sh`; resolves the installed CLI and both native bindings, then runs Vite under an explicit permission profile |
+| `scripts/wrangler-types.mjs` | Deno-owned Wrangler type-generation launcher, invoked by `scripts/worker-types.sh`; resolves Wrangler, workerd and esbuild, then runs only `types` under an explicit permission profile |
+| `scripts/wrangler-dry-run.mjs` | Deno-owned Wrangler dry-run launcher, invoked by `scripts/deploy-dry-run.sh`; resolves Wrangler and esbuild, then runs only `deploy --dry-run` under a separate scoped profile |
+| `scripts/deno-no-node.sh` | PATH tripwire for project-owned execution; rejects command-name `node`/`nodejs` attempts |
+| `scripts/deploy-dry-run.sh` | Builds, validates artefacts and invokes the Deno dry-run launcher; never deploys |
 | `.mise.toml`, `deno.json`, `package.json`, `deno.lock` | Pinned tools, task definitions and the locked dependency graph |
 | `worker-configuration.d.ts` | Generated, tracked Worker `Env` types; never edit by hand |
 
@@ -592,18 +663,19 @@ mise exec -- npm run build
 
 `scripts/build.sh` performs nine printed stages:
 
-1. Resolve and initialise the Emscripten SDK, keep the project-managed Node
-   first on `PATH` for the Vite and Wrangler shims, and verify `em++`, `cmake`,
-   `ninja`, the Python interpreter and the installed npm dependency tree
-   (`tsc`, `vite`, `wrangler`) are available.
+1. Resolve and initialise the Emscripten SDK, verify `em++`, `cmake`, `ninja`,
+   the Python interpreter and the installed npm dependency tree (`tsc`, `vite`,
+   `wrangler`) are available. No project Node is required.
 2. Configure CMake with the Emscripten toolchain.
 3. Build the C++ sources with Ninja.
 4. Publish the build-tree `wasm_math.js` and `wasm_math.wasm` to
    `public/wasm/`.
 5. Type-check the client with the TypeScript 7 checker (launched by Deno).
 6. Type-check the Worker with the same checker.
-7. Check that `worker-configuration.d.ts` is current.
-8. Remove `dist/` and run the Vite production build for the Worker and client.
+7. Check that `worker-configuration.d.ts` is current through the Deno-owned
+   Wrangler types launcher.
+8. Remove `dist/` and run the Deno-owned Vite production build for the Worker and
+   client.
 9. Run the published-artefact WASM smoke test.
 
 The build fails early with an explicit message if the npm dependencies are
@@ -659,7 +731,21 @@ mise exec -- deno task check:worker-types   # freshness check used by the build
 ```
 
 The file is tracked, excluded from formatting and linting, and must not be
-edited by hand. Both commands require an initialised project.
+edited by hand. Both commands require an initialised project. They run through
+`scripts/wrangler-types.mjs` in a separate Deno process with read/write/env/sys,
+loopback-only `--allow-net=127.0.0.1`, and `--allow-run` scoped to the installed
+workerd and esbuild executables. esbuild is required even for plain generation:
+Wrangler uses it to resolve the Worker main module, and omitting it silently
+drops `Cloudflare.GlobalProps.mainModule`. No Node, broad net, FFI or
+all-permissions access is granted to type generation.
+
+Wrangler dry-run has its own, separate profile in
+`scripts/wrangler-dry-run.mjs`. It grants read/env/sys, write access only to
+`dist/worker` and Wrangler's config log directory, and run access only to the
+installed esbuild executable. Dry-run needs neither workerd nor FFI nor network
+access; it also does not use the npm Wrangler wrapper. The launcher runs without
+Node on `PATH`. The dry-run wrapper still invokes `deno task build` and
+`deno task check:deploy` first, preserving the existing build/check/dry-run flow.
 
 ### Cold and incremental builds
 
@@ -703,19 +789,23 @@ Run these from the project root with dependencies installed. Commands marked
 | `deno task lint` | Deno lint rules | Toolchain |
 | `deno task check:client` | Client TypeScript semantics (TypeScript 7 native checker, launched by Deno) | Dependencies |
 | `deno task check:worker` | Worker TypeScript semantics (same checker, `worker/tsconfig.json`) | Dependencies |
-| `deno task check:node-boundary` | Configuration invariants plus the narrow source policy (`node:`/`cloudflare:` ambient declarations, suppression directives) | Deno |
+| `deno task check:node-boundary` | Configuration invariants: no `@types/node`, no Node tsconfig types or lib, no `nodejs_compat*` flag | Deno |
 | `deno task test:init` | Initialiser unit tests in temporary fixtures | Deno |
 | `deno task test:worker` | Worker handler tests, invoked directly | Deno |
 | `deno task test:scripts` | Emscripten SDK-root resolution tests with fake layouts | Deno and Bash |
 | `deno task test:deploy` | Deployment-artefact checker unit tests in temporary fixtures | Deno |
-| `deno task test:boundary` | Invariants and source-policy rules, including negative canaries and Worker typecheck coverage | Deno |
+| `deno task test:boundary` | Configuration invariants, including negative canaries and Worker typecheck coverage | Deno |
+| `deno task test:vite` | Vite CLI/native-binding resolution and the explicit Vite permission profile | Deno |
+| `deno task test:wrangler-types` | Wrangler CLI/workerd/esbuild resolution and the explicit type-generation permission profile | Deno |
+| `deno task test:wrangler-dry-run` | Direct Wrangler CLI/esbuild resolution, dry-run profile, argument forwarding and exit propagation | Deno |
+| `deno task test:no-node` | Node-exclusion tripwire: rejection, exit/argument propagation, legitimate tools, parent isolation and Node-absent operation | Deno |
 | `deno task check:worker-types` | `worker-configuration.d.ts` is current | Initialised project, dependencies |
 | `deno task types:worker` | Regenerates `worker-configuration.d.ts` (writes) | Initialised project, dependencies |
 | `deno task test:wasm` | Build-tree WASM smoke test on Deno, Node globals hidden (`19 + 23 = 42`) | Build required |
 | `deno task test:wasm:published` | Published (`dist/client`) WASM smoke test on Deno (`19 + 23 = 42`) | Full build required |
 | `deno task check:deploy` | Generated config/artefact consistency, symlink containment and the Node boundary in the emitted bundles | Full build required |
-| `deno task deploy:dry-run` | Build, artefact check and `wrangler deploy --dry-run` | Initialised project, dependencies |
-| `deno task validate` | `fmt:check`, `lint`, client/Worker typechecks, the Node boundary check and the five Deno test suites | Dependencies; works on the template |
+| `deno task deploy:dry-run` | Build, artefact check and Deno-owned `wrangler deploy --dry-run` | Initialised project, dependencies |
+| `deno task validate` | `fmt:check`, `lint`, client/Worker typechecks, the Node boundary check and the nine Deno test suites | Dependencies; works on the template |
 | `deno task ci` | `scripts/ci.sh all` (static checks plus isolated build validation) | Dependencies; works on the template |
 
 Deno tasks are canonical. `package.json` provides npm script equivalents for
@@ -739,7 +829,7 @@ mode:
 | Mode | Work performed |
 | --- | --- |
 | `static` | Formatting, linting, client and Worker typechecks, the Node dependency-boundary check and tests, initialiser tests, Worker runtime tests |
-| `build` | Build/deployment tooling tests, dependency check, throwaway build copy, throwaway identity, Worker types freshness, full build, deployment-artefact check, both Deno WASM smoke tests, Wrangler dry run |
+| `build` | Build/deployment tooling tests, dependency check, throwaway build copy, throwaway identity, Worker types freshness, full build, deployment-artefact check, both Deno WASM smoke tests, Deno-owned Wrangler dry run |
 | `all` | `static` followed by `build` (the default) |
 
 The checkout is never modified. The build mode copies the working tree
@@ -816,21 +906,30 @@ mise exec -- deno task deploy
 mise exec -- deno task check:deploy
 ```
 
-`deploy:dry-run` requires no Cloudflare credentials. `check:deploy` requires a
-completed build.
+`deploy:dry-run` requires no Cloudflare credentials and runs through the
+Deno-owned `scripts/deploy-dry-run.sh` / `scripts/wrangler-dry-run.mjs` path.
+`check:deploy` requires a completed build.
 
-### What the deployment command does
+### What the dry-run and deployment commands do
 
-`scripts/deploy.sh`:
+`scripts/deploy-dry-run.sh`:
 
 1. Runs `deno task build`.
 2. Confirms that the generated configuration
    `dist/worker/wrangler.json` exists.
-3. Runs `scripts/check-deploy-artifacts.mjs` against the generated artefacts.
-4. Runs Wrangler with that generated configuration.
+3. Runs `deno task check:deploy` against the generated artefacts.
+4. Runs the Deno-owned Wrangler dry-run launcher with that configuration and
+   `--dry-run`.
 
-Extra arguments are passed through to Wrangler; this is how the
-`deploy:dry-run` task adds `--dry-run`.
+`scripts/deploy.sh` — the real deployment path — is unchanged:
+
+1. Runs `deno task build`.
+2. Confirms that the generated configuration exists.
+3. Runs `deno task check:deploy`.
+4. Runs Wrangler’s Node-hosted `deploy` with that generated configuration.
+
+Extra arguments are passed through to Wrangler by both paths. The dry-run
+launcher adds `--dry-run` itself; it does not use the npm Wrangler wrapper.
 
 The artefact checker verifies that:
 
@@ -891,8 +990,7 @@ The workflow:
    and download directories (including the Emscripten SDK and Python) under a
    key derived from `.mise.toml`. The post-step save also captures Emscripten's
    compiler cache.
-3. Verifies the pinned Node, Deno, CMake, Ninja, Emscripten and Python
-   versions.
+3. Verifies the pinned Deno, CMake, Ninja, Emscripten and Python versions.
 4. Caches `~/.cache/deno` under a key derived from `deno.lock`.
 5. Installs dependencies with `deno install --frozen`.
 6. Runs formatting, linting, client/Worker typechecks, initialiser tests and
@@ -996,7 +1094,7 @@ the command. Builds from `/mnt/c` are outside the supported environment.
 
 ### Deployment authentication fails
 
-For an interactive session, run `wrangler login` through the pinned Node:
+For an interactive session, run `wrangler login` through a host Node:
 
 ```bash
 mise exec -- node node_modules/wrangler/bin/wrangler.js login

@@ -7,6 +7,12 @@ set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
 
+# Direct invocation must use the same Node-exclusion contract as the Deno task.
+if [[ "${DENO_NO_NODE_ACTIVE:-}" != "1" ]]; then
+    exec "${BASH:-bash}" "$PROJECT_ROOT/scripts/deno-no-node.sh" \
+        "${BASH:-bash}" "$PROJECT_ROOT/scripts/build.sh" "$@"
+fi
+
 # --- Initialise emsdk ONCE for the entire build process -------------------
 # EMSDK_ROOT is the single source of truth for the SDK location.
 #
@@ -66,59 +72,6 @@ if [[ ! -d "$EMSDK_ROOT" ]]; then
     echo "Alternatively point EMSDK_ROOT at an existing emsdk installation." >&2
     exit 1
 fi
-
-# --- Require the project-managed Node BEFORE sourcing emsdk --------------
-# The build's Vite and Wrangler steps run through `#!/usr/bin/env node` shims,
-# so a Node must be present up front. We must capture the project Node (e.g.
-# mise-managed) BEFORE sourcing emsdk, and we must NOT let emsdk supply it:
-# sourcing emsdk_env.sh may otherwise put Emscripten's bundled Node on PATH and
-# silently become the build runtime.
-NODE_REQUIRED="22.12.0"
-
-PROJECT_NODE="$(command -v node 2>/dev/null || true)"
-if [[ -z "$PROJECT_NODE" ]]; then
-    echo "ERROR: no Node.js found on PATH, but the project requires its" >&2
-    echo "       mise-managed Node >= ${NODE_REQUIRED} for the build." >&2
-    echo >&2
-    echo "Install/activate it, e.g.:" >&2
-    echo "    mise install        # installs Node ${NODE_REQUIRED} (from .mise.toml)" >&2
-    echo "    mise exec -- deno task build" >&2
-    exit 1
-fi
-
-PROJECT_NODE_DIR="$(cd "$(dirname "$PROJECT_NODE")" && pwd)"
-
-# Do not accept Emscripten's bundled Node as the project runtime. A reliable
-# signal is whether the captured node resolves inside the emsdk tree. Compare
-# against the canonicalised emsdk root so symlinked installs are handled.
-if [[ -n "${EMSDK_ROOT:-}" ]]; then
-    EMSDK_ROOT_REAL="$(cd "$EMSDK_ROOT" 2>/dev/null && pwd || true)"
-    if [[ -n "$EMSDK_ROOT_REAL" && "$PROJECT_NODE_DIR" == "$EMSDK_ROOT_REAL"/* ]]; then
-        echo "ERROR: the Node on PATH ('$PROJECT_NODE') is Emscripten's bundled Node," >&2
-        echo "       not the project-managed Node. The build must not run on Emscripten's Node." >&2
-        echo "       Activate the project Node (mise) before building, e.g.:" >&2
-        echo "    mise exec -- deno task build" >&2
-        exit 1
-    fi
-fi
-
-# Validate the captured Node version (>= ${NODE_REQUIRED}) before proceeding.
-NODE_VERSION="$("$PROJECT_NODE" --version 2>/dev/null || true)"
-NODE_VERSION="${NODE_VERSION#v}"
-if [[ ! "$NODE_VERSION" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)(\+[0-9A-Za-z.-]+)?$ ]]; then
-    echo "ERROR: could not parse a stable Node.js version from '$PROJECT_NODE --version' (got: '$NODE_VERSION')." >&2
-    echo "       The project requires a stable Node >= ${NODE_REQUIRED} (prereleases are rejected)." >&2
-    exit 1
-fi
-NODE_MAJOR="${BASH_REMATCH[1]}"
-NODE_MINOR="${BASH_REMATCH[2]}"
-if (( NODE_MAJOR < 22 || (NODE_MAJOR == 22 && NODE_MINOR < 12) )); then
-    echo "ERROR: the project requires Node >= ${NODE_REQUIRED}, but '$PROJECT_NODE' is ${NODE_VERSION}." >&2
-    echo "       Switch to the project Node (mise), e.g.:" >&2
-    echo "    mise exec -- deno task build" >&2
-    exit 1
-fi
-export PROJECT_NODE_DIR
 
 # --- Require a Python interpreter for Emscripten BEFORE sourcing emsdk ------
 # Emscripten's emcc/em++ drivers are Python programs (emsdk does not bundle an
@@ -184,22 +137,8 @@ export EMSDK_ROOT
 EMSDK_PYTHON="$PROJECT_PYTHON"
 export EMSDK_PYTHON
 
-# Re-assert project Node precedence: emsdk may have prepended its own Node to
-# PATH. Put the project Node directory back in front so `node` (and the
-# `#!/usr/bin/env node` shims in node_modules/.bin) resolve to the managed
-# runtime, while emsdk's compiler tools (em++/cmake/ninja) remain available.
-if [[ -n "$PROJECT_NODE_DIR" ]]; then
-    # Drop any existing occurrence of the project Node dir, then prepend it,
-    # so it is unambiguously first without creating duplicate entries.
-    NEW_PATH=""
-    IFS=':' read -r -a _path_parts <<< "$PATH"
-    for _p in "${_path_parts[@]}"; do
-        [[ "$_p" == "$PROJECT_NODE_DIR" ]] && continue
-        NEW_PATH="${NEW_PATH:+$NEW_PATH:}$_p"
-    done
-    PATH="$PROJECT_NODE_DIR:$NEW_PATH"
-    export PATH
-fi
+# Re-assert the Emscripten SDK root after sourcing. emsdk_env.sh may also alter
+# PATH to expose its compiler tools; the build no longer requires a project Node.
 
 # --- Validate the toolchain is usable ------------------------------------
 # em++ comes from emsdk; cmake and ninja are separate mise-managed tools.
@@ -211,14 +150,20 @@ for tool in em++ cmake ninja; do
     fi
 done
 
-# The build drives Vite and Wrangler through the local npm install, and the
-# TypeScript checker through Deno's npm cache (see typecheck below). Deno also
-# runs the published-artifact smoke test. Fail before the WASM build with the
-# command that fixes a missing tool.
+# The build drives Vite through a Deno-owned launcher, Worker types through a
+# Deno-owned Wrangler launcher, and typechecks through Deno's npm cache. The npm
+# dependency tree is still checked for the external Vite/Wrangler/TypeScript
+# packages. Deno also runs the published-artifact smoke test. Fail before the
+# WASM build with the command that fixes a missing tool.
 if ! command -v deno >/dev/null 2>&1; then
     echo "ERROR: Deno is required for the typechecks and the WASM smoke test," >&2
     echo "       but it is not on PATH." >&2
     echo "       Install the pinned toolchain with: mise install" >&2
+    exit 1
+fi
+DENO_BIN="$(readlink -f "$(command -v deno)")"
+if [[ -z "$DENO_BIN" || ! -x "$DENO_BIN" ]]; then
+    echo "ERROR: could not resolve an executable Deno binary." >&2
     exit 1
 fi
 
@@ -232,6 +177,11 @@ for tool in tsc vite wrangler; do
         exit 1
     fi
 done
+NODE_MODULES_REAL="$(readlink -f "$PROJECT_ROOT/node_modules")"
+if [[ -z "$NODE_MODULES_REAL" ]]; then
+    echo "ERROR: could not resolve the real node_modules directory." >&2
+    exit 1
+fi
 
 # Derive the toolchain path from the SDK we resolved above. EMSDK_ROOT is
 # authoritative: mise also exports EMSCRIPTEN_ROOT, which would otherwise win
@@ -249,7 +199,6 @@ fi
 export TOOLCHAIN
 
 echo "==> [1/9] emsdk initialised (EMSDK_ROOT=$EMSDK_ROOT)"
-echo "          node   $(node --version)"
 echo "          python ${PYTHON_VERSION#Python } ($PROJECT_PYTHON)"
 echo "          deno   $((deno --version 2>/dev/null || echo 'not found') | head -1)"
 echo "          emcc   $((emcc --version 2>/dev/null || echo 'not found') | head -1)"
@@ -268,7 +217,10 @@ bash scripts/build-wasm.sh build-and-publish
 # from the typecheck path. The permissions are the minimum required:
 #   --allow-read   read sources and the resolved npm package
 #   --allow-env    the launcher reads process.platform / process.env
-#   --allow-run    spawning the native checker is the only child process
+#   --allow-run    spawning the native checker is the only child process. Deno
+#                  accepts only an exact path for a scoped run permission, and
+#                  that path is version- and platform-stamped, so this stays
+#                  unrestricted. See "External ecosystem tools" in README.md.
 # `--cached-only --frozen` keep the run offline and pinned to deno.lock.
 typecheck() {
     deno run --allow-read --allow-env --allow-run --cached-only --frozen \
@@ -281,14 +233,19 @@ echo "==> [6/9] Typecheck worker"
 typecheck worker/tsconfig.json
 echo "==> [7/9] Verify generated worker types"
 bash scripts/worker-types.sh --check
-echo "==> [8/9] ./node_modules/.bin/vite build (assets + worker)"
+echo "==> [8/9] Deno-hosted Vite build (assets + worker)"
 # Remove stale build output so previous Vite layouts cannot survive.
 if [[ -z "$PROJECT_ROOT" || "$PROJECT_ROOT" == "/" ]]; then
     echo "ERROR: refusing to delete dist/ with unsafe PROJECT_ROOT='$PROJECT_ROOT'" >&2
     exit 1
 fi
 rm -rf "$PROJECT_ROOT/dist"
-./node_modules/.bin/vite build
+# The launcher is read-only and may spawn only the pinned Deno binary. The
+# child Vite process receives its own explicit Vite permission profile.
+deno run \
+    --allow-read="$PROJECT_ROOT,$NODE_MODULES_REAL" \
+    --allow-run="$DENO_BIN" \
+    scripts/vite-build.mjs
 echo "==> [9/9] Test published artifact (dist/client/wasm)"
 deno task test:wasm:published
 

@@ -50,7 +50,7 @@ function makeSdk(parent, version = "") {
 /** A minimal PATH containing the external tools the resolver uses. */
 function coreutilsPath() {
   const directory = makeTempDir("init-build-bin-");
-  for (const tool of ["dirname", "readlink"]) {
+  for (const tool of ["dirname", "readlink", "mktemp", "rm", "chmod"]) {
     const result = run("sh", { args: ["-c", `command -v ${tool}`] });
     assert.equal(result.code, 0, result.stderr);
     const resolved = result.stdout.trim();

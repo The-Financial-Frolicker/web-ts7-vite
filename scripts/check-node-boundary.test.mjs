@@ -18,12 +18,10 @@ import {
   DENO_LOCK,
   findConfigInvariantViolations,
   findLockedNodeTypes,
-  findSourcePolicyViolations,
-  listSourceFiles,
   main,
   NodeBoundaryError,
   PACKAGE_JSON,
-  scanSegments,
+  REQUIRED_CONFIG_FILES,
   stripJsonComments,
   WORKER_TSCONFIG,
 } from "./check-node-boundary.mjs";
@@ -100,7 +98,6 @@ function makeProject(overrides = {}) {
     [WORKER_TSCONFIG]: CLEAN_WORKER_TSCONFIG,
     "wrangler.jsonc": CLEAN_WRANGLER,
     [DENO_LOCK]: CLEAN_LOCK,
-    "src/main.ts": "export const answer = 42;\n",
     ...overrides,
   };
 
@@ -123,146 +120,6 @@ function expectViolation(violations, pattern) {
   return violations[0];
 }
 
-describe("scanSegments", () => {
-  it("separates code from comments", () => {
-    const { code, comments } = scanSegments(
-      "const a = 1; // trailing\n/* block */ const b = 2;\n",
-    );
-
-    assert.equal(comments.length, 2);
-    assert.match(comments[0].text, /^\/\/ trailing$/);
-    assert.match(comments[1].text, /^\/\* block \*\/$/);
-    assert.doesNotMatch(code.map((span) => span.text).join(""), /trailing/);
-  });
-
-  it("does not treat comment-like text inside literals as a comment", () => {
-    const source = [
-      'const a = "// not a comment";',
-      "const b = `/* not a comment */`;",
-      "const c = /[/][/]@ts-ignore/;",
-    ].join("\n");
-
-    assert.deepEqual(scanSegments(source).comments, []);
-  });
-
-  it("keeps a regex containing // from opening a comment", () => {
-    const source = "const re = /\\/\\/@ts-ignore/;\nconst after = 1;\n";
-    const { code, comments } = scanSegments(source);
-
-    assert.deepEqual(comments, []);
-    assert.match(code.map((span) => span.text).join(""), /const after = 1;/);
-  });
-});
-describe("findSourcePolicyViolations", () => {
-  it("accepts a clean project", () => {
-    assert.deepEqual(findSourcePolicyViolations(makeProject()), []);
-  });
-
-  it("rejects an ambient node: module declaration", () => {
-    const root = makeProject({
-      "src/zz-ambient.d.ts":
-        'declare module "node:fs" {\n  const x: unknown;\n  export default x;\n}\n',
-    });
-
-    const violation = expectViolation(
-      findSourcePolicyViolations(root),
-      /declares the ambient module "node:fs"/,
-    );
-    assert.equal(violation.file, "src/zz-ambient.d.ts");
-    assert.equal(violation.line, 1);
-  });
-
-  it("rejects an ambient cloudflare: module declaration in the Worker", () => {
-    const root = makeProject({
-      "worker/zz-ambient.ts":
-        'declare module "cloudflare:sockets" {}\nexport const a = 1;\n',
-    });
-
-    const violation = expectViolation(
-      findSourcePolicyViolations(root),
-      /declares the ambient module "cloudflare:sockets"/,
-    );
-    assert.match(violation.file, /^worker\//);
-  });
-
-  it("accepts ambient declarations for non-capability modules", () => {
-    const root = makeProject({
-      "src/zz-css.d.ts": 'declare module "*.css";\n',
-      "src/zz-local.d.ts": 'declare module "./local.js";\n',
-    });
-
-    assert.deepEqual(findSourcePolicyViolations(root), []);
-  });
-
-  it("ignores an ambient declaration quoted in a comment or string", () => {
-    const root = makeProject({
-      "src/zz-mentions.ts": [
-        '// declare module "node:fs" is rejected by policy',
-        "const text = 'declare module \"node:fs\"';",
-        "export const a = 1;",
-        "",
-      ].join("\n"),
-    });
-
-    assert.deepEqual(findSourcePolicyViolations(root), []);
-  });
-
-  it("rejects TypeScript suppression directives in comments", () => {
-    for (const directive of ["@ts-ignore", "@ts-expect-error"]) {
-      const root = makeProject({
-        "src/zz-suppressed.ts": [
-          "// justification",
-          `// ${directive} deliberate`,
-          "export const a = 1;",
-          "",
-        ].join("\n"),
-      });
-
-      const violation = expectViolation(
-        findSourcePolicyViolations(root),
-        new RegExp(`uses the TypeScript suppression directive "${directive}"`),
-      );
-      assert.equal(violation.line, 2);
-      assert.equal(violation.column, 4);
-    }
-  });
-
-  it("accepts the directive text inside a string literal", () => {
-    const root = makeProject({
-      "src/zz-string.ts": 'export const note = "never use @ts-ignore";\n',
-    });
-
-    assert.deepEqual(findSourcePolicyViolations(root), []);
-  });
-
-  it("skips test files", () => {
-    const root = makeProject({
-      "src/zz.test.ts": "// @ts-expect-error fixture\nexport const a = 1;\n",
-    });
-
-    assert.deepEqual(findSourcePolicyViolations(root), []);
-  });
-
-  it("does not inspect computed dynamic imports", () => {
-    // Documented residual gap of this stage, not a policy: keeping it covered
-    // makes a future change deliberate.
-    const root = makeProject({
-      "src/zz-computed.ts": 'const name = "node:" + "fs";\n' +
-        "export const load = async () => await import(name);\n",
-    });
-
-    assert.deepEqual(findSourcePolicyViolations(root), []);
-  });
-
-  it("lists protected source files and skips tests", () => {
-    const root = makeProject({
-      "worker/extra.ts": "export const a = 1;\n",
-      "worker/extra.test.ts": "export const b = 2;\n",
-    });
-
-    assert.deepEqual(listSourceFiles(root), ["src/main.ts", "worker/extra.ts"]);
-  });
-});
 describe("stripJsonComments", () => {
   it("removes comments so JSONC parses", () => {
     const jsonc =
@@ -272,6 +129,28 @@ describe("stripJsonComments", () => {
       a: 1,
       b: "// kept",
     });
+  });
+
+  it("keeps comment-like text inside strings, including escapes", () => {
+    const jsonc = [
+      "{",
+      '  "url": "https://example.test/a//b",',
+      '  "note": "escaped \\" then /* not a comment */",',
+      "  // real comment",
+      '  "last": true',
+      "}",
+      "",
+    ].join("\n");
+
+    assert.deepEqual(JSON.parse(stripJsonComments(jsonc)), {
+      url: "https://example.test/a//b",
+      note: 'escaped " then /* not a comment */',
+      last: true,
+    });
+  });
+
+  it("keeps adjacent tokens apart when a block comment separates them", () => {
+    assert.equal(stripJsonComments("[1/*x*/2]"), "[1 2]");
   });
 });
 
@@ -463,22 +342,25 @@ describe("findConfigInvariantViolations", () => {
   });
 });
 describe("checkCapabilityBoundary", () => {
-  it("passes the repository and inspects the real source", () => {
+  it("passes the repository and inspects every configuration file", () => {
     const result = checkCapabilityBoundary(projectRoot);
 
-    assert.ok(result.files.includes("src/main.ts"));
-    assert.ok(result.files.includes("worker/index.ts"));
+    assert.deepEqual(result.configFiles, [...REQUIRED_CONFIG_FILES]);
     assert.equal(result.invariants, CONFIG_INVARIANTS.length);
   });
 
-  it("reports configuration and source violations together", () => {
+  it("reports every configuration violation together", () => {
     const root = makeProject({
       [PACKAGE_JSON]: JSON.stringify(
         { name: "sample", devDependencies: { "@types/node": "^22.0.0" } },
         null,
         2,
       ),
-      "src/zz-suppressed.ts": "// @ts-ignore\nexport const a = 1;\n",
+      [WORKER_TSCONFIG]: JSON.stringify(
+        { compilerOptions: { lib: ["ES2022"], types: ["node"] } },
+        null,
+        2,
+      ),
     });
 
     assert.throws(
@@ -486,7 +368,7 @@ describe("checkCapabilityBoundary", () => {
       (error) => {
         assert.ok(error instanceof NodeBoundaryError);
         assert.match(error.message, /must not depend on "@types\/node"/);
-        assert.match(error.message, /src\/zz-suppressed\.ts:1:4/);
+        assert.match(error.message, /compilerOptions\.types must be empty/);
         return true;
       },
     );
@@ -513,7 +395,7 @@ describe("main", () => {
     assert.equal(main([], io), 0);
     assert.match(
       lines[0],
-      /^Capability boundary OK: 3 protected source file\(s\)/,
+      /^Capability boundary OK: 6 configuration invariant\(s\) hold across 5 configuration file\(s\)/,
     );
   });
 

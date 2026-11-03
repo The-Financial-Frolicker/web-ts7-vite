@@ -1,6 +1,9 @@
-#!/usr/bin/env node
 /**
- * Capability-boundary enforcement, layers 1 and 3 of 4.
+ * Capability-boundary enforcement: the configuration invariants that the
+ * capability diagnostics depend on.
+ *
+ * The delivered-code boundary rests on two mechanisms, and this file verifies
+ * the premise of the first one:
  *
  *   1. Compiler configuration invariants (this file). The application is free of
  *      Node only because `@types/node` is absent and `types`/`lib` do not
@@ -8,59 +11,31 @@
  *   2. TypeScript semantic diagnostics (`check:client`, `check:worker`). The
  *      compiler resolves imports, aliases and ambient declarations, and reports
  *      `node:fs` and `process` as TS2591 in both projects.
- *   3. Narrow source policy (this file). The two holes the compiler cannot see: a
- *      local ambient module declaration can legitimise `node:`/`cloudflare:`
- *      modules, and a suppression directive can silence the diagnostic layer 2
- *      depends on. Nothing else is inspected; capabilities are not inferred.
- *   4. Delivered-artefact inspection (`check:deploy`).
+ *   3. Delivered-artefact inspection (`check:deploy`). The emitted Worker
+ *      bundle, the client bundles and the published WASM glue are inspected for
+ *      Node built-ins, CommonJS constructs and Node globals.
  *
- * Not enforced at this stage, and recorded as residual gaps: computed or
- * non-literal dynamic imports; `declare global` augmentations; `@ts-nocheck`.
+ * This file deliberately does not scan source text. Textual matching cannot tell
+ * a capability from a mention of one, and a home-grown tokeniser implies
+ * semantic assurance it cannot give: the compiler resolves the program, and
+ * `check:deploy` inspects what is actually shipped. A capability that reaches
+ * the output is caught there whatever the source looked like.
  *
- * Comments, string/template literals and regex literals are excluded from the
- * code rules, and directives are matched only inside comments, so text that
- * mentions a directive or module name cannot fail the check.
+ * Residual gaps, recorded rather than hidden: an unused local
+ * `declare module "node:*"` and an authoring-time `@ts-ignore` are no longer
+ * reported early. Their delivered consequence still has to appear in an emitted
+ * bundle to matter, and `check:deploy` inspects those. Computed or non-literal
+ * dynamic imports remain outside every layer.
  *
  * Exit codes: 0 no violation, 1 violation or usage error.
  */
-import { readdirSync, readFileSync, statSync } from "./lib/fs.mjs";
+import { readFileSync } from "./lib/fs.mjs";
 import path from "./lib/path.mjs";
-
-/** Directories holding delivered application source. */
-export const PROTECTED_ROOTS = Object.freeze(["src", "worker"]);
-
-/** Files that are not delivered application source. */
-const TEST_FILE = /\.(?:test|spec)\.[cm]?[jt]sx?$/;
-
-const SOURCE_EXTENSIONS = new Set([
-  ".ts",
-  ".tsx",
-  ".mts",
-  ".cts",
-  ".js",
-  ".jsx",
-  ".mjs",
-  ".cjs",
-]);
-
-const SKIPPED_DIRECTORIES = Object.freeze(["node_modules"]);
-
-/** Directives that can silence the diagnostic layer 2 relies on. */
-const SUPPRESSION_DIRECTIVE = /@ts-(?:ignore|expect-error)\b/;
-
-/** Ambient module declarations, captured with their specifier. */
-const AMBIENT_MODULE_DECLARATION = /declare\s+module\s*(['"])([^'"]+)\1/g;
-
-/** Module namespaces the application must not acquire. */
-export const FORBIDDEN_AMBIENT_MODULE_PREFIXES = Object.freeze([
-  "node:",
-  "cloudflare:",
-]);
 
 /** The ambient type package the client is allowed to load. */
 export const REQUIRED_CLIENT_TYPE = "vite/client";
 
-/** Node's ambient types; their presence would disable layer 2. */
+/** Node's ambient types; their presence would disable the compiler diagnostics. */
 export const NODE_TYPES_PACKAGE = "@types/node";
 
 /** `nodejs_compat` and its variants, plus the legacy alias. */
@@ -78,6 +53,15 @@ export const WRANGLER_CONFIG = "wrangler.jsonc";
 export const PACKAGE_JSON = "package.json";
 export const DENO_LOCK = "deno.lock";
 
+/** Every file whose contents the configuration invariants depend on. */
+export const REQUIRED_CONFIG_FILES = Object.freeze([
+  PACKAGE_JSON,
+  DENO_LOCK,
+  CLIENT_TSCONFIG,
+  WORKER_TSCONFIG,
+  WRANGLER_CONFIG,
+]);
+
 /** The configuration invariants layer 2 depends on, in check order. */
 export const CONFIG_INVARIANTS = Object.freeze([
   "no package.json dependency section depends on @types/node",
@@ -94,285 +78,60 @@ export class NodeBoundaryError extends Error {
     this.name = "NodeBoundaryError";
   }
 }
-/** Keywords after which a `/` starts a regular expression, not a division. */
-const REGEX_PRECEDING_KEYWORDS = new Set([
-  "await",
-  "case",
-  "delete",
-  "do",
-  "else",
-  "in",
-  "instanceof",
-  "new",
-  "of",
-  "return",
-  "throw",
-  "typeof",
-  "void",
-  "yield",
-]);
-
-/** True when the `/` at `index` can start a regular-expression literal. */
-function regexAllowedAfter(source, index) {
-  let cursor = index - 1;
-
-  while (cursor >= 0 && /\s/.test(source[cursor])) cursor -= 1;
-  if (cursor < 0) return true;
-
-  const previous = source[cursor];
-  if (!/[A-Za-z0-9_$]/.test(previous)) {
-    return previous !== ")" && previous !== "]";
-  }
-
-  let start = cursor;
-  while (start > 0 && /[A-Za-z0-9_$]/.test(source[start - 1])) start -= 1;
-  return REGEX_PRECEDING_KEYWORDS.has(source.slice(start, cursor + 1));
-}
-
-/** Skip a quoted string or template literal, returning the index after it. */
-function skipLiteral(source, start) {
-  const quote = source[start];
-  let index = start + 1;
-
-  while (index < source.length) {
-    const character = source[index];
-
-    if (character === "\\") {
-      index += 2;
-      continue;
-    }
-
-    if (character === quote) return index + 1;
-    // An unterminated string must not swallow the rest of the file.
-    if (character === "\n" && quote !== "`") return index;
-
-    index += 1;
-  }
-
-  return index;
-}
-
-/** Skip a regex literal and its flags, returning the index after it. */
-function skipRegex(source, start) {
-  let index = start + 1;
-  let inCharacterClass = false;
-
-  while (index < source.length) {
-    const character = source[index];
-
-    if (character === "\\") {
-      index += 2;
-      continue;
-    }
-
-    if (character === "\n") return index;
-
-    if (character === "[") {
-      inCharacterClass = true;
-    } else if (character === "]") {
-      inCharacterClass = false;
-    } else if (character === "/" && !inCharacterClass) {
-      index += 1;
-      break;
-    }
-
-    index += 1;
-  }
-
-  while (index < source.length && /[a-z]/i.test(source[index])) index += 1;
-
-  return index;
-}
-
 /**
- * Split source into code spans and comment spans.
+ * Remove `//` line comments and block comments from JSON-with-comments text.
  *
- * Only "inside a comment" versus "inside code" matters for this file's rules, so
- * string, template and regex literals are skipped rather than tokenised: a
- * directive inside a string is not a directive, and a `//` inside a regex does
- * not start a comment. This is deliberately not a tokeniser for code analysis.
+ * Only string state is tracked, because that is the one way a comment delimiter
+ * can legitimately appear in JSON: `"https://example.test"` must survive intact.
+ * This is a JSON reader, not a JavaScript scanner, and it is used only to parse
+ * `tsconfig.json` and `wrangler.jsonc`.
  */
-export function scanSegments(source) {
-  const code = [];
-  const comments = [];
-  const literals = [];
-  let index = 0;
-  let codeStart = 0;
-
-  const openCodeSpan = (end) => {
-    if (end > codeStart) {
-      code.push({ text: source.slice(codeStart, end), start: codeStart });
-    }
-  };
-
-  const openComment = (start, end) => {
-    openCodeSpan(start);
-    comments.push({ text: source.slice(start, end), start });
-    codeStart = end;
-  };
-
-  while (index < source.length) {
-    const character = source[index];
-
-    if (character === "/" && source[index + 1] === "/") {
-      const newline = source.indexOf("\n", index);
-      const end = newline === -1 ? source.length : newline;
-      openComment(index, end);
-      index = end;
-      continue;
-    }
-
-    if (character === "/" && source[index + 1] === "*") {
-      const close = source.indexOf("*/", index + 2);
-      const end = close === -1 ? source.length : close + 2;
-      openComment(index, end);
-      index = end;
-      continue;
-    }
-
-    if (character === '"' || character === "'" || character === "`") {
-      const end = skipLiteral(source, index);
-      literals.push({ start: index, end });
-      index = end;
-      continue;
-    }
-
-    if (character === "/" && regexAllowedAfter(source, index)) {
-      const end = skipRegex(source, index);
-      literals.push({ start: index, end });
-      index = end;
-      continue;
-    }
-
-    index += 1;
-  }
-
-  openCodeSpan(source.length);
-  return { code, comments, literals };
-}
-function locate(source, offset) {
-  const precedingLines = source.slice(0, offset).split("\n");
-
-  return {
-    line: precedingLines.length,
-    column: precedingLines[precedingLines.length - 1].length + 1,
-  };
-}
-
-/** Collect protected source files below `root`, relative and sorted. */
-export function listSourceFiles(root) {
-  const files = [];
-
-  const walk = (directory, prefix) => {
-    for (
-      const entry of readdirSync(path.join(directory, prefix), {
-        withFileTypes: true,
-      })
-    ) {
-      const relative = `${prefix}/${entry.name}`;
-
-      // Never follow symlinks: they can point outside the project.
-      if (entry.isSymbolicLink()) continue;
-
-      if (entry.isDirectory()) {
-        if (SKIPPED_DIRECTORIES.includes(entry.name)) continue;
-        walk(directory, relative);
-        continue;
-      }
-
-      if (!entry.isFile()) continue;
-      if (!SOURCE_EXTENSIONS.has(path.extname(entry.name))) continue;
-      if (TEST_FILE.test(entry.name)) continue;
-
-      files.push(relative);
-    }
-  };
-
-  for (const protectedRoot of PROTECTED_ROOTS) {
-    let stats;
-    try {
-      stats = statSync(path.join(root, protectedRoot));
-    } catch {
-      continue; // An absent root is allowed so reduced checkouts still work.
-    }
-
-    if (!stats.isDirectory()) continue;
-    walk(root, protectedRoot);
-  }
-
-  return files.sort();
-}
-
-/**
- * Source-policy violations: the two holes the compiler cannot see.
- *
- * Everything else about application capability is left to the type checker, and
- * non-literal dynamic imports are deliberately not examined.
- */
-export function findSourcePolicyViolations(root) {
-  const projectRoot = path.resolve(root);
-  const violations = [];
-
-  for (const file of listSourceFiles(projectRoot)) {
-    const source = readFileSync(path.join(projectRoot, file), "utf8");
-    const { code, comments, literals } = scanSegments(source);
-    const insideLiteral = (offset) =>
-      literals.some((literal) =>
-        offset >= literal.start && offset < literal.end
-      );
-
-    // Directives count only inside comments, so a string or template literal
-    // that mentions one cannot fail the check.
-    for (const span of comments) {
-      const match = SUPPRESSION_DIRECTIVE.exec(span.text);
-      if (match === null) continue;
-
-      violations.push({
-        file,
-        ...locate(source, span.start + match.index),
-        message:
-          `uses the TypeScript suppression directive ${
-            JSON.stringify(match[0])
-          }` +
-          "; it can hide the capability diagnostic this boundary depends on",
-      });
-    }
-
-    // Ambient declarations count only in code, so a comment or string that
-    // quotes one cannot fail the check.
-    for (const span of code) {
-      for (const match of span.text.matchAll(AMBIENT_MODULE_DECLARATION)) {
-        const offset = span.start + match.index;
-        // A code span still contains its literal text verbatim, so a quoted
-        // example would otherwise match.
-        if (insideLiteral(offset)) continue;
-
-        const specifier = match[2];
-        const forbidden = FORBIDDEN_AMBIENT_MODULE_PREFIXES.some((prefix) =>
-          specifier.startsWith(prefix)
-        );
-        if (!forbidden) continue;
-
-        violations.push({
-          file,
-          ...locate(source, offset),
-          message: `declares the ambient module ${JSON.stringify(specifier)}` +
-            "; application source must not introduce Node or Cloudflare " +
-            "module capabilities",
-        });
-      }
-    }
-  }
-
-  return violations.sort((left, right) =>
-    left.file.localeCompare(right.file) ||
-    left.line - right.line ||
-    left.column - right.column
-  );
-}
-/** Remove comments while preserving the code that remains. */
 export function stripJsonComments(text) {
-  return scanSegments(text).code.map((span) => span.text).join(" ");
+  let stripped = "";
+  let index = 0;
+
+  while (index < text.length) {
+    const character = text[index];
+
+    if (character === '"') {
+      const start = index;
+      index += 1;
+
+      while (index < text.length) {
+        if (text[index] === "\\") {
+          index += 2;
+          continue;
+        }
+        if (text[index] === '"') {
+          index += 1;
+          break;
+        }
+        index += 1;
+      }
+
+      stripped += text.slice(start, index);
+      continue;
+    }
+
+    if (character === "/" && text[index + 1] === "/") {
+      const newline = text.indexOf("\n", index);
+      index = newline === -1 ? text.length : newline;
+      continue;
+    }
+
+    if (character === "/" && text[index + 1] === "*") {
+      const close = text.indexOf("*/", index + 2);
+      index = close === -1 ? text.length : close + 2;
+      // Keep tokens apart so `1/*x*/2` cannot become `12`.
+      stripped += " ";
+      continue;
+    }
+
+    stripped += character;
+    index += 1;
+  }
+
+  return stripped;
 }
 
 function loadJson(projectRoot, file, commentTolerant, report) {
@@ -591,41 +350,49 @@ export function formatViolations(violations) {
     ...lines,
     "",
     "Layers: compiler configuration (above), TypeScript diagnostics",
-    "(check:client, check:worker), narrow source policy (above), delivered",
-    "artefacts (check:deploy). Computed dynamic imports are not statically",
-    'prohibited. See "Node.js dependency boundary" in README.md.',
+    "(check:client, check:worker), delivered artefacts (check:deploy). Source",
+    'text is not scanned. See "Node.js dependency boundary" in README.md.',
   ].join("\n");
 }
 
 /**
- * Run every check this layer owns.
+ * Run the configuration invariants.
  *
- * Returns `{ root, files, invariants }` on success and throws NodeBoundaryError
- * listing every violation otherwise. An empty file list is an error: it would
- * mean the check passed without inspecting anything.
+ * Returns `{ root, configFiles, invariants }` on success and throws
+ * NodeBoundaryError listing every violation otherwise. Reading no configuration
+ * file at all is an error: it would mean the check passed without inspecting
+ * anything.
  */
 export function checkCapabilityBoundary(root = Deno.cwd()) {
   const projectRoot = path.resolve(root);
-  const files = listSourceFiles(projectRoot);
 
-  if (files.length === 0) {
+  const configFiles = REQUIRED_CONFIG_FILES.filter((file) => {
+    try {
+      readFileSync(path.join(projectRoot, file));
+      return true;
+    } catch {
+      return false;
+    }
+  });
+
+  if (configFiles.length === 0) {
     throw new NodeBoundaryError(
-      `No protected source files found under ${
-        PROTECTED_ROOTS.join(" or ")
-      } in ${projectRoot}. Refusing to pass a check that inspected nothing.`,
+      `No configuration file (${REQUIRED_CONFIG_FILES.join(", ")}) could be ` +
+        `read in ${projectRoot}. Refusing to pass a check that inspected ` +
+        "nothing.",
     );
   }
 
-  const violations = [
-    ...findConfigInvariantViolations(projectRoot),
-    ...findSourcePolicyViolations(projectRoot),
-  ];
-
+  const violations = findConfigInvariantViolations(projectRoot);
   if (violations.length > 0) {
     throw new NodeBoundaryError(formatViolations(violations));
   }
 
-  return { root: projectRoot, files, invariants: CONFIG_INVARIANTS.length };
+  return {
+    root: projectRoot,
+    configFiles,
+    invariants: CONFIG_INVARIANTS.length,
+  };
 }
 
 /** CLI entry point; returns a process exit code instead of exiting directly. */
@@ -641,10 +408,10 @@ export function main(argv = Deno.args, io = console) {
   try {
     const result = checkCapabilityBoundary();
     io.log(
-      `Capability boundary OK: ${result.files.length} protected source file(s) ` +
-        `under ${PROTECTED_ROOTS.join(", ")}; ${result.invariants} ` +
-        "configuration invariant(s) hold; no ambient Node/Cloudflare module " +
-        "declarations and no TypeScript suppression directives.",
+      `Capability boundary OK: ${result.invariants} configuration invariant(s) ` +
+        `hold across ${result.configFiles.length} configuration file(s); no ` +
+        `"@types/node" dependency, no Node tsconfig types or lib, and no ` +
+        "nodejs_compat* flag.",
     );
     return 0;
   } catch (error) {

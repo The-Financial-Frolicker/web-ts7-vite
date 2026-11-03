@@ -50,7 +50,6 @@ jobs:
 
       - name: Verify the pinned toolchain
         run: |
-          mise exec -- node --version
           mise exec -- deno --version
           mise exec -- cmake --version | head -n 1
           mise exec -- ninja --version
@@ -96,6 +95,18 @@ jobs:
 
       - name: Node dependency boundary tests
         run: mise exec -- deno task test:boundary
+
+      - name: Vite invocation tests
+        run: mise exec -- deno task test:vite
+
+      - name: Wrangler type-generation tests
+        run: mise exec -- deno task test:wrangler-types
+
+      - name: Wrangler dry-run tests
+        run: mise exec -- deno task test:wrangler-dry-run
+
+      - name: Node-exclusion wrapper tests
+        run: mise exec -- deno task test:no-node
 
       # The template's identity placeholder is not a valid Cloudflare Worker
       # name, so this stage builds a throwaway initialised copy: worker types

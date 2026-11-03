@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 /**
  * Deployment compatibility check for the generated deployment artefacts.
  *

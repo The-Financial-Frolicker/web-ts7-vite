@@ -27,6 +27,12 @@ set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
 
+# Direct invocation must use the same Node-exclusion contract as the Deno task.
+if [[ "${DENO_NO_NODE_ACTIVE:-}" != "1" ]]; then
+    exec "${BASH:-bash}" "$PROJECT_ROOT/scripts/deno-no-node.sh" \
+        "${BASH:-bash}" "$PROJECT_ROOT/scripts/ci.sh" "$@"
+fi
+
 STAGE="${1:-all}"
 WORK_DIR=""
 
@@ -62,6 +68,14 @@ run_static_checks() {
     deno task test:worker
     echo "==> Node dependency boundary tests"
     deno task test:boundary
+    echo "==> Vite invocation tests"
+    deno task test:vite
+    echo "==> Wrangler type-generation tests"
+    deno task test:wrangler-types
+    echo "==> Wrangler dry-run tests"
+    deno task test:wrangler-dry-run
+    echo "==> Node-exclusion wrapper tests"
+    deno task test:no-node
 }
 
 run_build_checks() {
