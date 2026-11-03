@@ -82,6 +82,11 @@ jobs:
       - name: Project initialisation tests
         run: mise exec -- deno task test:init
 
+      # Invokes the Worker handler directly with standard `Request` objects;
+      # no server, network access or bindings are involved.
+      - name: Worker runtime tests
+        run: mise exec -- deno task test:worker
+
       # The template's identity placeholder is not a valid Cloudflare Worker
       # name, so this stage builds a throwaway initialised copy: worker types
       # freshness check, WASM build, build-tree and published-artifact smoke

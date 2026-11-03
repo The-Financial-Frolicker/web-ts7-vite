@@ -18,6 +18,7 @@
     "ci": "bash scripts/ci.sh",
     "init:project": "node scripts/init-project.mjs",
     "test:init": "node --test scripts/init-project.test.mjs",
+    "test:worker": "node --test worker/index.test.mjs",
     "test:wasm": "node wasm/test.mjs",
     "test:wasm:published": "node scripts/test-wasm-published.mjs",
     "preview": "vite preview"

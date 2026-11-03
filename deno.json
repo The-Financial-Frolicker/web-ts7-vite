@@ -21,9 +21,10 @@
     "types:worker": "bash scripts/worker-types.sh",
     "init:project": "node scripts/init-project.mjs",
     "test:init": "node --test scripts/init-project.test.mjs",
+    "test:worker": "node --test worker/index.test.mjs",
     "test:wasm": "node wasm/test.mjs",
     "test:wasm:published": "node scripts/test-wasm-published.mjs",
-    "validate": "deno task fmt:check && deno task lint && deno task check:client && deno task check:worker && deno task test:init",
+    "validate": "deno task fmt:check && deno task lint && deno task check:client && deno task check:worker && deno task test:init && deno task test:worker",
     "ci": "bash scripts/ci.sh",
     "deploy": "bash scripts/deploy.sh",
     "deploy:dry-run": "bash scripts/deploy.sh --dry-run"

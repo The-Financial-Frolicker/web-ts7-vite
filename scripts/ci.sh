@@ -6,7 +6,8 @@
 # be built or deployed. This script therefore:
 #
 #   1. runs the checks that work directly on the template (formatting, linting,
-#      typechecks and the project-initialisation tests), and
+#      typechecks, the project-initialisation tests and the Worker runtime
+#      tests), and
 #   2. validates the full build in a throwaway copy of the working tree whose
 #      identity has been initialised with a sample name.
 #
@@ -55,6 +56,8 @@ run_static_checks() {
     deno task check:worker
     echo "==> Project initialisation tests"
     deno task test:init
+    echo "==> Worker runtime tests"
+    deno task test:worker
 }
 
 run_build_checks() {
