@@ -88,6 +88,15 @@ jobs:
       - name: Worker runtime tests
         run: mise exec -- deno task test:worker
 
+      # Rejects Node built-in imports and Node runtime globals in the delivered
+      # application source (`src/`, `worker/`). The development toolchain is out
+      # of scope; see "Node.js dependency boundary" in README.md.
+      - name: Node dependency boundary (source)
+        run: mise exec -- deno task check:node-boundary
+
+      - name: Node dependency boundary tests
+        run: mise exec -- deno task test:boundary
+
       # The template's identity placeholder is not a valid Cloudflare Worker
       # name, so this stage builds a throwaway initialised copy: worker types
       # freshness check, WASM build, build-tree and published-artifact smoke

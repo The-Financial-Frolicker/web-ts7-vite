@@ -42,6 +42,16 @@ const symlinkSkip = (() => {
   }
 })();
 
+/**
+ * A minimal browser-only glue fixture. The published glue must declare
+ * `ENVIRONMENT_IS_WEB` (what `-sENVIRONMENT=web` emits), so every fixture that
+ * stands in for it carries the marker.
+ */
+const BROWSER_GLUE = [
+  "var ENVIRONMENT_IS_WEB = true;",
+  "export default async () => ({});",
+].join("\n") + "\n";
+
 function baseConfig(name = "sample-app") {
   return {
     name,
@@ -89,7 +99,7 @@ function makeProject({
     "dist/worker/index.js": "export default {};\n",
     "dist/worker/index.js.map": "{}\n",
     "dist/client/index.html": "<!doctype html>\n",
-    "dist/client/wasm/wasm_math.js": "export default async () => ({});\n",
+    "dist/client/wasm/wasm_math.js": BROWSER_GLUE,
     "dist/client/wasm/wasm_math.wasm": "wasm\n",
   };
 
@@ -118,7 +128,7 @@ function makeExternalAssets() {
   for (
     const [file, contents] of Object.entries({
       "index.html": "<!doctype html>\n",
-      "wasm/wasm_math.js": "export default async () => ({});\n",
+      "wasm/wasm_math.js": BROWSER_GLUE,
       "wasm/wasm_math.wasm": "wasm\n",
     })
   ) {
@@ -299,7 +309,7 @@ describe("symlink containment", () => {
       for (
         const [file, contents] of Object.entries({
           "index.html": "<!doctype html>\n",
-          "wasm/wasm_math.js": "export default async () => ({});\n",
+          "wasm/wasm_math.js": BROWSER_GLUE,
           "wasm/wasm_math.wasm": "wasm\n",
         })
       ) {
@@ -493,6 +503,270 @@ describe("generated configuration parsing", () => {
         ),
       }),
       /Cannot parse generated Wrangler configuration/,
+    );
+  });
+});
+
+describe("Node dependency boundary", () => {
+  /**
+   * A fixture with the shape of the real browser-only glue: the web marker, the
+   * read-only version probe Emscripten always emits, and the dead
+   * `ENVIRONMENT_IS_NODE` assertion text the web-only build retains.
+   */
+  const WEB_ONLY_GLUE = [
+    "if (typeof process !== 'undefined' && !process.versions?.bun) {",
+    "  var probe = process.versions?.node;",
+    "}",
+    "var ENVIRONMENT_IS_WEB = !!globalThis.window;",
+    "assert(!ENVIRONMENT_IS_NODE, 'node environment detected');",
+    "export default async () => ({});",
+  ].join("\n");
+
+  const CLIENT_BUNDLE = "dist/client/assets/index-abc.js";
+
+  it("accepts Node-free bundles and reports what it inspected", () => {
+    const result = checkDeployArtifacts(
+      makeProject({ files: { [CLIENT_BUNDLE]: "export const a = 1;\n" } }),
+    );
+
+    assert.deepEqual(result.compatibilityFlags, []);
+    assert.deepEqual(result.nodeBoundary, {
+      clientBundles: 1,
+      wasmGlue: { environment: "ENVIRONMENT_IS_WEB", processProbes: 0 },
+    });
+  });
+
+  it("accepts browser-only glue and reports the browser marker", () => {
+    const result = checkDeployArtifacts(
+      makeProject({
+        files: { "dist/client/wasm/wasm_math.js": WEB_ONLY_GLUE },
+      }),
+    );
+
+    assert.deepEqual(result.nodeBoundary.wasmGlue, {
+      environment: "ENVIRONMENT_IS_WEB",
+      processProbes: 2,
+    });
+  });
+
+  it("accepts dead ENVIRONMENT_IS_NODE text in browser-only glue", () => {
+    // The web-only build keeps that identifier in its assertion text; asserting
+    // its absence would reject a correct artefact.
+    assert.match(WEB_ONLY_GLUE, /ENVIRONMENT_IS_NODE/);
+    assert.equal(
+      checkDeployArtifacts(
+        makeProject({
+          files: { "dist/client/wasm/wasm_math.js": WEB_ONLY_GLUE },
+        }),
+      ).name,
+      "sample-app",
+    );
+  });
+
+  it("rejects a Worker bundle that imports a Node built-in", () => {
+    expectFailure(
+      makeProject({
+        files: { "dist/worker/index.js": 'import fs from "node:fs";\n' },
+      }),
+      /Worker bundle must not depend on Node\.js: found a Node built-in/,
+    );
+  });
+
+  it("rejects a client bundle that calls require()", () => {
+    expectFailure(
+      makeProject({ files: { [CLIENT_BUNDLE]: 'require("fs");\n' } }),
+      /client bundle assets\/index-abc\.js must not depend on Node\.js: found a CommonJS require/s,
+    );
+  });
+
+  it("rejects a client bundle that reads process.env", () => {
+    expectFailure(
+      makeProject({
+        files: { [CLIENT_BUNDLE]: "const env = process.env.NODE_ENV;\n" },
+      }),
+      /found the Node process global/,
+    );
+  });
+
+  it("rejects process reached through a global object", () => {
+    for (const access of ["globalThis", "window", "self"]) {
+      expectFailure(
+        makeProject({
+          files: { [CLIENT_BUNDLE]: `const v = ${access}.process.env.HOME;\n` },
+        }),
+        /found the Node process global reached through a global object/,
+      );
+    }
+  });
+
+  it("accepts a property that merely shares a Node global's name", () => {
+    assert.equal(
+      checkDeployArtifacts(
+        makeProject({
+          files: { [CLIENT_BUNDLE]: "const v = logger.process.value;\n" },
+        }),
+      ).name,
+      "sample-app",
+    );
+  });
+
+  it("rejects a cloudflare:node capability reference", () => {
+    expectFailure(
+      makeProject({
+        files: {
+          "dist/worker/index.js":
+            'import { httpServerHandler } from "cloudflare:node";\n',
+        },
+      }),
+      /Worker bundle must not depend on Node\.js: found a cloudflare:node capability reference/,
+    );
+
+    expectFailure(
+      makeProject({
+        files: { [CLIENT_BUNDLE]: 'import x from "cloudflare:node";\n' },
+      }),
+      /found a cloudflare:node capability reference/,
+    );
+  });
+
+  it("accepts the glue's global-object version probe", () => {
+    // Regression for the S4 glue rule: Emscripten's environment detection reads
+    // `globalThis.process?.versions` even in browser-only output, which the
+    // generic member rule would otherwise reject.
+    const glue = [
+      "var ENVIRONMENT_IS_WEB = !!globalThis.window;",
+      "var ENVIRONMENT_IS_NODE = globalThis.process?.versions?.node && ",
+      "  globalThis.process?.type != 'renderer';",
+      "export default async () => ({});",
+    ].join("\n");
+
+    assert.equal(
+      checkDeployArtifacts(
+        makeProject({ files: { "dist/client/wasm/wasm_math.js": glue } }),
+      ).name,
+      "sample-app",
+    );
+  });
+
+  it("ignores source maps, which are never executed", () => {
+    assert.equal(
+      checkDeployArtifacts(
+        makeProject({
+          files: {
+            [`${CLIENT_BUNDLE}.map`]: '{"sources":["node:fs"]}\n',
+            "dist/worker/index.js.map":
+              '{"sources":["require(\\"node:fs\\")"]}\n',
+          },
+        }),
+      ).name,
+      "sample-app",
+    );
+  });
+
+  it("rejects a static node: import in the WASM glue", () => {
+    const glue = [WEB_ONLY_GLUE, 'import fs from "node:fs";'].join("\n");
+
+    expectFailure(
+      makeProject({ files: { "dist/client/wasm/wasm_math.js": glue } }),
+      /published WASM glue must not depend on Node\.js: found a Node built-in module specifier "node:fs"/,
+    );
+  });
+
+  it("rejects a dynamically imported node: specifier in the WASM glue", () => {
+    const glue = [
+      WEB_ONLY_GLUE,
+      'await import("node:worker_threads");',
+    ].join("\n");
+
+    expectFailure(
+      makeProject({ files: { "dist/client/wasm/wasm_math.js": glue } }),
+      /found a Node built-in module specifier "node:worker_threads"/,
+    );
+  });
+
+  it("rejects a require() loading path in the WASM glue", () => {
+    const glue = [WEB_ONLY_GLUE, 'require("node:fs");'].join("\n");
+
+    expectFailure(
+      makeProject({ files: { "dist/client/wasm/wasm_math.js": glue } }),
+      /published WASM glue must not depend on Node\.js: found a CommonJS require\(\) call/,
+    );
+  });
+
+  it("rejects a Node capability reached through process in the glue", () => {
+    const glue = [WEB_ONLY_GLUE, "var home = process.env.HOME;"].join("\n");
+
+    expectFailure(
+      makeProject({ files: { "dist/client/wasm/wasm_math.js": glue } }),
+      /Only Emscripten's read-only probes are accepted/,
+    );
+  });
+
+  it("rejects a Node Buffer use in the WASM glue", () => {
+    const glue = [WEB_ONLY_GLUE, 'var b = Buffer.from("x");'].join("\n");
+
+    expectFailure(
+      makeProject({ files: { "dist/client/wasm/wasm_math.js": glue } }),
+      /found the Node Buffer global/,
+    );
+  });
+
+  it("rejects glue that does not declare the browser environment", () => {
+    // This is the shape of the previous `-sENVIRONMENT=web,node` artefact and of
+    // any glue built for a non-browser environment.
+    const glue = "export default async () => ({});\n";
+
+    expectFailure(
+      makeProject({ files: { "dist/client/wasm/wasm_math.js": glue } }),
+      /is not browser-only: it does not declare ENVIRONMENT_IS_WEB/,
+    );
+  });
+
+  it("rejects Node.js compatibility in the generated configuration", () => {
+    const config = baseConfig();
+    config.compatibility_flags = ["nodejs_compat"];
+
+    expectFailure(
+      makeProject({ config }),
+      /"nodejs_compat", which opts the Worker into Node\.js compatibility/,
+    );
+  });
+
+  it("rejects every Node.js compatibility variant, not just the bare name", () => {
+    for (
+      const flag of [
+        "nodejs_compat_v2",
+        "nodejs_compat_populate_process_env",
+        "nodejs_als",
+      ]
+    ) {
+      const config = baseConfig();
+      config.compatibility_flags = [flag];
+
+      expectFailure(
+        makeProject({ config }),
+        /which opts the Worker into Node\.js compatibility/,
+      );
+    }
+  });
+
+  it("accepts an explicit empty compatibility_flags array", () => {
+    const config = baseConfig();
+    config.compatibility_flags = [];
+
+    assert.deepEqual(
+      checkDeployArtifacts(makeProject({ config })).compatibilityFlags,
+      [],
+    );
+  });
+
+  it("rejects a non-array compatibility_flags value", () => {
+    const config = baseConfig();
+    config.compatibility_flags = "nodejs_compat";
+
+    expectFailure(
+      makeProject({ config }),
+      /generated "compatibility_flags" must be an array/,
     );
   });
 });

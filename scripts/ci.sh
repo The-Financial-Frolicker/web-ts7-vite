@@ -6,8 +6,8 @@
 # be built or deployed. This script therefore:
 #
 #   1. runs the checks that work directly on the template (formatting, linting,
-#      typechecks, the project-initialisation tests and the Worker runtime
-#      tests), and
+#      typechecks, the Node dependency-boundary checks and tests, the
+#      project-initialisation tests and the Worker runtime tests), and
 #   2. validates the full build in a throwaway copy of the working tree whose
 #      identity has been initialised with a sample name.
 #
@@ -54,10 +54,14 @@ run_static_checks() {
     deno task check:client
     echo "==> Worker typecheck"
     deno task check:worker
+    echo "==> Node dependency boundary (application source)"
+    deno task check:node-boundary
     echo "==> Project initialisation tests"
     deno task test:init
     echo "==> Worker runtime tests"
     deno task test:worker
+    echo "==> Node dependency boundary tests"
+    deno task test:boundary
 }
 
 run_build_checks() {
@@ -101,10 +105,10 @@ run_build_checks() {
     echo "==> Deployment artefact compatibility check"
     deno task check:deploy
 
-    echo "==> WASM smoke test (build tree)"
+    echo "==> WASM smoke test (build tree, Deno, Node globals hidden)"
     deno task test:wasm
 
-    echo "==> Published-artifact smoke test (dist/client)"
+    echo "==> Published-artifact smoke test (dist/client, Deno)"
     deno task test:wasm:published
 
     echo "==> Wrangler deployment dry run (no credentials required)"

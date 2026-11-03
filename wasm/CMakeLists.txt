@@ -15,7 +15,10 @@ add_executable(wasm_math
 target_link_options(wasm_math PRIVATE
     "-sMODULARIZE=1"
     "-sEXPORT_ES6=1"
-    "-sENVIRONMENT=web,node"
+    # Browser-only glue: no Node loading path is emitted, and Emscripten's
+    # environment detection selects the web branch. Loading it under Node
+    # aborts, which is intended: the delivered artefact targets browsers.
+    "-sENVIRONMENT=web"
 )
 
 set(WASM_WEB_OUTPUT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../public/wasm")

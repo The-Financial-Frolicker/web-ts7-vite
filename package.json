@@ -12,8 +12,9 @@
     "fmt": "deno fmt",
     "fmt:check": "deno fmt --check",
     "lint": "deno lint",
-    "check:client": "tsc",
-    "check:worker": "tsc --project worker/tsconfig.json",
+    "check:client": "deno run --allow-read --allow-env --allow-run --cached-only --frozen npm:typescript@7.0.2 -p tsconfig.json",
+    "check:worker": "deno run --allow-read --allow-env --allow-run --cached-only --frozen npm:typescript@7.0.2 -p worker/tsconfig.json",
+    "check:node-boundary": "node scripts/check-node-boundary.mjs",
     "check:deploy": "node scripts/check-deploy-artifacts.mjs",
     "validate": "deno task validate",
     "ci": "bash scripts/ci.sh",
@@ -22,8 +23,9 @@
     "test:worker": "node --test worker/index.test.mjs",
     "test:scripts": "node --test scripts/build-scripts.test.mjs",
     "test:deploy": "node --test scripts/check-deploy-artifacts.test.mjs",
-    "test:wasm": "node wasm/test.mjs",
-    "test:wasm:published": "node scripts/test-wasm-published.mjs",
+    "test:boundary": "node --test scripts/check-node-boundary.test.mjs",
+    "test:wasm": "deno test --allow-read wasm/harness.test.ts",
+    "test:wasm:published": "deno test --allow-read wasm/published.test.ts",
     "preview": "vite preview"
   },
   "devDependencies": {

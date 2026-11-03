@@ -211,8 +211,20 @@ for tool in em++ cmake ninja; do
     fi
 done
 
-# The build drives TypeScript, Vite and Wrangler through the local npm install.
-# Fail before the WASM build when they are absent, with the command that fixes it.
+# The build drives Vite and Wrangler through the local npm install, and the
+# TypeScript checker through Deno's npm cache (see typecheck below). Deno also
+# runs the published-artifact smoke test. Fail before the WASM build with the
+# command that fixes a missing tool.
+if ! command -v deno >/dev/null 2>&1; then
+    echo "ERROR: Deno is required for the typechecks and the WASM smoke test," >&2
+    echo "       but it is not on PATH." >&2
+    echo "       Install the pinned toolchain with: mise install" >&2
+    exit 1
+fi
+
+# Fail before the WASM build when the dependency tree is absent. `tsc` is still
+# checked as evidence that the npm tree was installed, although the typechecks
+# themselves run through Deno.
 for tool in tsc vite wrangler; do
     if [[ ! -x "./node_modules/.bin/$tool" ]]; then
         echo "ERROR: npm dependencies are not installed (./node_modules/.bin/$tool is missing)." >&2
@@ -248,10 +260,25 @@ bash scripts/build-wasm.sh configure
 echo "==> [3/9] Build WASM (Ninja incremental)"
 echo "==> [4/9] Publish build-tree WASM to public/wasm"
 bash scripts/build-wasm.sh build-and-publish
+# --- TypeScript checking without the project Node ---------------------------
+# TypeScript 7's `tsc` npm entry point is a Node launcher for a native Go
+# checker: it only resolves the platform executable and execve()s it. Running
+# that launcher under Deno therefore keeps the same semantic checker, the same
+# tsconfig options and the same diagnostics, while removing the project Node
+# from the typecheck path. The permissions are the minimum required:
+#   --allow-read   read sources and the resolved npm package
+#   --allow-env    the launcher reads process.platform / process.env
+#   --allow-run    spawning the native checker is the only child process
+# `--cached-only --frozen` keep the run offline and pinned to deno.lock.
+typecheck() {
+    deno run --allow-read --allow-env --allow-run --cached-only --frozen \
+        "npm:typescript@7.0.2" -p "$1"
+}
+
 echo "==> [5/9] Typecheck client"
-./node_modules/.bin/tsc
+typecheck tsconfig.json
 echo "==> [6/9] Typecheck worker"
-./node_modules/.bin/tsc --project worker/tsconfig.json
+typecheck worker/tsconfig.json
 echo "==> [7/9] Verify generated worker types"
 bash scripts/worker-types.sh --check
 echo "==> [8/9] ./node_modules/.bin/vite build (assets + worker)"
@@ -263,7 +290,7 @@ fi
 rm -rf "$PROJECT_ROOT/dist"
 ./node_modules/.bin/vite build
 echo "==> [9/9] Test published artifact (dist/client/wasm)"
-node scripts/test-wasm-published.mjs
+deno task test:wasm:published
 
 echo "Full build complete."
 

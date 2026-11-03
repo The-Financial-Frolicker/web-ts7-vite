@@ -75,6 +75,191 @@ credentials, secrets or Cloudflare account state are stored in the repository.
 No Dockerfile or dev-container configuration is included. Any Linux
 environment that provides the host requirements can use the repository.
 
+## Runtime ownership
+
+Dependencies fall into four categories, and a runtime requirement in one must
+not become a requirement in another.
+
+| Category | Members | Runtime required | Supplied by |
+| --- | --- | --- | --- |
+| Encapsulated toolchain | Emscripten 6.0.13 and everything it drives | its own Node, Python, LLVM, Binaryen | the toolchain itself |
+| External ecosystem | Vite 8.3.5 (Rolldown, lightningcss), Wrangler 4.156.0 (workerd, esbuild, miniflare) | Node | this project (`.mise.toml`) |
+| Project-owned infrastructure | Bash build scripts, Deno tasks and the Deno WASM harness, artefact validation, initialisation, CI | Deno | this project |
+| Delivered application | browser bundle, Worker bundle, WASM glue | browser / Worker capabilities only | this project |
+
+### Encapsulated toolchain dependencies
+
+Emscripten 6.0.13 is a self-contained SDK. It ships and pins **its own** Node
+24.19.0 — `NODE_JS` is an absolute path in its private `.emscripten`
+configuration — and uses it internally for `tools/compiler.mjs`,
+`tools/preprocessor.mjs` and the JavaScript optimiser. It never uses the Node
+this project installs, and this project never invokes Emscripten's copy. That
+Node is therefore **not** a requirement for project-installed Node. Python,
+LLVM, Binaryen, CMake and Ninja belong to the toolchain in the same way.
+
+### External ecosystem tools
+
+Vite and Wrangler are Node-hosted: both declare `engines.node`, and Vite's
+Rolldown and lightningcss components are native bindings loaded by a Node
+process. The project installs Node in [`.mise.toml`](.mise.toml) **as their
+host**. That is a deliberate external-tooling dependency, not a claim that the
+application needs Node.
+
+TypeScript is different in kind. Its semantic checker is a **native Go
+executable**; the `tsc` npm entry point is a launcher that resolves that
+executable and hands over to it. The launcher is not the semantic engine, so
+the checker runs through Deno (`deno task check:client`,
+`deno task check:worker`) against the same `tsconfig.json` files, producing the
+same diagnostics and exit codes without involving the project Node.
+
+### Project-owned infrastructure
+
+Deno is the preferred runtime: an explicit permission model, built-in formatter,
+linter, test runner and task runner, and one API surface to standardise on. The
+Deno WASM harness ([wasm/harness.ts](wasm/harness.ts)) is the first piece of
+infrastructure to run entirely on Deno. The remaining Node-based scripts and
+test suites are known, tracked work — not an endorsed target.
+
+### Delivered application capabilities
+
+The browser application and the Cloudflare Worker may use only the capabilities
+of their own runtimes. Node and Deno are both unavailable to them; that boundary
+is enforced by the checks described in
+[Node.js dependency boundary](#nodejs-dependency-boundary).
+
+### This project is not Node-free
+
+Node remains installed because two external tools require a Node host, and part
+of the project-owned infrastructure still runs on it. The documented goal is
+narrower and precise: no delivered code, and no new project-owned
+infrastructure, depends on Node — while the Node-hosted ecosystem tools keep a
+supported host.
+
+## Node.js dependency boundary
+
+Node.js is part of the toolchain, not part of the product. Two things that are
+easy to confuse are treated differently:
+
+- **The delivered application** — `src/`, `worker/` and everything the build
+  emits into `dist/` — runs in a browser and on Cloudflare Workers. It must not
+  import a Node built-in module, read a Node global, or rely on CommonJS.
+- **The development toolchain** — the Bash scripts in `scripts/`, the Node
+  scripts they run, `vite.config.ts`, and the ecosystem tools pinned in
+  [`.mise.toml`](.mise.toml) — is not governed by this boundary. Vite and
+  Wrangler need a Node host; Emscripten brings its own. See
+  [Runtime ownership](#runtime-ownership).
+
+The policy is therefore narrower than "this repository is Node-free": **Node may
+be installed because external tools require it, but project-owned application
+code and the delivered application must not acquire a functional dependency on
+Node.js or its standard library.**
+
+### What is enforced
+
+The boundary is enforced in four layers, each proving something different:
+
+| Layer | Mechanism | Scope | Where it runs |
+| --- | --- | --- | --- |
+| 1. Configuration invariants | `deno task check:node-boundary` | `package.json`, `deno.lock`, both `tsconfig.json` files, `wrangler.jsonc` | `validate`, `scripts/ci.sh static`, CI |
+| 2. Compiler diagnostics | `deno task check:client`, `check:worker` | `src/`, every `worker/*.ts` module | `validate`, `scripts/ci.sh static`, CI |
+| 3. Narrow source policy | `deno task check:node-boundary` | `src/`, `worker/` (`*.d.ts` included, test files excluded) | `validate`, `scripts/ci.sh static`, CI |
+| 4. Delivered artefacts | `deno task check:deploy` | `dist/worker`, `dist/client`, published WASM glue, generated Wrangler configuration | `scripts/ci.sh build`, `deno task deploy`, CI |
+
+`deno task test:boundary` tests layers 1 and 3 (including negative canaries and a
+Worker-typecheck coverage canary); `deno task test:deploy` tests layer 4.
+
+**Layer 1 — configuration invariants.** The type checker enforces the boundary
+only because Node's ambient types are absent. Those assumptions are asserted
+explicitly, because a check that depends on configuration must verify its own
+premise:
+
+- no `package.json` dependency section depends on `@types/node`;
+- `deno.lock` does not pin `@types/node`;
+- the client `tsconfig.json` declares `types: ["vite/client"]`;
+- `worker/tsconfig.json` declares `types: []`;
+- no `lib` entry names a Node library;
+- `wrangler.jsonc` enables no `nodejs_compat*` flag (the generated configuration is
+  checked again by layer 4).
+
+**Layer 2 — compiler diagnostics.** The compiler resolves imports, aliases and
+ambient declarations, and reports `node:fs` as `TS2591` and `process` as
+`TS2591`/`TS7017` in both projects. `worker/tsconfig.json` includes
+`./**/*.ts`, so a new Worker module is typechecked instead of being silently
+ignored.
+
+**Layer 3 — narrow source policy.** Two holes the compiler cannot see: a local
+ambient module declaration can legitimise a `node:`/`cloudflare:` module, and a
+suppression directive can silence the diagnostic layer 2 depends on. Only these
+are rejected:
+
+- `declare module "node:*"` and `declare module "cloudflare:*"` in our own
+  sources, including `.d.ts` files;
+- `@ts-ignore` and `@ts-expect-error`.
+
+Comments, string/template literals and regex literals are excluded, and
+directives are matched only inside comments, so text that merely mentions one
+cannot fail the check. There is no allowlist: a legitimate need requires changing
+the checker, so it is reviewed.
+
+**Layer 4 — delivered artefacts.** Emitted bundles are checked for `node:`
+specifiers, `cloudflare:node` references, `require(...)`, bare `process` access,
+`process` reached through `globalThis`/`window`/`self`, `Buffer`,
+`module.exports`, `__dirname`/`__filename` and `setImmediate`. A property that
+merely shares a name (`logger.process`) is not a dependency. The published glue
+is browser-only, as described below.
+
+### Browser-only WASM glue
+
+`wasm/CMakeLists.txt` builds the WebAssembly glue with `-sENVIRONMENT=web`, so
+Emscripten emits no Node loading path at all. `check:deploy` holds the glue to
+the same rules as every other executable artefact:
+
+- no `node:` module specifier, static or dynamic;
+- no `require(...)` loading path;
+- no Node capability such as `Buffer`, `module.exports`, `__dirname` or
+  `setImmediate`;
+- the `ENVIRONMENT_IS_WEB` marker must be present.
+
+Two shapes of Emscripten output are tolerated by design, and both are inert:
+
+- the read-only version probes (`process.versions?.bun`,
+  `process.versions?.node`, `globalThis.process?.versions`/`?.type`) that
+  Emscripten always emits. They read a version string, load nothing and
+  grant no capability, so they are stripped before the `process` rule is applied.
+  Any other `process` use — `process.env`, `process.exit`, `process.binding` —
+  fails.
+- dead `ENVIRONMENT_IS_NODE` text in the environment assertion. Its *absence* is
+  not asserted, because the web-only build legitimately retains that identifier.
+
+Building with `web` also means the glue cannot be loaded by Node at all: it
+aborts with "not compiled for this environment". That is intended — the
+delivered artefact targets browsers — and it is why the smoke tests run on Deno
+with a browser-like profile rather than on Node.
+
+`check:deploy` also requires the generated `dist/worker/wrangler.json` to carry
+no Node.js compatibility flag (`nodejs_compat*`, `nodejs_als`). Enabling one
+would make Node globals available in the Worker and so hide a real dependency.
+
+### Limits
+
+- **Computed dynamic imports are not statically prohibited.** A specifier built
+  from a run-time value (`import(name)`, `"node:" + "fs"`) is not evaluated by any
+  layer; its target is a run-time decision. This is a deliberate gap of the
+  current stage, not an oversight.
+- **`declare global` augmentations are not rejected** by layer 3. If such a
+  capability is actually used, layer 4 still sees the emitted reference.
+- **`@ts-nocheck` is not prohibited.** Policy names only `@ts-ignore` and
+  `@ts-expect-error`; a file-level `@ts-nocheck` would disable layer 2 for that
+  file. Review it if it ever appears.
+- **Artifact inspection proves only the references it covers.** Layer 4 can show
+  that a listed reference is present; it cannot show that no runtime capability
+  exists. Generated code that builds a capability without those literal shapes is
+  outside its reach.
+- Layer 3 is a narrow textual rule set, not a type-aware analysis: it suppresses
+  matches inside comments, strings, templates and regexes, but it is not a parser.
+- `check:deploy` needs a build. A change that only affects `src/` or `worker/`
+  is caught earlier by layers 1–3.
+
 ## Get the repository
 
 - **GitHub template workflow:** choose _Use this template → Create a new
@@ -110,7 +295,7 @@ install and download caches.
 
 | Tool                 | Pinned version | Used for                                                   |
 | -------------------- | -------------- | ---------------------------------------------------------- |
-| Node.js              | `24.19.0`      | Vite, TypeScript (`tsc`), Wrangler and Node smoke tests    |
+| Node.js              | `24.19.0`      | Host for Vite and Wrangler, and for the Node-based scripts and test suites that have not moved to Deno yet |
 | Deno                 | `2.9.8`        | Task runner (`deno.json`) and npm dependency installation  |
 | CMake                | `4.4.5`        | Configuring the C++26 → WebAssembly build                  |
 | Ninja                | `1.13.2`       | CMake generator for the WebAssembly build                  |
@@ -407,14 +592,15 @@ mise exec -- npm run build
 `scripts/build.sh` performs nine printed stages:
 
 1. Resolve and initialise the Emscripten SDK, keep the project-managed Node
-   first on `PATH`, and verify `em++`, `cmake`, `ninja`, `tsc`, `vite`,
-   `wrangler` and the Python interpreter are available.
+   first on `PATH` for the Vite and Wrangler shims, and verify `em++`, `cmake`,
+   `ninja`, the Python interpreter and the installed npm dependency tree
+   (`tsc`, `vite`, `wrangler`) are available.
 2. Configure CMake with the Emscripten toolchain.
 3. Build the C++ sources with Ninja.
 4. Publish the build-tree `wasm_math.js` and `wasm_math.wasm` to
    `public/wasm/`.
-5. Type-check the client.
-6. Type-check the Worker.
+5. Type-check the client with the TypeScript 7 checker (launched by Deno).
+6. Type-check the Worker with the same checker.
 7. Check that `worker-configuration.d.ts` is current.
 8. Remove `dist/` and run the Vite production build for the Worker and client.
 9. Run the published-artefact WASM smoke test.
@@ -441,8 +627,9 @@ binary. `scripts/build-wasm.sh` validates and republishes both to
 `public/wasm/` on every build; Vite copies the public directory into
 `dist/client/`, so the browser loads `/wasm/wasm_math.js` from the final client
 assets. `deno task test:wasm` loads the build-tree module;
-`deno task test:wasm:published` loads the final `dist/client` module. Both
-instantiate the module, call `_add(19, 23)` and expect `42`.
+`deno task test:wasm:published` loads the final `dist/client` module. Both run
+on Deno with the Node globals hidden and a browser-like `window` declared, and
+both instantiate the module, call `_add(19, 23)` and expect `42`.
 
 #### Worker, Vite and Wrangler
 
@@ -513,19 +700,21 @@ Run these from the project root with dependencies installed. Commands marked
 | --- | --- | --- |
 | `deno task fmt` / `fmt:check` | Formatting; `fmt` writes, `fmt:check` does not | Toolchain |
 | `deno task lint` | Deno lint rules | Toolchain |
-| `deno task check:client` | Client TypeScript (`tsc`) | Dependencies |
-| `deno task check:worker` | Worker TypeScript (`tsc`) | Dependencies |
+| `deno task check:client` | Client TypeScript semantics (TypeScript 7 native checker, launched by Deno) | Dependencies |
+| `deno task check:worker` | Worker TypeScript semantics (same checker, `worker/tsconfig.json`) | Dependencies |
+| `deno task check:node-boundary` | Configuration invariants plus the narrow source policy (`node:`/`cloudflare:` ambient declarations, suppression directives) | Node |
 | `deno task test:init` | Initialiser unit tests in temporary fixtures | Node |
 | `deno task test:worker` | Worker handler tests, invoked directly | Node |
 | `deno task test:scripts` | Emscripten SDK-root resolution tests with fake layouts | Node and Bash |
 | `deno task test:deploy` | Deployment-artefact checker unit tests in temporary fixtures | Node |
+| `deno task test:boundary` | Invariants and source-policy rules, including negative canaries and Worker typecheck coverage | Node |
 | `deno task check:worker-types` | `worker-configuration.d.ts` is current | Initialised project, dependencies |
 | `deno task types:worker` | Regenerates `worker-configuration.d.ts` (writes) | Initialised project, dependencies |
-| `deno task test:wasm` | Build-tree WASM smoke test (`19 + 23 = 42`) | Build required |
-| `deno task test:wasm:published` | Published (`dist/client`) WASM smoke test (`19 + 23 = 42`) | Full build required |
-| `deno task check:deploy` | Generated config/artefact consistency and symlink containment | Full build required |
+| `deno task test:wasm` | Build-tree WASM smoke test on Deno, Node globals hidden (`19 + 23 = 42`) | Build required |
+| `deno task test:wasm:published` | Published (`dist/client`) WASM smoke test on Deno (`19 + 23 = 42`) | Full build required |
+| `deno task check:deploy` | Generated config/artefact consistency, symlink containment and the Node boundary in the emitted bundles | Full build required |
 | `deno task deploy:dry-run` | Build, artefact check and `wrangler deploy --dry-run` | Initialised project, dependencies |
-| `deno task validate` | `fmt:check`, `lint`, client/Worker typechecks and the four Node test suites | Dependencies; works on the template |
+| `deno task validate` | `fmt:check`, `lint`, client/Worker typechecks, the Node boundary check and the five Node test suites | Dependencies; works on the template |
 | `deno task ci` | `scripts/ci.sh all` (static checks plus isolated build validation) | Dependencies; works on the template |
 
 Deno tasks are canonical. `package.json` provides npm script equivalents for
@@ -548,8 +737,8 @@ mode:
 
 | Mode | Work performed |
 | --- | --- |
-| `static` | Formatting, linting, client and Worker typechecks, initialiser tests, Worker runtime tests |
-| `build` | Build/deployment tooling tests, dependency check, throwaway build copy, throwaway identity, Worker types freshness, full build, deployment-artefact check, both WASM smoke tests, Wrangler dry run |
+| `static` | Formatting, linting, client and Worker typechecks, the Node dependency-boundary check and tests, initialiser tests, Worker runtime tests |
+| `build` | Build/deployment tooling tests, dependency check, throwaway build copy, throwaway identity, Worker types freshness, full build, deployment-artefact check, both Deno WASM smoke tests, Wrangler dry run |
 | `all` | `static` followed by `build` (the default) |
 
 The checkout is never modified. The build mode copies the working tree
@@ -574,7 +763,15 @@ either mode that performs typechecks or builds.
   `run_worker_first`, SPA fallback or custom domains.
 - Asset routing is checked by static configuration inspection and
   `wrangler deploy --dry-run`, not by live HTTP requests.
-- WASM smoke tests execute in Node, not in a browser.
+- WASM smoke tests execute on Deno in a browser-like profile (Node globals
+  removed, `window` declared), not in a real browser. The harness shows the
+  module needs no Node runtime and loads from a browser-shaped environment; it is
+  not a browser-behaviour test. With `-sENVIRONMENT=web` the glue refuses to load
+  under Node at all, so the former Node smoke tests no longer exist.
+- The Node dependency-boundary checks are textual. They detect Node imports and
+  Node globals in application source and in the emitted bundles, but they do not
+  prove the absence of a Node dependency at run time, and they do not inspect
+  `node_modules`.
 - `check:deploy` is a point-in-time static check; it does not protect against
   files or directories being replaced between the check and the upload.
 - `wrangler deploy --dry-run` validates and packages the configuration and
@@ -641,7 +838,11 @@ The artefact checker verifies that:
 - the generated config, Worker `main`, assets directory, `index.html`, both
   published WASM files and the source map (when enabled) exist and resolve
   inside the real `dist/` tree, including after resolving symbolic links;
-- the asset binding, SPA fallback and `run_worker_first` routing are present.
+- the asset binding, SPA fallback and `run_worker_first` routing are present;
+- the generated configuration enables no Node.js compatibility flag, and the
+  Worker bundle, the client bundles and the published WASM glue stay within the
+  Node dependency boundary (see
+  [Node.js dependency boundary](#nodejs-dependency-boundary)).
 
 It rejects artefacts that escape `dist/` through symlinks, but it is a
 point-in-time check. It does not protect against concurrent changes between the
@@ -700,7 +901,7 @@ The workflow:
 The raw template is statically checked because its placeholder is not a valid
 Worker name. Build validation therefore happens in the throwaway copy:
 tooling tests, Worker types freshness, full build, deployment-artefact check,
-both WASM smoke tests and the Wrangler dry run. CI has no Cloudflare secrets
+both Deno WASM smoke tests and the Wrangler dry run. CI has no Cloudflare secrets
 and never deploys.
 
 For a local equivalent, run `mise exec -- deno task validate` for the static
@@ -756,7 +957,10 @@ mise exec -- deno install --frozen
 ```
 
 The build checks for `node_modules/.bin/tsc`, `vite` and `wrangler` before
-starting the WASM work.
+starting the WASM work. `tsc` is checked as evidence that the dependency tree
+was installed; type checking itself is launched through Deno. The build also
+requires `deno` on `PATH` for those typechecks and for the published WASM smoke
+test, and stops with an install hint if it is absent.
 
 ### `check:worker-types` fails
 
