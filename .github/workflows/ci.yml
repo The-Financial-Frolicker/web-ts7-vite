@@ -55,6 +55,7 @@ jobs:
           mise exec -- cmake --version | head -n 1
           mise exec -- ninja --version
           mise exec -- emcc --version | head -n 1
+          mise exec -- python3 --version
 
       - name: Cache Deno's npm download cache
         uses: actions/cache@v6

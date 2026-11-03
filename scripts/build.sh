@@ -120,6 +120,49 @@ if (( NODE_MAJOR < 22 || (NODE_MAJOR == 22 && NODE_MINOR < 12) )); then
 fi
 export PROJECT_NODE_DIR
 
+# --- Require a Python interpreter for Emscripten BEFORE sourcing emsdk ------
+# Emscripten's emcc/em++ drivers are Python programs (emsdk does not bundle an
+# interpreter). Capture the project-managed interpreter before emsdk_env.sh can
+# alter PATH, respect an explicit EMSDK_PYTHON override, and export the chosen
+# path again after sourcing so every compiler invocation uses the same Python.
+PYTHON_REQUIRED="3.10"
+
+if [[ -n "${EMSDK_PYTHON:-}" ]]; then
+    PROJECT_PYTHON="$EMSDK_PYTHON"
+else
+    PROJECT_PYTHON="$(command -v python3 2>/dev/null || command -v python 2>/dev/null || true)"
+fi
+
+if [[ -z "$PROJECT_PYTHON" ]]; then
+    echo "ERROR: no Python interpreter found for Emscripten's emcc driver." >&2
+    echo "       The project pins Python >= ${PYTHON_REQUIRED} in .mise.toml." >&2
+    echo "       Install/activate the toolchain:" >&2
+    echo "    mise install" >&2
+    echo "    mise exec -- deno task build" >&2
+    exit 1
+fi
+
+if [[ ! -x "$PROJECT_PYTHON" ]]; then
+    echo "ERROR: Python interpreter is not executable: $PROJECT_PYTHON" >&2
+    exit 1
+fi
+
+PYTHON_VERSION="$("$PROJECT_PYTHON" --version 2>&1 | head -1 || true)"
+if [[ ! "$PYTHON_VERSION" =~ ^Python\ 3\.([0-9]+) ]]; then
+    echo "ERROR: could not parse a Python 3 version from '$PROJECT_PYTHON --version' (got: '$PYTHON_VERSION')." >&2
+    echo "       Emscripten requires Python >= ${PYTHON_REQUIRED}." >&2
+    exit 1
+fi
+
+if (( BASH_REMATCH[1] < 10 )); then
+    echo "ERROR: Emscripten requires Python >= ${PYTHON_REQUIRED}, but '$PROJECT_PYTHON' is ${PYTHON_VERSION#Python }." >&2
+    echo "       Switch to the pinned Python (mise), e.g.:" >&2
+    echo "    mise exec -- deno task build" >&2
+    exit 1
+fi
+
+export PROJECT_PYTHON
+
 # `source` runs in THIS shell; set -e makes any failure abort immediately.
 # A mise-managed emsdk also ships emsdk_env.sh; if it is absent we rely on the
 # environment mise already exported (EMSDK / EMSCRIPTEN_ROOT / EM_CONFIG / PATH).
@@ -135,6 +178,11 @@ fi
 # SDK location.
 EMSDK_ROOT="$PROJECT_EMSDK_ROOT"
 export EMSDK_ROOT
+
+# Emscripten's compiler driver honours EMSDK_PYTHON. Re-assert the interpreter
+# captured above so emsdk_env.sh cannot silently switch to a different Python.
+EMSDK_PYTHON="$PROJECT_PYTHON"
+export EMSDK_PYTHON
 
 # Re-assert project Node precedence: emsdk may have prepended its own Node to
 # PATH. Put the project Node directory back in front so `node` (and the
@@ -190,6 +238,7 @@ export TOOLCHAIN
 
 echo "==> [1/9] emsdk initialised (EMSDK_ROOT=$EMSDK_ROOT)"
 echo "          node   $(node --version)"
+echo "          python ${PYTHON_VERSION#Python } ($PROJECT_PYTHON)"
 echo "          deno   $((deno --version 2>/dev/null || echo 'not found') | head -1)"
 echo "          emcc   $((emcc --version 2>/dev/null || echo 'not found') | head -1)"
 echo "          cmake  $((cmake --version 2>/dev/null || echo 'not found') | head -1)"

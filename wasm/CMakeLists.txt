@@ -2,7 +2,9 @@ cmake_minimum_required(VERSION 4.2)
 
 project(wasm_math LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 23)
+# Emscripten 6.0.13's Clang accepts -std=c++26 and reports __cplusplus 202400L.
+# The project requires the standard and uses no compiler extensions.
+set(CMAKE_CXX_STANDARD 26)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
