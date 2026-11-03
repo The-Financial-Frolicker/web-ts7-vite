@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Usage:
+#   scripts/build.sh                    normal build
+#   scripts/build.sh --print-emsdk-root  print the SDK root the build would use
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -28,7 +31,11 @@ resolve_emsdk_root() {
     if emcc_path="$(command -v emcc 2>/dev/null)" && [[ -n "$emcc_path" ]]; then
         # mise/asdf expose compilers through shims; resolve to the real binary.
         emcc_path="$(readlink -f "$emcc_path" 2>/dev/null || printf '%s' "$emcc_path")"
-        candidate="$(cd "$(dirname "$emcc_path")/../../.." 2>/dev/null && pwd || true)"
+        # A standard emsdk layout is <root>/upstream/emscripten/emcc, so the
+        # root is two directories above emcc's directory. (Going three up lands
+        # on the directory that *contains* a versioned mise install, which has
+        # no upstream/emscripten and would silently fall through to /opt/emsdk.)
+        candidate="$(cd "$(dirname "$emcc_path")/../.." 2>/dev/null && pwd || true)"
         if [[ -n "$candidate" && -f "$candidate/upstream/emscripten/emcc" ]]; then
             printf '%s\n' "$candidate"
             return 0
@@ -37,6 +44,13 @@ resolve_emsdk_root() {
 
     printf '%s\n' "/opt/emsdk"
 }
+
+# Diagnostic mode for tests and troubleshooting: print the resolved SDK root
+# without initialising the SDK or building anything.
+if [[ "${1:-}" == "--print-emsdk-root" ]]; then
+    resolve_emsdk_root
+    exit 0
+fi
 
 EMSDK_ROOT="$(resolve_emsdk_root)"
 EMSDK_ENV="$EMSDK_ROOT/emsdk_env.sh"
@@ -145,6 +159,16 @@ for tool in em++ cmake ninja; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         echo "ERROR: required tool not on PATH after emsdk init: $tool" >&2
         echo "       Install the pinned toolchain with: mise install" >&2
+        exit 1
+    fi
+done
+
+# The build drives TypeScript, Vite and Wrangler through the local npm install.
+# Fail before the WASM build when they are absent, with the command that fixes it.
+for tool in tsc vite wrangler; do
+    if [[ ! -x "./node_modules/.bin/$tool" ]]; then
+        echo "ERROR: npm dependencies are not installed (./node_modules/.bin/$tool is missing)." >&2
+        echo "       Install them with: mise exec -- deno install --frozen" >&2
         exit 1
     fi
 done

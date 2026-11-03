@@ -42,6 +42,7 @@ fi
 
 if [[ ! -f "$WRANGLER_ENTRY" ]]; then
     echo "Wrangler entry point not found: $WRANGLER_ENTRY" >&2
+    echo "Install dependencies with: mise exec -- deno install --frozen" >&2
     exit 1
 fi
 
@@ -52,6 +53,9 @@ if [[ ! -f "$WRANGLER_CONFIG" ]]; then
     echo "Generated Wrangler configuration not found: $WRANGLER_CONFIG" >&2
     exit 1
 fi
+
+echo "Checking deployment artefacts..."
+"$NODE_BIN" "$PROJECT_ROOT/scripts/check-deploy-artifacts.mjs"
 
 echo "Running Wrangler..."
 "$NODE_BIN" "$WRANGLER_ENTRY" deploy \

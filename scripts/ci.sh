@@ -61,6 +61,10 @@ run_static_checks() {
 }
 
 run_build_checks() {
+    echo "==> Build and deployment tooling tests"
+    deno task test:scripts
+    deno task test:deploy
+
     require_dependencies
 
     WORK_DIR="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/web-ts7-vite-ci.XXXXXX")"
@@ -93,6 +97,9 @@ run_build_checks() {
 
     echo "==> WASM build, typechecks and Vite build"
     deno task build
+
+    echo "==> Deployment artefact compatibility check"
+    deno task check:deploy
 
     echo "==> WASM smoke test (build tree)"
     deno task test:wasm

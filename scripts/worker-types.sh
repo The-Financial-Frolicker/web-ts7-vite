@@ -41,6 +41,7 @@ fi
 
 if [[ ! -f "$WRANGLER_ENTRY" ]]; then
     echo "Wrangler entry point not found: $WRANGLER_ENTRY" >&2
+    echo "Install dependencies with: mise exec -- deno install --frozen" >&2
     exit 1
 fi
 
