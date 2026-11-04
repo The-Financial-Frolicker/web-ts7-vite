@@ -51,6 +51,31 @@ require_dependencies() {
     fi
 }
 
+# Generator-only test suites.
+#
+# This script also ships in generated products, where the generator's
+# initialiser, toolchain management and regression suites are neither present as
+# files nor defined as tasks. Each suite runs only where its source exists, so
+# the same script never invokes a task a product does not have.
+run_generator_only_suites() {
+    if [[ -f "$PROJECT_ROOT/scripts/init-project.test.mjs" ]]; then
+        echo "==> Project initialisation tests"
+        deno task test:init
+    fi
+    if [[ -f "$PROJECT_ROOT/scripts/toolchain.test.mjs" ]]; then
+        echo "==> Toolchain discovery tests"
+        deno task test:toolchain
+    fi
+    if [[ -f "$PROJECT_ROOT/scripts/toolchain-config.test.mjs" ]]; then
+        echo "==> Toolchain configuration tests"
+        deno task test:toolchain-config
+    fi
+    if [[ -f "$PROJECT_ROOT/scripts/generate-product.test.mjs" ]]; then
+        echo "==> Generator regression suite"
+        deno task test:generator
+    fi
+}
+
 run_static_checks() {
     echo "==> Formatting check"
     deno task fmt:check
@@ -62,12 +87,14 @@ run_static_checks() {
     deno task check:worker
     echo "==> Node dependency boundary (application source)"
     deno task check:node-boundary
-    echo "==> Project initialisation tests"
-    deno task test:init
     echo "==> Worker runtime tests"
     deno task test:worker
     echo "==> Node dependency boundary tests"
     deno task test:boundary
+    echo "==> Contract lifecycle tests"
+    deno task test:contracts
+    echo "==> Generator-only suites"
+    run_generator_only_suites
     echo "==> Vite invocation tests"
     deno task test:vite
     echo "==> Wrangler type-generation tests"
@@ -76,6 +103,14 @@ run_static_checks() {
     deno task test:wrangler-dry-run
     echo "==> Node-exclusion wrapper tests"
     deno task test:no-node
+    # Consumes the committed contract; it never discovers or approves one. This
+    # is the last step so that a bootstrap baseline cannot hide the independent
+    # suites above, and it stays fatal: in the generator repository the
+    # committed contract is a provisional bootstrap baseline, so this step fails
+    # by design until a person approves it — the same rule a product is held to.
+    # CI must not turn that into a pass.
+    echo "==> Approved toolchain contracts (no discovery)"
+    deno task check:contracts
 }
 
 run_build_checks() {
@@ -98,17 +133,26 @@ run_build_checks() {
         --exclude=./build-wasm \
         --exclude=./.wrangler \
         --exclude=./public/wasm \
+        --exclude=./.contracts \
         --exclude='./.aider*' \
         -cf - . | tar -C "$WORK_DIR" -xf -
     ln -s "$PROJECT_ROOT/node_modules" "$WORK_DIR/node_modules"
 
     cd "$WORK_DIR"
 
-    echo "==> Initialise a throwaway project identity"
-    # The placeholder is not a valid Worker name, so Wrangler and the
-    # Cloudflare Vite plugin refuse to run on an untouched template. An already
-    # initialised project is a no-op here.
-    deno task init:project ci-smoke
+    # The template identity placeholder is not a valid Worker name, so Wrangler
+    # and the Cloudflare Vite plugin refuse to run on an untouched template: the
+    # generator repository must initialise its throwaway copy. A generated
+    # product is already initialised and does not ship the initialiser, so the
+    # same presence guard the static stage uses for generator-only suites
+    # applies. Only this step is skipped; every later stage still runs.
+    if [[ -f "$PROJECT_ROOT/scripts/init-project.mjs" ]]; then
+        echo "==> Initialise a throwaway project identity"
+        # An already initialised project is a no-op here.
+        deno task init:project ci-smoke
+    else
+        echo "==> Project identity already initialised (no generator initialiser shipped)"
+    fi
 
     echo "==> Generated Worker types freshness check"
     deno task check:worker-types
@@ -127,6 +171,14 @@ run_build_checks() {
 
     echo "==> Wrangler deployment dry run (no credentials required)"
     deno task deploy:dry-run
+
+    # The generated configuration is part of what the contract governs: the
+    # build must not silently change compatibility settings relative to the
+    # approved decision. This is the last step of the stage — after the build,
+    # so the verifier can also compare dist/worker/wrangler.json — and it stays
+    # fatal. Every build check above therefore runs before the verdict.
+    echo "==> Generated configuration against the approved contract"
+    deno task check:contracts
 
     echo "CI-equivalent validation complete."
 }

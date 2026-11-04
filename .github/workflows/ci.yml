@@ -54,7 +54,12 @@ jobs:
           mise exec -- cmake --version | head -n 1
           mise exec -- ninja --version
           mise exec -- emcc --version | head -n 1
-          mise exec -- python3 --version
+
+      - name: Resolve the Python interpreter for Emscripten
+        # Same resolution the build uses: an explicit EMSDK_PYTHON, then the
+        # runner's python3 when it satisfies Emscripten's minimum, and only
+        # then a mise-provisioned fallback.
+        run: bash scripts/resolve-python.sh
 
       - name: Cache Deno's npm download cache
         uses: actions/cache@v6
@@ -79,7 +84,10 @@ jobs:
       - name: Worker typecheck
         run: mise exec -- deno task check:worker
 
-      - name: Project initialisation tests
+      # Generator-only suite: the initialiser is not shipped in a product, so the
+      # guard keeps this workflow valid in both trees.
+      - name: Project initialisation tests (generator only)
+        if: hashFiles('scripts/init-project.test.mjs') != ''
         run: mise exec -- deno task test:init
 
       # Invokes the Worker handler directly with standard `Request` objects;
@@ -96,6 +104,30 @@ jobs:
       - name: Node dependency boundary tests
         run: mise exec -- deno task test:boundary
 
+      # Generator-only suite: the discovery primitives' test is not shipped in a
+      # product, so the guard keeps this workflow valid in both trees.
+      - name: Toolchain discovery tests (generator only)
+        if: hashFiles('scripts/toolchain.test.mjs') != ''
+        run: mise exec -- deno task test:toolchain
+
+      # Contract lifecycle: fingerprints, provenance, approval and verification
+      # logic. Synthetic fixtures only — no workerd, no Vite.
+      - name: Contract lifecycle tests
+        run: mise exec -- deno task test:contracts
+
+      # Remaining generator-only suites. Their sources and tasks are not part of a
+      # generated product, so each step is guarded by the presence of its test
+      # file (the same pattern as the two generator-only steps above): this
+      # workflow runs unchanged in both trees and never invokes a task that a
+      # product does not define.
+      - name: Toolchain configuration tests (generator only)
+        if: hashFiles('scripts/toolchain-config.test.mjs') != ''
+        run: mise exec -- deno task test:toolchain-config
+
+      - name: Generator regression suite (generator only)
+        if: hashFiles('scripts/generate-product.test.mjs') != ''
+        run: mise exec -- deno task test:generator
+
       - name: Vite invocation tests
         run: mise exec -- deno task test:vite
 
@@ -108,9 +140,62 @@ jobs:
       - name: Node-exclusion wrapper tests
         run: mise exec -- deno task test:no-node
 
+      # The strict contract gate is the LAST step of this job: every independent
+      # suite above runs before the verdict, so a bootstrap baseline cannot hide
+      # them. It remains fatal. This step performs no discovery — it reads
+      # toolchain-contracts.json, recomputes the fingerprint from the installed
+      # packages, and fails unless an approved contract matches. A toolchain
+      # change that alters a fingerprint requires a new local discovery and
+      # approval cycle; CI never generates or approves a contract.
+      - name: Toolchain contracts (consume, do not discover)
+        run: mise exec -- deno task check:contracts
+
+  # Build validation is a separate job so that a rejected contract in the static
+  # job cannot hide it. `needs` only orders the jobs; `!cancelled()` makes this
+  # job run whether `validate` passed or failed, and the workflow as a whole
+  # still fails whenever either job fails — the strict gate above is never
+  # downgraded. `scripts/ci.sh build` performs the same throwaway-copy
+  # initialisation and runs the contract gate again as its final step, after the
+  # build, so the generated configuration is compared with build output present.
+  build:
+    name: Build validation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    needs: validate
+    if: ${{ !cancelled() }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install the pinned toolchain with mise
+        uses: jdx/mise-action@v5
+        with:
+          # Same pins and cache keys as the validate job; a second runner needs
+          # its own restore (GitHub saves a key once and reports the duplicate
+          # save from the other job without failing).
+          cache: true
+          cache_save_post: true
+          install: true
+
+      - name: Cache Deno's npm download cache
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/deno
+          key: deno-npm-${{ runner.os }}-${{ hashFiles('deno.lock') }}
+          restore-keys: |
+            deno-npm-${{ runner.os }}-
+
+      - name: Install npm dependencies
+        run: mise exec -- deno install --frozen
+
       # The template's identity placeholder is not a valid Cloudflare Worker
       # name, so this stage builds a throwaway initialised copy: worker types
       # freshness check, WASM build, build-tree and published-artifact smoke
-      # tests, and `wrangler deploy --dry-run`. It never deploys.
-      - name: Generated types, WASM build, smoke tests and deployment dry run
+      # tests, and `wrangler deploy --dry-run`. Emscripten's Python interpreter
+      # is resolved inside the build itself (scripts/resolve-python.sh), so no
+      # separate diagnostic step is duplicated here. It never deploys.
+      - name: Generated types, WASM build, smoke tests, deployment dry run and contract gate
         run: mise exec -- bash scripts/ci.sh build

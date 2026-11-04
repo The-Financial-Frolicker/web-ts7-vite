@@ -70,10 +70,11 @@ The host provides:
   dev/preview. It is not installed by `.mise.toml` and is not required for the
   project-owned build, validation, tests or dry-run.
 
-The repository provides the pinned tools through [`.mise.toml`](.mise.toml)
-(including the Python interpreter used by Emscripten), the dependency graph
-through [deno.lock](deno.lock), and the build, test and deployment scripts. No
-credentials, secrets or Cloudflare account state are stored in the repository.
+The repository provides the pinned tools through [`.mise.toml`](.mise.toml), the
+dependency graph through [deno.lock](deno.lock), and the build, test and
+deployment scripts. Python is expected from the host rather than pinned — see
+[Emscripten SDK resolution](#emscripten-sdk-resolution). No credentials, secrets or
+Cloudflare account state are stored in the repository.
 
 No Dockerfile or dev-container configuration is included. Any Linux
 environment that provides the host requirements can use the repository.
@@ -85,20 +86,24 @@ not become a requirement in another.
 
 | Category | Members | Runtime required | Supplied by |
 | --- | --- | --- | --- |
-| Encapsulated toolchain | Emscripten 6.0.13 and everything it drives | its own Node, Python, LLVM, Binaryen | the toolchain itself |
+| Encapsulated toolchain | Emscripten 6.0.13 and everything it drives | its own Node, LLVM, Binaryen; the host's Python | the toolchain itself; the host for Python |
 | External ecosystem | Vite 8.3.5 (Rolldown, lightningcss), Wrangler 4.156.0 (workerd, esbuild, miniflare) | Deno for Vite, Wrangler type generation and dry-run; host Node for real deployment/dev | this project (packages); host (Node) |
 | Project-owned infrastructure | Bash orchestration, Deno tasks, Deno Vite/Wrangler-types/Wrangler-dry-run launchers, initialisation, boundary/deployment checks and tests, Deno WASM harness, CI | Deno; Node only for real deployment | this project |
 | Delivered application | browser bundle, Worker bundle, WASM glue | browser / Worker capabilities only | this project |
 
 ### Encapsulated toolchain dependencies
 
-Emscripten 6.0.13 is a self-contained SDK. It ships and pins **its own** Node
-24.19.0 — `NODE_JS` is an absolute path in its private `.emscripten`
-configuration — and uses it internally for `tools/compiler.mjs`,
+Emscripten 6.0.13 is a self-contained SDK for its compiler internals. It ships
+and pins **its own** Node 24.19.0 — `NODE_JS` is an absolute path in its private
+`.emscripten` configuration — and uses it internally for `tools/compiler.mjs`,
 `tools/preprocessor.mjs` and the JavaScript optimiser. That Node is private to
 the SDK: it is not declared in [`.mise.toml`](.mise.toml), it is not offered to
-project-owned execution, and this project never invokes it directly. Python,
-LLVM, Binaryen, CMake and Ninja belong to the toolchain in the same way.
+project-owned execution, and this project never invokes it directly. LLVM,
+Binaryen, CMake and Ninja belong to the toolchain in the same way.
+
+Python is the exception: the SDK drives `emcc`/`em++` through a Python
+interpreter it does **not** bundle, so Python is a host prerequisite that only
+becomes a project-provisioned fallback when the host cannot satisfy it.
 
 ### External ecosystem tools
 
@@ -231,7 +236,9 @@ The boundary is enforced by three mechanisms, each proving something different:
 
 | # | Mechanism | Scope | Where it runs |
 | --- | --- | --- | --- |
-| 1. Configuration invariants | `deno task check:node-boundary` | `package.json`, `deno.lock`, both `tsconfig.json` files, `wrangler.jsonc` | `validate`, `scripts/ci.sh static`, CI |
+| 1. Configuration invariants | `deno task check:contracts` | Consumes the approved toolchain contract and verifies the installed toolchain, both `tsconfig.json` libraries and Wrangler's compatibility settings against it. Performs no discovery | `validate`, `scripts/ci.sh`, CI |
+| `deno task test:contracts` | Contract lifecycle unit tests — canonical fingerprints, provenance rules, approval refusals and verification helpers — on synthetic fixtures | Deno |
+| `deno task check:node-boundary` | `package.json`, `deno.lock`, both `tsconfig.json` files, `wrangler.jsonc` | `validate`, `scripts/ci.sh static`, CI |
 | 2. Compiler diagnostics | `deno task check:client`, `check:worker` | `src/`, every `worker/*.ts` module | `validate`, `scripts/ci.sh static`, CI |
 | 3. Delivered artefacts | `deno task check:deploy` | `dist/worker`, `dist/client`, published WASM glue, generated Wrangler configuration | `scripts/ci.sh build`, `deno task deploy`, CI |
 
@@ -352,9 +359,8 @@ mise trust        # trust this project's .mise.toml (first time only)
 mise install      # install the versions pinned in .mise.toml
 ```
 
-The first `mise install` downloads the Emscripten SDK (~1.7 GB) and the pinned
-Python distribution, and takes a few minutes. Later checkouts reuse mise's
-install and download caches.
+The first `mise install` downloads the Emscripten SDK (~1.7 GB) and takes a few
+minutes. Later checkouts reuse mise's install and download caches.
 
 | Tool                 | Pinned version | Used for                                                   |
 | -------------------- | -------------- | ---------------------------------------------------------- |
@@ -362,7 +368,13 @@ install and download caches.
 | CMake                | `4.4.5`        | Configuring the C++26 → WebAssembly build                  |
 | Ninja                | `1.13.2`       | CMake generator for the WebAssembly build                  |
 | Emscripten (`emsdk`) | `6.0.13`       | C++26 compiler and CMake toolchain; supplies its own Node |
-| Python               | `3.13.18`      | Emscripten's Python-based `emcc`/`em++` driver             |
+| Python               | *host-provided* | Emscripten's Python-based `emcc`/`em++` driver            |
+
+Python is a **host prerequisite**, not a project-managed tool. Emscripten owns
+the requirement, read from the SDK's own `emcc.py` assertion rather than kept here; `scripts/resolve-python.sh`
+uses the host interpreter when it satisfies that, and only provisions the
+discovered minimum through mise as a fallback. See
+[Emscripten SDK resolution](#emscripten-sdk-resolution).
 
 Node.js is intentionally **not** a project-managed tool. Emscripten supplies
 its own Node for its internal JavaScript tooling. Real Wrangler deployment and
@@ -403,7 +415,8 @@ mise exec -- deno --version     # deno 2.9.8
 mise exec -- cmake --version    # cmake version 4.4.5
 mise exec -- ninja --version    # 1.13.2
 mise exec -- emcc --version     # ... 6.0.13 (...)
-mise exec -- python3 --version  # Python 3.13.18
+
+scripts/resolve-python.sh       # path, version and source of the emcc interpreter
 ```
 
 `mise exec --` runs a command with the pinned tools on `PATH`. Project-owned
@@ -435,12 +448,28 @@ use a project Node; Emscripten uses its own embedded Node as an encapsulated
 toolchain detail.
 
 Emscripten's `emcc`/`em++` drivers are Python programs, and the pinned emsdk
-does not bundle an interpreter. `.mise.toml` pins Python 3.13.18; Emscripten
-requires Python >= 3.10. `scripts/build.sh` uses `EMSDK_PYTHON` when it is set,
-otherwise resolves `python3` (then `python`) from `PATH`, checks the version,
-prints the interpreter at `[1/9]`, and exports `EMSDK_PYTHON` so `emcc` and the
-compiler invocations made by CMake and Ninja use it. `mise exec` and an
-activated mise shell put the pinned Python on `PATH`.
+does not bundle an interpreter. Emscripten owns that requirement — its
+`emcc.py` asserts Python >= 3.10 — and the project treats Python as a host
+prerequisite rather than a pinned tool.
+
+`scripts/resolve-python.sh` implements one resolution policy, used by the build
+and by CI:
+
+| Order | Source | Behaviour |
+| --- | --- | --- |
+| 1 | `EMSDK_PYTHON` | Used when set. A missing, non-executable or too-old value is a hard error, so an explicit request is never silently replaced. |
+| 2 | host `python3` | Used when it satisfies the SDK's requirement. The optional `python` name is not consulted. |
+| 3 | mise fallback | `mise install python@<discovered requirement>`, then `mise which --tool "python@<requirement>" python3`. Only reached when 1 and 2 cannot supply a usable interpreter. |
+
+The resolver prints the absolute path, the version and how it was obtained; the
+build exports `EMSDK_PYTHON` from that value before invoking Emscripten and
+re-asserts it after `emsdk_env.sh` runs, so `emcc`, CMake and Ninja all use the
+same interpreter. Stage `[1/9]` shows the result, for example
+`python 3.14.4 (/usr/bin/python3.14, host python3)`.
+
+The host interpreter does not have to match the fallback version: any interpreter
+satisfying the SDK is accepted, and only a host without one causes a mise install
+of the discovered minimum.
 
 ### Environment variables used by the tooling
 
@@ -449,7 +478,7 @@ activated mise shell put the pinned Python on `PATH`.
 | `EMSDK_ROOT` | `scripts/build.sh` | Explicit Emscripten SDK root override |
 | `EMSDK` | `scripts/build.sh` | SDK root normally exported by mise |
 | `EMSCRIPTEN_ROOT` | `scripts/build.sh` | Fallback when the expected SDK layout is absent |
-| `EMSDK_PYTHON` | `scripts/build.sh`, Emscripten `emcc` | Python interpreter for `emcc`; the build exports the resolved value and respects an explicit override |
+| `EMSDK_PYTHON` | `scripts/resolve-python.sh`, Emscripten `emcc` | Python interpreter for `emcc`. An explicit value is validated (exists, executable, >= 3.10) and never silently replaced; the build exports the resolved value |
 | `NODE_BIN` | `scripts/deploy.sh` | Explicit Node executable override; normally unset |
 | `CLOUDFLARE_API_TOKEN` | Wrangler | Non-interactive Cloudflare authentication |
 | `TMPDIR` / `RUNNER_TEMP` | `scripts/ci.sh` | Parent directory for the temporary build copy |
@@ -637,8 +666,13 @@ of this documentation if it remains useful.
 | `scripts/wrangler-types.mjs` | Deno-owned Wrangler type-generation launcher, invoked by `scripts/worker-types.sh`; resolves Wrangler, workerd and esbuild, then runs only `types` under an explicit permission profile |
 | `scripts/wrangler-dry-run.mjs` | Deno-owned Wrangler dry-run launcher, invoked by `scripts/deploy-dry-run.sh`; resolves Wrangler and esbuild, then runs only `deploy --dry-run` under a separate scoped profile |
 | `scripts/deno-no-node.sh` | PATH tripwire for project-owned execution; rejects command-name `node`/`nodejs` attempts |
+| `scripts/resolve-python.sh` | Resolves the `emcc` interpreter: `EMSDK_PYTHON`, then a host `python3` that satisfies the SDK requirement, then a mise-provisioned fallback at that same requirement |
 | `scripts/deploy-dry-run.sh` | Builds, validates artefacts and invokes the Deno dry-run launcher; never deploys |
-| `.mise.toml`, `deno.json`, `package.json`, `deno.lock` | Pinned tools, task definitions and the locked dependency graph |
+| `scripts/contract-discover.sh` | Local discovery entry point (generator only): resolves the runtime through the generator-only authoring CLI, writes `.contracts/candidate.json`, never approves; `--print-workerd` prints the resolved runtime path without probing |
+| `scripts/contracts/` | Contract model: scopes and fingerprints, schema and lifecycle, verification, product CLI (`cli.mjs`), plus generator-only discovery, probing and authoring |
+| `.mise.toml`, `deno.json`, `package.json`, `deno.lock` | Pinned tools (`.mise.toml` is the generated projection), task definitions and the locked dependency graph |
+| `toolchain.toml` | Authoritative desired tool versions; generator-only, because a product never re-pins the toolchain that created it |
+| `toolchain-contracts.json` | The committed contract artefact a product inherits; verification accepts only an approved contract |
 | `worker-configuration.d.ts` | Generated, tracked Worker `Env` types; never edit by hand |
 
 ### Development server
@@ -663,9 +697,10 @@ mise exec -- npm run build
 
 `scripts/build.sh` performs nine printed stages:
 
-1. Resolve and initialise the Emscripten SDK, verify `em++`, `cmake`, `ninja`,
-   the Python interpreter and the installed npm dependency tree (`tsc`, `vite`,
-   `wrangler`) are available. No project Node is required.
+1. Resolve and initialise the Emscripten SDK, resolve the Python interpreter for
+   `emcc` (host first, mise fallback only if needed), and verify `em++`, `cmake`,
+   `ninja` and the installed npm dependency tree (`tsc`, `vite`, `wrangler`) are
+   available. No project Node is required.
 2. Configure CMake with the Emscripten toolchain.
 3. Build the C++ sources with Ninja.
 4. Publish the build-tree `wasm_math.js` and `wasm_math.wasm` to
@@ -718,6 +753,268 @@ single-page-application fallback for other asset requests. The Worker handles
 `/api/health`; its unit tests exercise the handler directly, while routing is
 verified statically and by the deployment dry run (see
 [Test and validate](#test-and-validate)).
+
+#### JavaScript language level, runtime capabilities and browser target
+
+Type-checking, production bundling and runtime capability are three different
+questions, and the project answers each with evidence rather than assumption.
+The answers live in [`toolchain-contracts.json`](toolchain-contracts.json),
+which is produced by local discovery, reviewed and approved by a person, and
+then merely *consumed* by CI.
+
+- **Language level (authoring).** Both `tsconfig.json` files set
+  `target: "ESNext"`, so authors are not capped below what the installed
+  compiler parses. Neither project emits JavaScript.
+- **Worker `lib`.** `ES2025` is anchored to measured workerd capability, not to
+  the compiler's newest edition and not to an assumption that workerd is newer
+  than a browser. The `workerd-runtime` contract records which ES editions the
+  installed runtime actually supports, probed with this project's compatibility
+  date and flags, and `deno task check:contracts` fails if the declaration
+  drifts from that measurement.
+- **Client `lib`.** `ES2023` is a declared policy, not a discovered fact: no
+  installed tool carries a browser-API database, so the correspondence between an
+  ES edition and Vite's resolved browsers stays a human decision. The policy
+  records the contracts it was reviewed against, so a Vite or TypeScript change
+  forces a review instead of silently widening the claim.
+- **Production browser target.** Vite owns the mapping from its default
+  `baseline-widely-available` to concrete browsers, and that mapping changes
+  between releases. Discovery records the resolved set in the
+  `vite-syntax-target` contract; CI compares the installed Vite version, which
+  is what fixes the mapping, instead of re-running Vite.
+- **Development server.** Its transform policy is separate from the production
+  browser target and is not affected by any of this.
+
+No Babel, legacy-browser plugin or polyfill is used: the target is a maintained
+Baseline, not a legacy matrix.
+
+#### Toolchain contracts: discover locally, consume in CI
+
+The contract is an approved engineering decision, not a cache of whatever a probe
+happened to report. The lifecycle has two halves that never overlap:
+
+1. **Discover locally.** `deno task contract:discover` resolves the installed
+   toolchain from the project's own dependency graph — Wrangler → Miniflare →
+   workerd, cross-checked against the Vite plugin's graph — reads the
+   compatibility date and flags from `wrangler.jsonc`, asks the installed Vite
+   for its production target, reads TypeScript's shipped `lib` editions, and
+   runs a capability probe inside the real `workerd` binary. It writes
+   `.contracts/candidate.json` and never approves anything. Deno's permissions
+   scope *which* executables may start; they do not sandbox `workerd` or Vite
+   once running, exactly as for the existing Vite and Wrangler launchers.
+2. **Approve explicitly.** `deno task contract:approve -- --by "Name" --reason
+   "…" --client-api-edition es2023` records who approved what and why. It refuses
+   a candidate containing an `unverified` value, and refuses to overwrite an
+   approved contract without `--replace`.
+3. **Consume in CI.** `deno task check:contracts` reads the committed artefact,
+   recomputes the fingerprint from the installed packages, and verifies the
+   configuration against the approved values. It never starts workerd or Vite —
+   its permission profile is `--allow-read` and `--allow-env`, which is itself
+   the evidence that it cannot discover or approve anything.
+
+The artefact is a dictionary of contracts keyed by scope and fingerprint
+(`workerd-runtime@sha256:…`, `vite-syntax-target@sha256:…`,
+`typescript-libraries@sha256:…`). Each fingerprint covers only the inputs that
+can change that contract: the runtime contract covers workerd, the compatibility
+date, the flags and the platform, but not Vite or TypeScript, so unrelated
+upgrades do not force rediscovery.
+
+Every value records what kind of statement it is:
+
+| Provenance | Meaning |
+| --- | --- |
+| `authoritative` | Read from the project's own configuration or installed package manifests |
+| `observed` | Measured by a probe in this environment |
+| `derived` | Computed from other values by a rule stated in its evidence |
+| `declared` | A human decision, recorded with who decided and what it was reviewed against |
+| `unverified` | Evidence is missing or a probe failed; the contract cannot be approved |
+
+Each contract also carries a lifecycle state:
+
+| State | Meaning | CI |
+| --- | --- | --- |
+| `candidate` | Fresh discovery output; nobody has reviewed it | rejected |
+| `bootstrap` | A provisional baseline carried over without a human decision; it records no approver, because there was none | rejected |
+| `approved` | An explicit human approval, bound to that contract's fingerprint (approver, reason, time) | accepted |
+
+CI accepts only `approved` contracts whose approval names the current
+fingerprint. Approval is an explicit operation (`deno task contract:approve`)
+and is never inferred from a file existing or from a successful discovery run.
+
+The committed `toolchain-contracts.json` is currently **bootstrap**: it carries
+measurements and policies from the S9.1 work but no human approval. `deno task
+check:contracts`, `deno task validate` and CI therefore fail, by design, until a
+person approves it:
+
+```bash
+deno task contract:discover            # refresh the evidence
+deno task contract:approve -- --by "Your Name" --reason "why this is right" \
+    --client-api-edition es2023 --replace
+```
+
+The first genuine approval also re-states the policies under the approver's
+name; a provisional baseline's policy authorship is never inherited silently.
+
+#### Generator repository and generated product
+
+This repository is the **generator** (the manufacturing system). A generated
+project is the **product**, created by a separate copy operation:
+
+```bash
+deno task product:generate my-app --into ../my-app
+```
+
+The operation copies the positive allowlist in
+[`scripts/product-manifest.mjs`](scripts/product-manifest.mjs) into a fresh
+destination, rewrites the product's task list so it references only files it
+received, and substitutes the project identity **in the destination only**. The
+generator tree is never modified.
+
+- **Included:** application source and assets, runtime/build configuration,
+  `deno.lock`, `.mise.toml`, project CI workflow, the inherited
+  `toolchain-contracts.json` (approved or bootstrap — a product verifies it as
+  it stands and CI accepts only an approved artefact), build/deploy/smoke
+  tooling, and the *verifier*
+  (`scripts/contracts/{scopes,schema,config,store,toolchain,permissions,verify,
+  canonical,cli}.mjs`, `scripts/check-contracts.sh`), plus product-side contract
+  tests.
+- **Excluded:** discovery and probing (`discover.mjs`, `fixtures.mjs`,
+  `workerd-probe.mjs`, `lib/toolchain/vite*.mjs`), authoring (`approve.mjs`,
+  `author-cli.mjs`, `contract-discover.sh`, `contract-approve.sh`), toolchain
+  management (`toolchain.toml`, `toolchain-prepare.mjs`,
+  `lib/toolchain/{versions,resolve}.mjs`, `toolchain-config.test.mjs` and the
+  `toolchain:prepare` / `test:toolchain-config` tasks), the
+  generator regression suite (`generate-product.test.mjs`, `test:generator`),
+  the initialiser, and local `.contracts/` state. Because the list is positive,
+  a new generator file does not enter a product until someone adds it and
+  justifies it; `assertManifestDisjoint()` and
+  `assertProductBoundary()` fail closed on a mistake.
+
+An existing non-empty destination is refused (exit 2); generation never
+overwrites an unrelated project.
+
+**Updating a contract is not regenerating the product.** A product can install a
+new baseline that a human approved elsewhere:
+
+```bash
+deno task contract:accept -- --from /path/to/approved/toolchain-contracts.json
+```
+
+`accept` validates the artefact and refuses anything that is not in `approved`
+state, including bootstrap baselines and candidates. Accepting is **not**
+approving, and an approval record is a review trail, not a cryptographic
+signature: the artefact is trusted because it arrives through a reviewed
+delivery process. The product contains no command that can discover or approve a
+contract.
+
+#### Component identity, scoped fingerprints and build provenance
+
+[`scripts/contracts/scopes.mjs`](scripts/contracts/scopes.mjs) is the single
+source of truth. Each component declares the scopes for which its identity is
+key evidence (`keyFor`) and the fingerprint fields it contributes;
+`fingerprintInputs` is **derived** from those declarations, never maintained
+separately.
+
+| Component | Key for | Recorded as provenance |
+| --- | --- | --- |
+| platform | all three runtime contracts | — |
+| workerd | `workerd-runtime` (version, compatibility date/flags) | — |
+| vite | `vite-syntax-target` | — |
+| typescript | `typescript-libraries` | — |
+| emscripten | nothing today | SDK version, Emscripten version, installation layout, standard-library marker |
+
+Emscripten is therefore **provenance-only** for the three runtime contracts: an
+Emscripten upgrade does not invalidate them and does not require template
+regeneration. It would become key only for a C++ compiler-capability contract,
+which does not exist yet; no such contract is implemented or implied here. Fields
+that cannot be established without executing the SDK compiler (clang version,
+exact LLVM revision, target triple) are recorded as unavailable with an explicit
+reason — the LLVM revision is never inferred from a version number.
+
+Compatibility fingerprints and build provenance are different claims. An
+unchanged runtime fingerprint is not evidence of a reproducible build, and a
+changed compiler does not by itself mean a runtime contract broke;
+`buildProvenanceDigest()` exists to make compiler changes visible without
+implying either.
+
+The committed contracts are **bootstrap**: measured, but not approved. CI rejects
+them until a person runs `contract:approve` with a real identity, reason and
+`--reaffirm`; a bootstrap baseline's policy authorship is never inherited
+silently.
+
+#### Toolchain version selection
+
+[`toolchain.toml`](toolchain.toml) is the single authoritative source of desired
+tool versions:
+
+```toml
+[tools]
+deno = "2.9.8"
+cmake = "4.4.5"
+ninja = "1.13.2"
+emsdk = "6.0.13"
+```
+
+- The supported tools are exactly the ones this template manages (deno, cmake,
+  ninja, emsdk). Node and Python stay host-provided and are not listed.
+- A value is either an exact version or `"latest"`. **An omitted tool means
+  `"latest"`**, so a short file is still a complete declaration.
+- `.mise.toml` is a **projection** of the resolved versions, not a second
+  editable list. `deno task toolchain:prepare --write` regenerates it, including
+  the policy notes on host-provided tools, so the comments cannot drift from the
+  policy. Version-specific annotations (for example why a particular cmake
+  release is pinned) live in `toolchain.toml`, beside the version they explain.
+- `toolchain.toml`, the resolver (`scripts/toolchain-prepare.mjs`,
+  `scripts/lib/toolchain/{versions,resolve}.mjs`), its tests and the
+  `toolchain:prepare` / `test:toolchain-config` tasks are **generator-only**. A
+  generated product inherits the `.mise.toml` projection
+  it was built with and has no command that resolves, installs or re-pins the
+  toolchain that created it. It keeps `check:contracts` and `test:contracts`,
+  because enforcing an inherited contract is a product responsibility.
+
+`deno task toolchain:prepare` runs the lifecycle in a strict order:
+
+1. parse the configuration (unknown sections, non-string values and duplicate
+   keys are errors);
+2. validate every declaration (unsupported tool, malformed version);
+3. **resolve every tool before installing any** — an explicit version must exist
+   in the backend, and `latest` resolves to the numerically highest available
+   version, never lexicographically;
+4. install the **exact resolved versions** with mise (`mise install
+   deno@2.9.8`), so mise cannot resolve a selection differently later;
+5. verify `mise ls --installed` reports those exact versions.
+
+A request that cannot be resolved fails the run before anything is installed; it
+never falls back to another version, and an invalid explicit version is never
+treated as `latest`. `--dry-run` stops after resolution, and `--check` verifies
+the installed toolchain and the `.mise.toml` projection without installing. The
+projection is compared as a whole file, so a hand-edited comment is drift exactly
+like a changed version; `--check` has no separate task alias — `--check` is its
+mode.
+
+Provenance keeps three distinct facts per tool — **requested** (explicit,
+`latest`, or the implicit default), **resolved** (the exact version chosen for
+this run) and **installed** (what was observed afterwards) — and is written to
+`.contracts/toolchain-provenance.json`. If `latest` moves from one release to
+another, that change is visible there; the compatibility contracts are
+unaffected unless the tool is key for them, and Emscripten is not key for the
+three runtime contracts.
+
+The configuration deliberately contains no installation or template-generation
+assumptions, so a future, independent toolchain scanner can write the exact
+versions it observed into this same file. **No such scanner exists yet.**
+
+
+
+Probe outcomes are three-valued — `supported`, `unsupported`, `probe-failed` —
+and a failed probe is never recorded as an unsupported capability. A capability
+probe that cannot start the runtime leaves the value `unverified`, which blocks
+approval and therefore blocks CI.
+
+Policies stay separate from measurements. The client API edition and the
+permission profiles are `declared`; discovery never infers, widens or grants
+them. Each policy names the contract fingerprints it was reviewed against, so a
+workerd upgrade fails verification until someone reaffirms the review rather than
+silently re-blessing the old decision.
 
 #### Worker type generation
 
@@ -798,20 +1095,34 @@ Run these from the project root with dependencies installed. Commands marked
 | `deno task test:vite` | Vite CLI/native-binding resolution and the explicit Vite permission profile | Deno |
 | `deno task test:wrangler-types` | Wrangler CLI/workerd/esbuild resolution and the explicit type-generation permission profile | Deno |
 | `deno task test:wrangler-dry-run` | Direct Wrangler CLI/esbuild resolution, dry-run profile, argument forwarding and exit propagation | Deno |
+| `deno task test:toolchain` | Installed-package and TypeScript library discovery primitives, including version-pinned resolution | Deno |
+| `deno task test:toolchain-config` | Toolchain configuration: parsing, validation, resolution, installation, verification and the `.mise.toml` projection, with an injected mise (generator only) | Deno |
+| `deno task test:contracts` | Contract lifecycle: canonical fingerprints, provenance, approval refusals, policy review links and verification helpers | Deno |
+| `deno task test:generator` | Generator/product boundary: allowlist copying, task rewrite, determinism, generator-only toolchain exclusion and the product's own validation/contract verification (generator only) | Dependencies; generator repository only |
 | `deno task test:no-node` | Node-exclusion tripwire: rejection, exit/argument propagation, legitimate tools, parent isolation and Node-absent operation | Deno |
+| `deno task check:contracts` | Enforces the approved contract: fingerprint match, approval state and fingerprint binding, tsconfig libraries, Wrangler and generated compatibility settings, permission policies. No discovery | Dependencies |
+| `deno task status:contracts` | Prints each contract's lifecycle state; exits non-zero while any contract still needs a human decision | Dependencies |
+| `deno task contract:discover` | Local discovery of the installed toolchain, including a real workerd capability probe; writes `.contracts/candidate.json` (development station only). `scripts/contract-discover.sh --print-workerd` reports the resolved runtime without probing | Dependencies, workerd |
+| `deno task contract:approve` | Approves a candidate (`--by`, `--reason`, `--client-api-edition`); refuses unverified values and silent overwrites | A discovered candidate |
 | `deno task check:worker-types` | `worker-configuration.d.ts` is current | Initialised project, dependencies |
 | `deno task types:worker` | Regenerates `worker-configuration.d.ts` (writes) | Initialised project, dependencies |
 | `deno task test:wasm` | Build-tree WASM smoke test on Deno, Node globals hidden (`19 + 23 = 42`) | Build required |
 | `deno task test:wasm:published` | Published (`dist/client`) WASM smoke test on Deno (`19 + 23 = 42`) | Full build required |
 | `deno task check:deploy` | Generated config/artefact consistency, symlink containment and the Node boundary in the emitted bundles | Full build required |
 | `deno task deploy:dry-run` | Build, artefact check and Deno-owned `wrangler deploy --dry-run` | Initialised project, dependencies |
-| `deno task validate` | `fmt:check`, `lint`, client/Worker typechecks, the Node boundary check and the nine Deno test suites | Dependencies; works on the template |
+| `deno task validate` | `fmt:check`, `lint`, client/Worker typechecks, the Node boundary check and every Deno test suite, then contract enforcement (the acceptance gate, last) | Dependencies; works on the template |
 | `deno task ci` | `scripts/ci.sh all` (static checks plus isolated build validation) | Dependencies; works on the template |
 
 Deno tasks are canonical. `package.json` provides npm script equivalents for
 many of them (`npm run build`, `npm run test:wasm`, `npm run check:deploy`,
 and so on), but the deployment and Worker-type tasks are available as Deno
 tasks only.
+
+The `validate` chain is the same shape in both trees: a generated product
+rewrites it to the tasks it actually received, and it also keeps
+`check:contracts` **last**, after every independent check and test suite. An
+inherited contract that is bootstrap, stale or unapproved therefore never hides
+the product's own suites; the gate still fails the chain at the end.
 
 ### `scripts/ci.sh` modes and `deno task ci`
 
@@ -828,9 +1139,9 @@ mode:
 
 | Mode | Work performed |
 | --- | --- |
-| `static` | Formatting, linting, client and Worker typechecks, the Node dependency-boundary check and tests, initialiser tests, Worker runtime tests |
-| `build` | Build/deployment tooling tests, dependency check, throwaway build copy, throwaway identity, Worker types freshness, full build, deployment-artefact check, both Deno WASM smoke tests, Deno-owned Wrangler dry run |
-| `all` | `static` followed by `build` (the default) |
+| `static` | Formatting, linting, client and Worker typechecks, the Node dependency-boundary check and tests, Worker runtime tests, contract lifecycle tests, the generator-only suites where present, Vite/Wrangler/Node-exclusion tests, then the strict contract gate last |
+| `build` | Build/deployment tooling tests, dependency check, throwaway build copy, throwaway identity (generator repository only; a generated product is already initialised and ships no initialiser), Worker types freshness, full build, deployment-artefact check, both Deno WASM smoke tests, Deno-owned Wrangler dry run, then the strict contract gate last |
+| `all` | `static` followed by `build` (the default). `static` ends at the gate, so while the committed contracts are bootstrap, run `bash scripts/ci.sh build` separately to exercise the build checks |
 
 The checkout is never modified. The build mode copies the working tree
 (including uncommitted changes) to a temporary directory, leaving out Git
@@ -983,30 +1294,47 @@ comes from Wrangler; this repository does not store or broker credentials.
 30-minute timeout, read-only `contents` permission and concurrency that
 cancels an older run for the same branch.
 
-The workflow:
+The workflow runs on two jobs:
 
-1. Checks out the repository without persisting credentials.
-2. Installs the pinned toolchain with `jdx/mise-action`, caching mise's install
-   and download directories (including the Emscripten SDK and Python) under a
-   key derived from `.mise.toml`. The post-step save also captures Emscripten's
-   compiler cache.
-3. Verifies the pinned Deno, CMake, Ninja, Emscripten and Python versions.
-4. Caches `~/.cache/deno` under a key derived from `deno.lock`.
-5. Installs dependencies with `deno install --frozen`.
-6. Runs formatting, linting, client/Worker typechecks, initialiser tests and
-   Worker runtime tests individually.
-7. Runs `scripts/ci.sh build` in a throwaway initialised copy.
+- **Validate (static).** Checks out the repository without persisting
+  credentials, installs the pinned toolchain with `jdx/mise-action` (caching
+  mise's install and download directories, including the Emscripten SDK, under a
+  key derived from `.mise.toml`; the post-step save also captures Emscripten's
+  compiler cache), verifies the pinned Deno/CMake/Ninja/Emscripten versions, runs
+  `scripts/resolve-python.sh` for the same interpreter the build will use, caches
+  `~/.cache/deno` under a key derived from `deno.lock`, and installs dependencies
+  with `deno install --frozen`. It then runs formatting, linting, both
+  typechecks, the Node dependency-boundary check and tests, Worker runtime tests,
+  toolchain discovery and contract lifecycle tests, the guarded generator-only
+  suites (`test:toolchain-config`, `test:generator`), and the Vite, Wrangler and
+  Node-exclusion suites. The strict contract gate is the **last** step of this
+  job, so a rejected contract cannot hide any of them.
+- **Build validation.** Runs `needs: validate` with `if: !cancelled()`: the
+  dependency only orders the jobs, so this job runs whether the static job passed
+  or failed. The workflow as a whole still fails when either job fails, and the
+  gate is never downgraded. It installs the same pinned toolchain and
+  dependencies (each job has its own runner, so the cache is restored twice under
+  the same keys) and runs `scripts/ci.sh build` in a throwaway initialised copy:
+  tooling tests, Worker types freshness, full build, deployment-artefact check,
+  both Deno WASM smoke tests, the Wrangler dry run, and the contract gate again —
+  last, so the generated configuration is compared with build output present.
+  Emscripten's interpreter is resolved inside the build, so no separate
+  diagnostic step is duplicated.
 
 The raw template is statically checked because its placeholder is not a valid
-Worker name. Build validation therefore happens in the throwaway copy:
-tooling tests, Worker types freshness, full build, deployment-artefact check,
-both Deno WASM smoke tests and the Wrangler dry run. CI has no Cloudflare secrets
-and never deploys.
+Worker name, which is why build validation happens in the throwaway copy. CI has
+no Cloudflare secrets and never deploys.
 
 For a local equivalent, run `mise exec -- deno task validate` for the static
-checks and `mise exec -- deno task ci` for static plus build validation. The
-workflow runs the individual static steps and `scripts/ci.sh build`, rather
-than invoking `scripts/ci.sh all` itself.
+checks and `mise exec -- bash scripts/ci.sh build` for build validation. The
+workflow runs the individual static steps and `scripts/ci.sh build`, rather than
+invoking `scripts/ci.sh all` itself, so a failing static gate cannot suppress the
+build job.
+
+While the committed contracts are bootstrap, both jobs end red by design: the
+static job at its gate, the build job at the same gate after every build check
+has run. Resolving that is the deferred generator development-state versus
+product-acceptance decision, not a workflow change.
 
 ## Troubleshooting
 
@@ -1036,16 +1364,24 @@ order; set `EMSDK_ROOT` to select a specific SDK explicitly.
 
 ### The build cannot find Python
 
-Emscripten's compiler driver is Python. `mise install` installs the pinned
-Python 3.13.18; check it with:
+Emscripten's compiler driver is Python, and the project expects the host to
+supply an interpreter that satisfies the SDK's requirement. Check the resolution the build will use:
 
 ```bash
-mise exec -- python3 --version
+scripts/resolve-python.sh
 ```
 
-The build prints `python 3.13.18 (<path>)` at stage `[1/9]`. Emscripten requires
-Python >= 3.10. If `EMSDK_PYTHON` is set, the build respects it; otherwise it
-uses `python3` or `python` from `PATH`.
+It prints the interpreter path, its version and the source (`EMSDK_PYTHON`,
+`host python3` or `mise fallback`). If it reports that no usable interpreter
+exists, either install the required Python for the host — preferred — or let
+mise provision the documented fallback (the discovered minimum):
+
+```bash
+mise install "python@$(scripts/resolve-python.sh | sed -n 4p)"
+```
+
+An unsuitable `EMSDK_PYTHON` is reported as an error rather than replaced, so
+unset it if it points at the wrong interpreter.
 
 ### The build says npm dependencies are missing
 

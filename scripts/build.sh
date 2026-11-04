@@ -73,44 +73,25 @@ if [[ ! -d "$EMSDK_ROOT" ]]; then
     exit 1
 fi
 
-# --- Require a Python interpreter for Emscripten BEFORE sourcing emsdk ------
+# --- Resolve the Python interpreter for Emscripten BEFORE sourcing emsdk ------
 # Emscripten's emcc/em++ drivers are Python programs (emsdk does not bundle an
-# interpreter). Capture the project-managed interpreter before emsdk_env.sh can
-# alter PATH, respect an explicit EMSDK_PYTHON override, and export the chosen
-# path again after sourcing so every compiler invocation uses the same Python.
-PYTHON_REQUIRED="3.10"
-
-if [[ -n "${EMSDK_PYTHON:-}" ]]; then
-    PROJECT_PYTHON="$EMSDK_PYTHON"
-else
-    PROJECT_PYTHON="$(command -v python3 2>/dev/null || command -v python 2>/dev/null || true)"
-fi
-
-if [[ -z "$PROJECT_PYTHON" ]]; then
-    echo "ERROR: no Python interpreter found for Emscripten's emcc driver." >&2
-    echo "       The project pins Python >= ${PYTHON_REQUIRED} in .mise.toml." >&2
-    echo "       Install/activate the toolchain:" >&2
-    echo "    mise install" >&2
-    echo "    mise exec -- deno task build" >&2
+# interpreter). scripts/resolve-python.sh prefers an explicit EMSDK_PYTHON, then
+# the host's python3, and only provisions one through mise when neither is
+# usable. Resolve before emsdk_env.sh can alter PATH, and re-export the result
+# afterwards so every compiler invocation uses the same interpreter.
+if ! PYTHON_RESOLUTION="$(bash "$PROJECT_ROOT/scripts/resolve-python.sh")"; then
+    echo "ERROR: could not determine a Python interpreter for Emscripten." >&2
     exit 1
 fi
 
-if [[ ! -x "$PROJECT_PYTHON" ]]; then
-    echo "ERROR: Python interpreter is not executable: $PROJECT_PYTHON" >&2
-    exit 1
-fi
+mapfile -t PYTHON_RESOLUTION_LINES <<<"$PYTHON_RESOLUTION"
+PROJECT_PYTHON="${PYTHON_RESOLUTION_LINES[0]:-}"
+PYTHON_VERSION="${PYTHON_RESOLUTION_LINES[1]:-}"
+PYTHON_SOURCE="${PYTHON_RESOLUTION_LINES[2]:-}"
+PYTHON_REQUIREMENT="${PYTHON_RESOLUTION_LINES[3]:-}"
 
-PYTHON_VERSION="$("$PROJECT_PYTHON" --version 2>&1 | head -1 || true)"
-if [[ ! "$PYTHON_VERSION" =~ ^Python\ 3\.([0-9]+) ]]; then
-    echo "ERROR: could not parse a Python 3 version from '$PROJECT_PYTHON --version' (got: '$PYTHON_VERSION')." >&2
-    echo "       Emscripten requires Python >= ${PYTHON_REQUIRED}." >&2
-    exit 1
-fi
-
-if (( BASH_REMATCH[1] < 10 )); then
-    echo "ERROR: Emscripten requires Python >= ${PYTHON_REQUIRED}, but '$PROJECT_PYTHON' is ${PYTHON_VERSION#Python }." >&2
-    echo "       Switch to the pinned Python (mise), e.g.:" >&2
-    echo "    mise exec -- deno task build" >&2
+if [[ -z "$PROJECT_PYTHON" || -z "$PYTHON_VERSION" ]]; then
+    echo "ERROR: Python resolution returned no interpreter." >&2
     exit 1
 fi
 
@@ -199,7 +180,7 @@ fi
 export TOOLCHAIN
 
 echo "==> [1/9] emsdk initialised (EMSDK_ROOT=$EMSDK_ROOT)"
-echo "          python ${PYTHON_VERSION#Python } ($PROJECT_PYTHON)"
+echo "          python ${PYTHON_VERSION} ($PROJECT_PYTHON, ${PYTHON_SOURCE}; Emscripten requires >= ${PYTHON_REQUIREMENT})"
 echo "          deno   $((deno --version 2>/dev/null || echo 'not found') | head -1)"
 echo "          emcc   $((emcc --version 2>/dev/null || echo 'not found') | head -1)"
 echo "          cmake  $((cmake --version 2>/dev/null || echo 'not found') | head -1)"

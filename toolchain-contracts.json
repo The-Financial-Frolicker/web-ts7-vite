@@ -1,0 +1,382 @@
+{
+  "contracts": {
+    "typescript-libraries@sha256:966ad9f0ab56ad8a5f4662f13ec4be9de2a17fc0c9407f87e75c7f513a936a6b": {
+      "approved": null,
+      "bootstrap": {
+        "at": "2026-11-04T16:20:00.111Z",
+        "reason": "Provisional baseline carried over from the S9.1 implementation. No human approval has been recorded for this fingerprint."
+      },
+      "fingerprint": "sha256:966ad9f0ab56ad8a5f4662f13ec4be9de2a17fc0c9407f87e75c7f513a936a6b",
+      "fingerprintInputs": {
+        "platform": "linux-x86_64-gnu",
+        "typescript": "7.0.2"
+      },
+      "scope": "typescript-libraries",
+      "state": "bootstrap",
+      "values": {
+        "typescript.editions": {
+          "evidence": "lib.*.d.ts files in node_modules/.deno/@typescript+typescript-linux-x64@7.0.2/node_modules/@typescript/typescript-linux-x64/lib",
+          "kind": "observed",
+          "provenance": "observed",
+          "value": [
+            "es6",
+            "es2015",
+            "es2016",
+            "es2017",
+            "es2018",
+            "es2019",
+            "es2020",
+            "es2021",
+            "es2022",
+            "es2023",
+            "es2024",
+            "es2025",
+            "esnext"
+          ]
+        },
+        "typescript.libraries": {
+          "evidence": "lib.*.d.ts files in node_modules/.deno/@typescript+typescript-linux-x64@7.0.2/node_modules/@typescript/typescript-linux-x64/lib",
+          "kind": "observed",
+          "provenance": "observed",
+          "value": [
+            "decorators",
+            "dom",
+            "es5",
+            "scripthost",
+            "webworker"
+          ]
+        }
+      }
+    },
+    "vite-syntax-target@sha256:e11d5e6d27002cdac7e17e11d15f286c0d1a2d3c46e657f0b57d6751aec50958": {
+      "approved": null,
+      "bootstrap": {
+        "at": "2026-11-04T16:20:00.111Z",
+        "reason": "Provisional baseline carried over from the S9.1 implementation. No human approval has been recorded for this fingerprint."
+      },
+      "fingerprint": "sha256:e11d5e6d27002cdac7e17e11d15f286c0d1a2d3c46e657f0b57d6751aec50958",
+      "fingerprintInputs": {
+        "platform": "linux-x86_64-gnu",
+        "vite": "8.3.5"
+      },
+      "scope": "vite-syntax-target",
+      "state": "bootstrap",
+      "values": {
+        "vite.build.targets": {
+          "evidence": "Vite 8.3.5 resolveConfig({ configFile: false }, \"build\").build.target",
+          "kind": "observed",
+          "provenance": "observed",
+          "value": [
+            "chrome111",
+            "edge111",
+            "firefox114",
+            "safari16.4",
+            "ios16.4"
+          ]
+        }
+      }
+    },
+    "workerd-runtime@sha256:8aa9865cee2eb3e13dfd02ab1bea1a145a0ae1c4ae5bf441ea25888c43f13daa": {
+      "approved": null,
+      "bootstrap": {
+        "at": "2026-11-04T16:20:00.111Z",
+        "reason": "Provisional baseline carried over from the S9.1 implementation. No human approval has been recorded for this fingerprint."
+      },
+      "fingerprint": "sha256:8aa9865cee2eb3e13dfd02ab1bea1a145a0ae1c4ae5bf441ea25888c43f13daa",
+      "fingerprintInputs": {
+        "compatibilityDate": "2026-10-30",
+        "compatibilityFlags": [],
+        "platform": "linux-x86_64-gnu",
+        "workerd": "1.20261023.1"
+      },
+      "scope": "workerd-runtime",
+      "state": "bootstrap",
+      "values": {
+        "runtime.capability.es2015.core": {
+          "evidence": "evaluated true; workerd 1.20261023.1 executed the capability probe Worker over loopback with compatibility date 2026-10-30 and flags []",
+          "kind": "capability",
+          "provenance": "observed",
+          "value": "supported"
+        },
+        "runtime.capability.es2016.array.includes": {
+          "evidence": "evaluated true; workerd 1.20261023.1 executed the capability probe Worker over loopback with compatibility date 2026-10-30 and flags []",
+          "kind": "capability",
+          "provenance": "observed",
+          "value": "supported"
+        },
+        "runtime.capability.es2017.object.entries": {
+          "evidence": "evaluated true; workerd 1.20261023.1 executed the capability probe Worker over loopback with compatibility date 2026-10-30 and flags []",
+          "kind": "capability",
+          "provenance": "observed",
+          "value": "supported"
+        },
+        "runtime.capability.es2018.promise.finally": {
+          "evidence": "evaluated true; workerd 1.20261023.1 executed the capability probe Worker over loopback with compatibility date 2026-10-30 and flags []",
+          "kind": "capability",
+          "provenance": "observed",
+          "value": "supported"
+        },
+        "runtime.capability.es2019.object.fromEntries": {
+          "evidence": "evaluated true; workerd 1.20261023.1 executed the capability probe Worker over loopback with compatibility date 2026-10-30 and flags []",
+          "kind": "capability",
+          "provenance": "observed",
+          "value": "supported"
+        },
+        "runtime.capability.es2020.bigint": {
+          "evidence": "evaluated true; workerd 1.20261023.1 executed the capability probe Worker over loopback with compatibility date 2026-10-30 and flags []",
+          "kind": "capability",
+          "provenance": "observed",
+          "value": "supported"
+        },
+        "runtime.capability.es2021.promise.any": {
+          "evidence": "evaluated true; workerd 1.20261023.1 executed the capability probe Worker over loopback with compatibility date 2026-10-30 and flags []",
+          "kind": "capability",
+          "provenance": "observed",
+          "value": "supported"
+        },
+        "runtime.capability.es2022.object.hasOwn": {
+          "evidence": "evaluated true; workerd 1.20261023.1 executed the capability probe Worker over loopback with compatibility date 2026-10-30 and flags []",
+          "kind": "capability",
+          "provenance": "observed",
+          "value": "supported"
+        },
+        "runtime.capability.es2023.array.toSorted": {
+          "evidence": "evaluated true; workerd 1.20261023.1 executed the capability probe Worker over loopback with compatibility date 2026-10-30 and flags []",
+          "kind": "capability",
+          "provenance": "observed",
+          "value": "supported"
+        },
+        "runtime.capability.es2024.object.groupBy": {
+          "evidence": "evaluated true; workerd 1.20261023.1 executed the capability probe Worker over loopback with compatibility date 2026-10-30 and flags []",
+          "kind": "capability",
+          "provenance": "observed",
+          "value": "supported"
+        },
+        "runtime.capability.es2025.set.union": {
+          "evidence": "evaluated true; workerd 1.20261023.1 executed the capability probe Worker over loopback with compatibility date 2026-10-30 and flags []",
+          "kind": "capability",
+          "provenance": "observed",
+          "value": "supported"
+        },
+        "runtime.capability.runtime.abortsignal.timeout": {
+          "evidence": "evaluated true; workerd 1.20261023.1 executed the capability probe Worker over loopback with compatibility date 2026-10-30 and flags []",
+          "kind": "capability",
+          "provenance": "observed",
+          "value": "supported"
+        },
+        "runtime.capability.runtime.intl.segmenter": {
+          "evidence": "evaluated true; workerd 1.20261023.1 executed the capability probe Worker over loopback with compatibility date 2026-10-30 and flags []",
+          "kind": "capability",
+          "provenance": "observed",
+          "value": "supported"
+        },
+        "runtime.capability.runtime.response.json": {
+          "evidence": "evaluated true; workerd 1.20261023.1 executed the capability probe Worker over loopback with compatibility date 2026-10-30 and flags []",
+          "kind": "capability",
+          "provenance": "observed",
+          "value": "supported"
+        },
+        "runtime.capability.runtime.streams": {
+          "evidence": "evaluated true; workerd 1.20261023.1 executed the capability probe Worker over loopback with compatibility date 2026-10-30 and flags []",
+          "kind": "capability",
+          "provenance": "observed",
+          "value": "supported"
+        },
+        "runtime.capability.runtime.structuredClone": {
+          "evidence": "evaluated true; workerd 1.20261023.1 executed the capability probe Worker over loopback with compatibility date 2026-10-30 and flags []",
+          "kind": "capability",
+          "provenance": "observed",
+          "value": "supported"
+        },
+        "runtime.capability.runtime.text.streams": {
+          "evidence": "evaluated true; workerd 1.20261023.1 executed the capability probe Worker over loopback with compatibility date 2026-10-30 and flags []",
+          "kind": "capability",
+          "provenance": "observed",
+          "value": "supported"
+        },
+        "runtime.capability.runtime.webassembly": {
+          "evidence": "evaluated true; workerd 1.20261023.1 executed the capability probe Worker over loopback with compatibility date 2026-10-30 and flags []",
+          "kind": "capability",
+          "provenance": "observed",
+          "value": "supported"
+        },
+        "runtime.capability.runtime.webcrypto": {
+          "evidence": "evaluated true; workerd 1.20261023.1 executed the capability probe Worker over loopback with compatibility date 2026-10-30 and flags []",
+          "kind": "capability",
+          "provenance": "observed",
+          "value": "supported"
+        },
+        "runtime.compatibility.date": {
+          "evidence": "wrangler.jsonc compatibility_date",
+          "kind": "configuration",
+          "provenance": "authoritative",
+          "value": "2026-10-30"
+        },
+        "runtime.compatibility.flags": {
+          "evidence": "wrangler.jsonc compatibility_flags",
+          "kind": "configuration",
+          "provenance": "authoritative",
+          "value": []
+        },
+        "runtime.workerd.version": {
+          "evidence": "installed package manifests: Wrangler 4.156.0 and @cloudflare/vite-plugin 1.66.0 both resolve workerd 1.20261023.1",
+          "kind": "identity",
+          "provenance": "authoritative",
+          "value": "1.20261023.1"
+        },
+        "typescript.worker.libEdition": {
+          "evidence": "every probed edition was fully supported (es2015 (es2015.core); es2016 (es2016.array.includes); es2017 (es2017.object.entries); es2018 (es2018.promise.finally); es2019 (es2019.object.fromEntries); es2020 (es2020.bigint); es2021 (es2021.promise.any); es2022 (es2022.object.hasOwn); es2023 (es2023.array.toSorted); es2024 (es2024.object.groupBy); es2025 (es2025.set.union)); worker lib edition is the newest of them",
+          "kind": "derived",
+          "provenance": "derived",
+          "value": "es2025"
+        }
+      }
+    }
+  },
+  "policies": {
+    "clientApiEdition": {
+      "checkedAgainst": [
+        "tsconfig.json compilerOptions.lib"
+      ],
+      "decidedAt": "2026-11-04T16:02:18.700Z",
+      "decidedBy": "unrecorded (bootstrap)",
+      "provenance": "declared",
+      "rationale": "No installed tool carries a browser-API database, so the correspondence between an ES edition and Vite's resolved browser targets stays a reviewed human decision.",
+      "reviewedAgainst": [
+        "vite-syntax-target@sha256:e11d5e6d27002cdac7e17e11d15f286c0d1a2d3c46e657f0b57d6751aec50958",
+        "typescript-libraries@sha256:966ad9f0ab56ad8a5f4662f13ec4be9de2a17fc0c9407f87e75c7f513a936a6b"
+      ],
+      "value": "es2023"
+    },
+    "permissionProfiles": {
+      "checkedAgainst": [
+        "scripts/vite-build.mjs buildViteArgs",
+        "scripts/wrangler-types.mjs buildWranglerTypesArgs",
+        "scripts/wrangler-dry-run.mjs buildWranglerDryRunArgs"
+      ],
+      "decidedAt": "2026-11-04T16:02:18.700Z",
+      "decidedBy": "unrecorded (bootstrap)",
+      "provenance": "declared",
+      "rationale": "Each launcher grants only what its operation declares. Discovery never adds a grant: a tool's observed needs are not permission.",
+      "reviewedAgainst": [
+        "workerd-runtime@sha256:8aa9865cee2eb3e13dfd02ab1bea1a145a0ae1c4ae5bf441ea25888c43f13daa"
+      ],
+      "value": {
+        "vite-build": [
+          "--allow-read",
+          "--allow-write",
+          "--allow-env",
+          "--allow-sys",
+          "--allow-ffi=<rolldown>",
+          "--allow-ffi=<lightningcss>"
+        ],
+        "wrangler-dry-run": [
+          "--allow-read",
+          "--allow-env",
+          "--allow-sys",
+          "--allow-write=<root>/dist/worker",
+          "--allow-write=<path>/.wrangler",
+          "--allow-run=<esbuild>"
+        ],
+        "wrangler-types": [
+          "--allow-read",
+          "--allow-write",
+          "--allow-env",
+          "--allow-sys",
+          "--allow-net=127.0.0.1",
+          "--allow-run=<workerd>",
+          "--allow-run=<esbuild>"
+        ]
+      }
+    }
+  },
+  "schemaVersion": 1,
+  "toolchain": {
+    "browserCompatSources": {
+      "available": [],
+      "checked": [
+        "@mdn/browser-compat-data",
+        "browser-compat-data",
+        "caniuse-lite",
+        "browserslist"
+      ],
+      "evidence": "no installed package carries a browser-compatibility database, so the client API edition remains a declared policy",
+      "missing": [
+        "@mdn/browser-compat-data",
+        "browser-compat-data",
+        "caniuse-lite",
+        "browserslist"
+      ]
+    },
+    "deno": {
+      "evidence": "Deno.version.deno of the process that authored the contract",
+      "version": "2.9.8"
+    },
+    "lockfile": {
+      "evidence": "deno.lock specifiers",
+      "specifiers": {
+        "npm:@cloudflare/vite-plugin@1.66.0": "1.66.0_vite@8.3.5_wrangler@4.156.0",
+        "npm:typescript@~7.0.2": "7.0.2",
+        "npm:vite@^8.3.5": "8.3.5",
+        "npm:wrangler@4.156.0": "4.156.0"
+      }
+    },
+    "mise": {
+      "evidence": ".mise.toml [tools]",
+      "pins": {
+        "cmake": "4.4.5",
+        "deno": "2.9.8",
+        "emsdk": "6.0.13",
+        "ninja": "1.13.2"
+      }
+    },
+    "packages": {
+      "miniflare": [
+        {
+          "evidence": "installed package manifest",
+          "requiredBy": "wrangler@4.156.0",
+          "version": "5.20261023.3-beta",
+          "workerd": "1.20261023.1"
+        },
+        {
+          "evidence": "installed package manifest",
+          "requiredBy": "@cloudflare/vite-plugin@1.66.0",
+          "version": "5.20261023.1-beta",
+          "workerd": "1.20261023.1"
+        }
+      ],
+      "typescript": {
+        "evidence": "installed package manifest",
+        "path": "node_modules/typescript",
+        "version": "7.0.2"
+      },
+      "vite": {
+        "evidence": "installed package manifest",
+        "path": "node_modules/vite",
+        "version": "8.3.5"
+      },
+      "vitePlugin": {
+        "evidence": "installed package manifest",
+        "version": "1.66.0"
+      },
+      "workerd": {
+        "binary": "node_modules/.deno/@cloudflare+workerd-linux-64@1.20261023.1/node_modules/@cloudflare/workerd-linux-64/bin/workerd",
+        "consistent": true,
+        "evidence": "Wrangler 4.156.0 and @cloudflare/vite-plugin 1.66.0 both resolve workerd 1.20261023.1",
+        "platformPackage": "@cloudflare/workerd-linux-64@1.20261023.1",
+        "version": "1.20261023.1"
+      },
+      "wrangler": {
+        "evidence": "installed package manifest",
+        "version": "4.156.0"
+      }
+    },
+    "platform": {
+      "arch": "x86_64",
+      "evidence": "Deno.build",
+      "key": "linux-x86_64-gnu",
+      "libc": "gnu",
+      "os": "linux"
+    }
+  }
+}

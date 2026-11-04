@@ -1,10 +1,14 @@
+# Generated from toolchain.toml by `deno task toolchain:prepare`.
+# Edit toolchain.toml instead; this file is a projection.
+
 [tools]
 deno = "2.9.8"
-# Emscripten 6.0.13 warns for cmake 4.2.0-4.3.3; wasm/CMakeLists.txt needs >= 4.2.
 cmake = "4.4.5"
 ninja = "1.13.2"
 emsdk = "6.0.13"
-# emsdk does not bundle Python; Emscripten's emcc driver requires Python >= 3.10.
-python = "3.13.18"
+
+# Python is NOT project-managed. Emscripten needs the host's python3 (>= 3.10);
+# scripts/resolve-python.sh uses it when present and only provisions a fallback
+# at the requirement the installed SDK reports when the host cannot satisfy it.
 # Node.js is intentionally not project-managed. Emscripten ships its own Node;
 # real deployment and Vite dev/preview may use a host-provided Node.

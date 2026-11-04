@@ -28,3 +28,6 @@ dist-ssr
 /.wrangler/
 /public/wasm/
 .aider*
+
+# Local contract discovery candidate (the approved contract is committed)
+/.contracts/

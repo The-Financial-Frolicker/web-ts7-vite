@@ -1,8 +1,14 @@
 {
   "compilerOptions": {
-    "target": "ES2022",
+    "target": "ESNext",
     "module": "ESNext",
-    "lib": ["ES2022"],
+    /* Anchored to measured workerd capabilities, not to the compiler and not to
+       an assumption that workerd is "newer" than a browser. The approved
+       `workerd-runtime` contract records which ES editions the installed
+       runtime actually supports, probed with this project's compatibility date
+       and flags; `deno task check:contracts` fails when this declaration drifts
+       from that measurement. */
+    "lib": ["ES2025"],
     "types": [],
     "moduleResolution": "bundler",
     "strict": true,

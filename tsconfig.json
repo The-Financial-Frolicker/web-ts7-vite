@@ -1,7 +1,17 @@
 {
   "compilerOptions": {
-    "target": "es2023",
+    /* Author against the newest standard TypeScript parses; Vite/Rolldown
+       downlevels the emitted JavaScript to the production browser target. */
+    "target": "esnext",
     "module": "esnext",
+    /* Runtime API contract, not a toolchain fact: this is the newest ES library
+       edition whose APIs the project is willing to depend on in a browser. The
+       bundler does not polyfill, so a newer edition here would claim APIs the
+       production browsers lack. It is recorded as a `declared` policy in
+       toolchain-contracts.json together with the contracts it was reviewed
+       against; `deno task check:contracts` fails when this line disagrees with
+       that policy or when the policy has not been reviewed against the current
+       Vite and TypeScript contracts. */
     "lib": ["ES2023", "DOM"],
     "types": ["vite/client"],
     "allowArbitraryExtensions": true,
