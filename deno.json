@@ -42,9 +42,11 @@
     "test:no-node": "bash scripts/deno-no-node.sh deno test --allow-read --allow-write --allow-run --allow-env scripts/deno-no-node.test.mjs",
     "test:wasm": "bash scripts/deno-no-node.sh deno test --allow-read wasm/harness.test.ts",
     "test:wasm:published": "bash scripts/deno-no-node.sh deno test --allow-read wasm/published.test.ts",
-    "validate": "bash scripts/deno-no-node.sh bash -c 'deno task fmt:check && deno task lint && deno task check:client && deno task check:worker && deno task check:node-boundary && deno task test:init && deno task test:worker && deno task test:scripts && deno task test:deploy && deno task test:boundary && deno task test:toolchain && deno task test:toolchain-config && deno task test:contracts && deno task test:generator && deno task test:vite && deno task test:wrangler-types && deno task test:wrangler-dry-run && deno task test:no-node && deno task check:contracts'",
+    "validate": "bash scripts/deno-no-node.sh bash -c 'deno task fmt:check && deno task lint && deno task check:client && deno task check:worker && deno task check:node-boundary && deno task test:init && deno task test:worker && deno task test:scripts && deno task test:deploy && deno task test:boundary && deno task test:toolchain && deno task test:toolchain-config && deno task test:contracts && deno task test:generator && deno task test:vite && deno task test:wrangler-types && deno task test:wrangler-dry-run && deno task test:no-node && deno task test:edge && deno task check:contracts'",
     "ci": "bash scripts/deno-no-node.sh bash scripts/ci.sh",
     "deploy": "bash scripts/deploy.sh",
-    "deploy:dry-run": "bash scripts/deno-no-node.sh bash scripts/deploy-dry-run.sh"
+    "deploy:dry-run": "bash scripts/deno-no-node.sh bash scripts/deploy-dry-run.sh",
+    "edge:verify": "bash scripts/edge-accept.sh",
+    "test:edge": "bash scripts/deno-no-node.sh deno test --allow-read --allow-write --allow-env scripts/edge-verify.test.mjs"
   }
 }

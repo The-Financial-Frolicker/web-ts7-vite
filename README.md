@@ -1323,6 +1323,66 @@ credentials. In a non-interactive environment it requires
 `CLOUDFLARE_API_TOKEN`; interactively, use `wrangler login`. The diagnostic
 comes from Wrangler; this repository does not store or broker credentials.
 
+## Deployed-edge acceptance
+
+Build validation proves the application *can* be built; toolchain conformance
+proves the authorised environment matches the recorded contract. Neither says
+anything about the deployed application. **Deployed-edge acceptance** closes that
+gap: the application is deployed to a disposable Cloudflare Worker, loaded in a
+real browser, and accepted only when the rendered page and the WebAssembly result
+match the authorised criteria.
+
+```
+build validation ──► toolchain conformance ──► deployment ──► edge acceptance
+      (can build)        (authorised env)     (command ok)   (behaves correctly)
+```
+
+Each layer keeps its own verdict: a successful build or deployment never
+substitutes for a failed edge assertion.
+
+- **Criteria** live in [`acceptance/criteria.json`](acceptance/criteria.json):
+  the page marker, the exact WebAssembly result string
+  (`WebAssembly result: 19 + 23 = 42`), the Worker health text, and the failure
+  markers that must not appear. Editing that file changes what "accepted" means.
+- **The browser is real**: the preinstalled Chrome on the runner, driven over the
+  loopback DevTools protocol by [`scripts/edge-verify.mjs`](scripts/edge-verify.mjs).
+  No Playwright, no container, no additional dependency.
+- **The URL comes from the deployment**, never from a template. Wrangler does not
+  print a workers.dev URL, so the account's own subdomain is read from the
+  Cloudflare API and paired with the deployed Worker name the deployment
+  reported; a URL found in the deploy log wins, and the evidence records which
+  source was used.
+- **Identity binding**: the page title is baked in at build time from the
+  initialised project name, so `page.identity` proves the tested page belongs to
+  *that* deployment rather than to another Worker.
+
+Run it with:
+
+```bash
+gh workflow run edge-acceptance.yml -f confirm=accept
+```
+
+The workflow is `workflow_dispatch`-only (it deploys), never production, and uses
+a throwaway Worker named `edge-<run_id>-<attempt>` that is deleted at the end.
+Evidence is uploaded as the `edge-acceptance-<run_id>-<attempt>` artefact:
+
+| File | Contents |
+| --- | --- |
+| `acceptance.json` | source SHA, deployment URL and its source, deployment id, HTTP status, browser, per-assertion results, overall `accepted` |
+| `screenshot.png` | supplementary evidence only — never the decision |
+| `page.html` | the HTTP response body that was tested |
+| `deploy.log` | the deployment command's output |
+
+Prerequisites (none of which are configured in this repository yet, so the job
+fails closed with this list rather than passing silently):
+
+- repository **secret** `CLOUDFLARE_API_TOKEN` — Workers Scripts:Edit on an
+  account you are willing to deploy disposable Workers into;
+- repository **variable** `CLOUDFLARE_ACCOUNT_ID`;
+- workers.dev enabled for that account (the acceptance URL is a `*.workers.dev`
+  address).
+
+
 ## Continuous integration
 
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on pushes to

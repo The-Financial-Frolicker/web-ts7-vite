@@ -36,6 +36,8 @@ export const EXIT_WRITE = 3;
 /** Tasks that only make sense in the generator. */
 export const GENERATOR_ONLY_TASKS = Object.freeze([
   "contract:refresh",
+  "edge:verify",
+  "test:edge",
   "test:toolchain",
   "test:init",
   "init:project",

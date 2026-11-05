@@ -149,6 +149,14 @@ jobs:
       - name: Node-exclusion wrapper tests
         run: mise exec -- deno task test:no-node
 
+      # Generator-only: the deployed-edge acceptance logic is not part of a
+      # generated product, so the guard keeps this workflow valid in both trees.
+      # These are the pure decision-logic tests; the real deployment is exercised
+      # only by .github/workflows/edge-acceptance.yml.
+      - name: Edge acceptance logic tests (generator only)
+        if: hashFiles('scripts/edge-verify.test.mjs') != ''
+        run: mise exec -- deno task test:edge
+
       # The strict contract gate is the LAST step of this job: every independent
       # suite above runs before the verdict, so a bootstrap baseline cannot hide
       # them. It remains fatal. This step performs no discovery — it reads

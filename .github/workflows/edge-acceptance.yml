@@ -1,0 +1,219 @@
+name: Edge acceptance
+
+# Deployed-edge behavioural acceptance: deploy the application to a disposable
+# Cloudflare Worker, verify in a real browser that the deployed page renders and
+# the WebAssembly calculation produced the expected output, and keep the evidence.
+#
+# Deliberately not wired to push or pull_request: it deploys, so it needs
+# privileged credentials, and the suite is an explicit, human-initiated assurance
+# step. Trigger it from the Actions UI or with:
+#   gh workflow run edge-acceptance.yml -f confirm=accept
+#
+# Never production: the Worker name is `edge-<run_id>-<attempt>`, a throwaway
+# instance that is deleted at the end of the run.
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "accept" to deploy a disposable Worker and run edge acceptance'
+        required: true
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: edge-acceptance-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  MISE_YES: "1"
+  DENO_NO_UPDATE_CHECK: "1"
+
+jobs:
+  edge-acceptance:
+    name: Edge acceptance (ubuntu-24.04)
+    if: ${{ inputs.confirm == 'accept' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    # Add this job to a protected environment once one exists in the repository:
+    #   environment: cloudflare-edge-acceptance
+    # Referencing a non-existent environment would create an unprotected one, so
+    # the explicit dispatch plus confirmation input is the gate for now.
+
+    env:
+      # Disposable, non-production identity. Never a shared staging Worker.
+      WORKER_NAME: edge-${{ github.run_id }}-${{ github.run_attempt }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+      WORK_DIR: ${{ github.workspace }}/.acceptance
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install the pinned toolchain with mise
+        uses: jdx/mise-action@v5
+        with:
+          cache: true
+          cache_save_post: true
+          install: true
+
+      - name: Install Node for the Wrangler deployment
+        # The build runs on Deno; the real deployment path is Node-hosted because
+        # Wrangler is a Node tool (see README "Runtime ownership"). Node is not a
+        # project-managed tool, so Actions provides it.
+        uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+
+      - name: Cache Deno's npm download cache
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/deno
+          key: deno-npm-${{ runner.os }}-${{ hashFiles('deno.lock') }}
+          restore-keys: |
+            deno-npm-${{ runner.os }}-
+
+      - name: Install npm dependencies
+        run: mise exec -- deno install --frozen
+
+      - name: Require Cloudflare credentials
+        # Fail closed with the actual prerequisite: a skipped acceptance run is
+        # not an accepted deployment.
+        run: |
+          missing=""
+          [ -n "${CLOUDFLARE_API_TOKEN:-}" ] || missing="$missing CLOUDFLARE_API_TOKEN(secret)"
+          [ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ] || missing="$missing CLOUDFLARE_ACCOUNT_ID(variable)"
+          if [ -n "$missing" ]; then
+            echo "::error::edge acceptance needs:$missing"
+            echo "Configure the repository secret CLOUDFLARE_API_TOKEN (Workers"
+            echo "Scripts:Edit on the acceptance account) and the repository variable"
+            echo "CLOUDFLARE_ACCOUNT_ID, then re-run this workflow."
+            exit 1
+          fi
+          echo "Cloudflare credentials present (values are never printed)."
+
+      - name: Prepare a disposable deployment tree
+        # The template's placeholder is not a valid Worker name, so the same
+        # throwaway-copy idiom as scripts/ci.sh applies: initialise a unique
+        # identity and never touch the checked-out tree.
+        run: |
+          set -euo pipefail
+          mkdir -p "$WORK_DIR"
+          tar -C "$GITHUB_WORKSPACE" \
+            --exclude=./.git \
+            --exclude=./node_modules \
+            --exclude=./dist \
+            --exclude=./build-wasm \
+            --exclude=./.wrangler \
+            --exclude=./public/wasm \
+            --exclude=./artifacts \
+            --exclude='./.aider*' \
+            -cf - . | tar -C "$WORK_DIR" -xf -
+          ln -s "$GITHUB_WORKSPACE/node_modules" "$WORK_DIR/node_modules"
+          cd "$WORK_DIR"
+          mise exec -- deno task init:project "$WORKER_NAME"
+
+      - name: Build and deploy the disposable Worker
+        id: deploy
+        # `deno task deploy` builds, checks the deployment artefacts and runs the
+        # Node-hosted Wrangler deployment. Vite's build needs the explicit CI
+        # profile on a hosted runner (denoland/deno#37062).
+        #
+        # BUILD_SHA and BUILD_DEPLOYMENT are compiled into the page, so the
+        # browser verifier can prove it observed *this* revision and *this*
+        # deployment instance. They are passed to the build, never guessed.
+        env:
+          BUILD_SHA: ${{ github.sha }}
+        run: |
+          cd "$WORK_DIR"
+          # The deployment identity is the disposable Worker name: unique per run
+          # and attempt, so the page cannot be confused with another deployment.
+          export BUILD_DEPLOYMENT="$WORKER_NAME"
+          set +e
+          VITE_PERMISSION_PROFILE=ci-runner mise exec -- deno task deploy \
+            -- --name "$WORKER_NAME" 2>&1 | tee "$WORK_DIR/deploy.log"
+          status=${PIPESTATUS[0]}
+          echo "deploy_exit=$status" >> "$GITHUB_OUTPUT"
+          exit "$status"
+
+      - name: Edge acceptance (real browser, real deployment)
+        if: ${{ steps.deploy.outputs.deploy_exit == '0' }}
+        env:
+          DEPLOY_LOG: ${{ github.workspace }}/.acceptance/deploy.log
+          DEPLOY_EXIT_CODE: "0"
+        run: |
+          cd "$WORK_DIR"
+          mise exec -- bash scripts/edge-accept.sh
+
+      - name: Keep the acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: edge-acceptance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ github.workspace }}/.acceptance/artifacts/acceptance.json
+            ${{ github.workspace }}/.acceptance/artifacts/screenshot.png
+            ${{ github.workspace }}/.acceptance/artifacts/page.html
+            ${{ github.workspace }}/.acceptance/artifacts/cleanup.json
+            ${{ github.workspace }}/.acceptance/deploy.log
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Delete the disposable Worker and record cleanup
+        if: always()
+        # Cleanup keeps the account from accumulating one Worker per run. Its
+        # outcome is recorded in the evidence but never changes the acceptance
+        # verdict: a leftover Worker is an operational warning, not a behavioural
+        # failure of the application.
+        run: |
+          set +e
+          cd "$WORK_DIR" || exit 0
+          mkdir -p artifacts
+          if [ ! -f dist/worker/wrangler.json ]; then
+            command="no Worker was deployed"
+            code=0
+          else
+            node "$GITHUB_WORKSPACE/node_modules/wrangler/bin/wrangler.js" delete \
+              "$WORKER_NAME" --force --config dist/worker/wrangler.json
+            code=$?
+            command="wrangler delete $WORKER_NAME"
+          fi
+
+          python3 - "$WORK_DIR/artifacts/cleanup.json" "$WORKER_NAME" "$code" "$command" <<'PY'
+          import json, sys
+          target, worker, code, command = sys.argv[1:5]
+          record = {
+              "worker": worker,
+              "command": command,
+              "exitCode": int(code),
+              "ok": int(code) == 0,
+          }
+          with open(target, "w") as handle:
+              json.dump(record, handle, indent=2)
+              handle.write("\n")
+          PY
+
+          # Attach the cleanup outcome to the acceptance evidence without
+          # recomputing (or weakening) the acceptance verdict.
+          python3 - "$WORK_DIR/artifacts/acceptance.json" "$WORK_DIR/artifacts/cleanup.json" <<'PY'
+          import json, os, sys
+          evidence_path, cleanup_path = sys.argv[1:3]
+          if os.path.exists(evidence_path):
+              with open(evidence_path) as handle:
+                  evidence = json.load(handle)
+              with open(cleanup_path) as handle:
+                  evidence["cleanup"] = json.load(handle)
+              with open(evidence_path, "w") as handle:
+                  json.dump(evidence, handle, indent=2)
+                  handle.write("\n")
+          PY
+
+          if [ "$code" -ne 0 ]; then
+            echo "::warning::cleanup could not delete $WORKER_NAME (exit $code); delete it manually"
+          fi
+          exit 0

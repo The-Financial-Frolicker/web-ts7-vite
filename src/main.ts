@@ -3,6 +3,18 @@ import heroImg from "./assets/hero.png";
 import typescriptLogo from "./assets/typescript.svg";
 import viteLogo from "./assets/vite.svg";
 import { setupCounter } from "./counter.ts";
+import { BUILD_IDENTITY } from "./build-identity.ts";
+
+// Provenance of this build, as a stable machine-readable element. The deployed
+// edge-acceptance verifier reads it and compares it with the revision and
+// deployment it expects, so a page from another build can never be accepted.
+const buildIdentity = document.createElement("meta");
+buildIdentity.name = "build-identity";
+buildIdentity.content = JSON.stringify({
+  sha: BUILD_IDENTITY.sha,
+  deployment: BUILD_IDENTITY.deployment,
+});
+document.head.append(buildIdentity);
 
 document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
 <section id="center">

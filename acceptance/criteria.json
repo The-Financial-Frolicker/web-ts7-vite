@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "suiteVersion": "edge-acceptance/1",
+  "description": "Behavioural checks run against the deployed Cloudflare Worker. The acceptance decision is made from these assertions, not from a screenshot.",
+  "pageMarker": {
+    "selector": "#app h1",
+    "equals": "Get started"
+  },
+  "wasmResult": {
+    "selector": "#wasm-result",
+    "equals": "WebAssembly result: 19 + 23 = 42"
+  },
+  "workerHealth": {
+    "selector": "#worker-health",
+    "contains": ["Worker: ok", "cloudflare-workers"]
+  },
+  "failureMarkers": [
+    "WebAssembly initialisation failed.",
+    "Loading WebAssembly...",
+    "Cloudflare Worker request failed.",
+    "Checking Cloudflare Worker..."
+  ]
+}
