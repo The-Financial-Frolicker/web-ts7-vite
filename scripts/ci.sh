@@ -160,11 +160,12 @@ run_build_checks() {
     echo "==> WASM build, typechecks and Vite build (Vite profile: ci-runner)"
     # Temporary override for denoland/deno#37062: Deno's sandbox blocks Vite's
     # Linux platform detection from probing special procfs paths under scoped
-    # permissions, so the build fails with NotCapable. The broader profile
-    # applies only to the Vite child process on this ephemeral CI runner; the
-    # launcher stays read-only, and a plain `deno task build` keeps the local
-    # profile. Remove this override once the upstream issue is fixed and the
-    # build succeeds with the restricted local profile.
+    # permissions, so the build fails with NotCapable. It covers both Vite
+    # builds in this stage (here, and the rebuild inside deploy:dry-run below)
+    # and applies only to the Vite child process on this ephemeral CI runner:
+    # the launcher stays read-only, and a plain `deno task build` keeps the
+    # local profile. Remove both overrides once the upstream issue is fixed and
+    # the build succeeds with the restricted local profile.
     VITE_PERMISSION_PROFILE=ci-runner deno task build
 
     echo "==> Deployment artefact compatibility check"
@@ -176,8 +177,11 @@ run_build_checks() {
     echo "==> Published-artifact smoke test (dist/client, Deno)"
     deno task test:wasm:published
 
-    echo "==> Wrangler deployment dry run (no credentials required)"
-    deno task deploy:dry-run
+    echo "==> Wrangler deployment dry run (Vite profile: ci-runner; no credentials required)"
+    # deploy-dry-run.sh runs `deno task build` again, so the second CI build
+    # needs the same temporary override (denoland/deno#37062); both go away
+    # together once the upstream issue is fixed.
+    VITE_PERMISSION_PROFILE=ci-runner deno task deploy:dry-run
 
     # The generated configuration is part of what the contract governs: the
     # build must not silently change compatibility settings relative to the

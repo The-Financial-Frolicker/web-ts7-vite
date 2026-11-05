@@ -130,7 +130,8 @@ paths such as `/proc/sys/fs/binfmt_misc/WSLInterop` under scoped permissions
 the build with `NotCapable`. The launcher invocation in
 `scripts/build.sh` stays read-only in both cases, and the profile is always
 named explicitly — `scripts/ci.sh` sets `VITE_PERMISSION_PROFILE=ci-runner` for
-its throwaway-copy build, and nothing infers a profile from `CI` or any other
+both builds it performs in its throwaway copy (the initial build and the rebuild
+inside `deploy:dry-run`), and nothing infers a profile from `CI` or any other
 ambient variable. Both profiles are recorded in the permission contract, so
 changing either one requires human approval. The broader profile is a temporary
 workaround: remove it once the upstream issue is fixed and the build passes with

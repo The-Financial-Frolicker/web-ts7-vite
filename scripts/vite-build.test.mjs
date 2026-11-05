@@ -21,6 +21,7 @@ import {
 const projectRoot = Deno.cwd();
 const buildScript = path.join(projectRoot, "scripts", "build.sh");
 const ciScript = path.join(projectRoot, "scripts", "ci.sh");
+const dryRunScript = path.join(projectRoot, "scripts", "deploy-dry-run.sh");
 
 describe("Deno-owned Vite invocation", () => {
   it("resolves the installed Vite CLI entry", () => {
@@ -150,7 +151,8 @@ describe("Deno-owned Vite invocation", () => {
   });
 
   it("keeps the outer launcher restricted and passes the profile by name", () => {
-    const lines = readFileSync(buildScript, "utf8").split("\n");
+    const text = readFileSync(buildScript, "utf8");
+    const lines = text.split("\n");
     const marker = lines.findIndex((line) =>
       line.includes("scripts/vite-build.mjs")
     );
@@ -179,18 +181,41 @@ describe("Deno-owned Vite invocation", () => {
       lines[marker + 1],
       /--permission-profile=\$VITE_PERMISSION_PROFILE/,
     );
+
+    // An ordinary local build stays restricted: build.sh defaults to `local`
+    // and never selects the CI profile itself.
+    assert.match(
+      text,
+      /VITE_PERMISSION_PROFILE="\$\{VITE_PERMISSION_PROFILE:-local\}"/,
+    );
+    assert.doesNotMatch(text, /VITE_PERMISSION_PROFILE=ci-runner/);
   });
 
-  it("selects ci-runner explicitly for the throwaway CI build only", () => {
+  it("selects ci-runner for both CI Vite builds and nothing else", () => {
     const script = readFileSync(ciScript, "utf8");
+    const dryRun = readFileSync(dryRunScript, "utf8");
 
+    // The CI stage builds twice: the initial build, then the rebuild performed
+    // by deploy:dry-run. Both are Vite invocations and need the same profile.
     assert.match(script, /VITE_PERMISSION_PROFILE=ci-runner deno task build/);
+    assert.match(
+      script,
+      /VITE_PERMISSION_PROFILE=ci-runner deno task deploy:dry-run/,
+    );
     assert.equal(
       script.match(/VITE_PERMISSION_PROFILE=/g)?.length,
-      1,
-      "the CI profile is selected once, for the throwaway build",
+      2,
+      "the CI profile is selected for the two CI builds only",
     );
     assert.doesNotMatch(script, /--allow-all/);
+
+    // Keep the second override honest: it exists because the dry-run wrapper
+    // rebuilds the application.
+    assert.match(
+      dryRun,
+      /^deno task build$/m,
+      "deploy-dry-run.sh must rebuild, which is why CI overrides its profile",
+    );
   });
 
   it("fails clearly when an installed package is absent", () => {
