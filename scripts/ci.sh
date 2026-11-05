@@ -157,8 +157,15 @@ run_build_checks() {
     echo "==> Generated Worker types freshness check"
     deno task check:worker-types
 
-    echo "==> WASM build, typechecks and Vite build"
-    deno task build
+    echo "==> WASM build, typechecks and Vite build (Vite profile: ci-runner)"
+    # Temporary override for denoland/deno#37062: Deno's sandbox blocks Vite's
+    # Linux platform detection from probing special procfs paths under scoped
+    # permissions, so the build fails with NotCapable. The broader profile
+    # applies only to the Vite child process on this ephemeral CI runner; the
+    # launcher stays read-only, and a plain `deno task build` keeps the local
+    # profile. Remove this override once the upstream issue is fixed and the
+    # build succeeds with the restricted local profile.
+    VITE_PERMISSION_PROFILE=ci-runner deno task build
 
     echo "==> Deployment artefact compatibility check"
     deno task check:deploy

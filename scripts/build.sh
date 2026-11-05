@@ -2,6 +2,12 @@
 # Usage:
 #   scripts/build.sh                    normal build
 #   scripts/build.sh --print-emsdk-root  print the SDK root the build would use
+#
+# VITE_PERMISSION_PROFILE names the permission profile for the separate Vite
+# child process: `local` (default, restricted) or `ci-runner` (`--allow-all`,
+# for an ephemeral trusted CI runner). The choice is explicit and is passed to
+# the launcher by name; nothing here infers it from CI or any other ambient
+# variable. scripts/ci.sh sets it for its throwaway-copy build.
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -222,11 +228,14 @@ if [[ -z "$PROJECT_ROOT" || "$PROJECT_ROOT" == "/" ]]; then
 fi
 rm -rf "$PROJECT_ROOT/dist"
 # The launcher is read-only and may spawn only the pinned Deno binary. The
-# child Vite process receives its own explicit Vite permission profile.
+# separate Vite child process receives the profile this build was asked for, by
+# name; the launcher rejects an unknown name instead of falling back.
+VITE_PERMISSION_PROFILE="${VITE_PERMISSION_PROFILE:-local}"
 deno run \
     --allow-read="$PROJECT_ROOT,$NODE_MODULES_REAL" \
     --allow-run="$DENO_BIN" \
-    scripts/vite-build.mjs
+    scripts/vite-build.mjs \
+    "--permission-profile=$VITE_PERMISSION_PROFILE"
 echo "==> [9/9] Test published artifact (dist/client/wasm)"
 deno task test:wasm:published
 

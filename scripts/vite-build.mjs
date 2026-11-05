@@ -3,16 +3,40 @@
  *
  * This process does not import Vite. It resolves the installed Vite CLI and the
  * platform-specific Rolldown and Lightning CSS N-API bindings, then spawns a
- * separate Deno process with an explicit permission profile. The child process
- * receives only the permissions proven necessary for the production build:
- * read, write, env and sys, plus path-scoped FFI access to the two bindings.
- * It receives no run or net permission.
+ * separate Deno process with an explicitly selected permission profile.
+ *
+ * Two profiles exist, and the caller chooses one by name:
+ *
+ *   local (default)
+ *       The profile every developer machine uses: read, write, env and sys,
+ *       plus path-scoped FFI access to the two native bindings. It receives no
+ *       run or net permission.
+ *
+ *   ci-runner
+ *       `--allow-all`, for the throwaway build on an ephemeral trusted CI
+ *       runner. Deno's sandbox currently fails Vite's Linux platform detection
+ *       when it probes special procfs paths such as
+ *       `/proc/sys/fs/binfmt_misc/WSLInterop` under scoped permissions
+ *       (denoland/deno#37062). The broader grant is confined to this separate
+ *       child process and is only ever selected explicitly.
+ *
+ * The profile is never inferred from `CI` or any other ambient variable: the
+ * launcher receives the name it was given, and an unknown name is an error.
  *
  * FFI permission is not a native-code sandbox. It controls which libraries Deno
  * may load; once loaded, native code runs with the user's OS privileges.
  */
 
 import { dirname, join } from "./lib/path.mjs";
+
+/** Named permission profiles for the separate Vite process. */
+export const VITE_PERMISSION_PROFILES = Object.freeze(["local", "ci-runner"]);
+
+/** The profile used when the caller names none. */
+export const DEFAULT_VITE_PERMISSION_PROFILE = "local";
+
+/** CLI flag that selects a profile explicitly. */
+export const PERMISSION_PROFILE_FLAG = "--permission-profile";
 
 function fail(message) {
   throw new Error(message);
@@ -185,20 +209,47 @@ export function resolveViteInvocation(root = Deno.cwd()) {
 }
 
 /**
- * Build the separate-Deno-process command line.
+ * Permission flags for one named profile.
  *
- * No --allow-run or --allow-net is included. FFI is scoped to the two exact
- * installed native libraries.
+ * `ci-runner` deliberately adds no individual grants next to `--allow-all`:
+ * repeating them would suggest a narrower profile than the one that runs.
  */
-export function buildViteArgs(invocation, extraArgs = []) {
+function permissionFlags(profile, invocation) {
+  switch (profile) {
+    case "local":
+      return [
+        "--allow-read",
+        "--allow-write",
+        "--allow-env",
+        "--allow-sys",
+        `--allow-ffi=${invocation.rolldown}`,
+        `--allow-ffi=${invocation.lightningcss}`,
+      ];
+    case "ci-runner":
+      return ["--allow-all"];
+    default:
+      return fail(
+        `unknown Vite permission profile ${JSON.stringify(profile)}; ` +
+          `expected one of: ${VITE_PERMISSION_PROFILES.join(", ")}`,
+      );
+  }
+}
+
+/**
+ * Build the separate-Deno-process command line for a named profile.
+ *
+ * The default is the restricted `local` profile. `--cached-only` and `--frozen`
+ * are kept in every profile: a broader permission grant never means resolving
+ * or fetching dependencies at build time.
+ */
+export function buildViteArgs(
+  invocation,
+  extraArgs = [],
+  profile = DEFAULT_VITE_PERMISSION_PROFILE,
+) {
   return [
     "run",
-    "--allow-read",
-    "--allow-write",
-    "--allow-env",
-    "--allow-sys",
-    `--allow-ffi=${invocation.rolldown}`,
-    `--allow-ffi=${invocation.lightningcss}`,
+    ...permissionFlags(profile, invocation),
     "--cached-only",
     "--frozen",
     invocation.viteBin,
@@ -207,23 +258,74 @@ export function buildViteArgs(invocation, extraArgs = []) {
   ];
 }
 
+/** Describe the grants the selected profile actually contains. */
+export function describeViteProfile(profile, invocation) {
+  switch (profile) {
+    case "local":
+      return "Vite build (profile local): read/write/env/sys + " +
+        `FFI=${invocation.rolldown}, FFI=${invocation.lightningcss}; ` +
+        "no run or net permission";
+    case "ci-runner":
+      return "Vite build (profile ci-runner): --allow-all for this separate " +
+        "child process only; ephemeral CI runner, local profile unchanged";
+    default:
+      return fail(
+        `unknown Vite permission profile ${JSON.stringify(profile)}; ` +
+          `expected one of: ${VITE_PERMISSION_PROFILES.join(", ")}`,
+      );
+  }
+}
+
+/** Split the CLI arguments into the profile selection and Vite's own flags. */
+export function parseViteLauncherArgs(argv) {
+  const options = {
+    profile: DEFAULT_VITE_PERMISSION_PROFILE,
+    extraArgs: [],
+    printProfile: false,
+  };
+
+  for (let index = 0; index < argv.length; index += 1) {
+    const argument = argv[index];
+
+    if (argument === "--print-profile") {
+      options.printProfile = true;
+      continue;
+    }
+
+    if (argument === PERMISSION_PROFILE_FLAG) {
+      const value = argv[index + 1];
+      if (value === undefined) {
+        fail(`${PERMISSION_PROFILE_FLAG} requires a profile name`);
+      }
+      options.profile = value;
+      index += 1;
+      continue;
+    }
+
+    if (argument.startsWith(`${PERMISSION_PROFILE_FLAG}=`)) {
+      options.profile = argument.slice(`${PERMISSION_PROFILE_FLAG}=`.length);
+      continue;
+    }
+
+    options.extraArgs.push(argument);
+  }
+
+  return options;
+}
+
 /** CLI entry point; returns a process exit code. */
 export function main(argv = Deno.args, root = Deno.cwd()) {
   try {
+    const { profile, extraArgs, printProfile } = parseViteLauncherArgs(argv);
     const invocation = resolveViteInvocation(root);
-    const extraArgs = argv[0] === "--print-profile" ? [] : argv;
-    const args = buildViteArgs(invocation, extraArgs);
+    const args = buildViteArgs(invocation, extraArgs, profile);
 
-    if (argv[0] === "--print-profile") {
-      console.log(JSON.stringify({ ...invocation, args }, null, 2));
+    if (printProfile) {
+      console.log(JSON.stringify({ ...invocation, profile, args }, null, 2));
       return 0;
     }
 
-    console.error(
-      "Vite build: read/write/env/sys + " +
-        `FFI=${invocation.rolldown}, FFI=${invocation.lightningcss}; ` +
-        "no run or net permission",
-    );
+    console.error(describeViteProfile(profile, invocation));
 
     const result = new Deno.Command(Deno.execPath(), {
       args,

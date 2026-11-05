@@ -119,6 +119,23 @@ Node may be used for real deployment and Vite dev/preview; it is not installed
 by mise. Emscripten has its own embedded Node. This is a deliberate
 external-tooling dependency, not a claim that the application needs Node.
 
+Vite runs under one of two named permission profiles. `local` is the default and
+the only profile a developer machine uses: read, write, env and sys, plus
+path-scoped FFI for the Rolldown and lightningcss bindings, and no run or net
+permission. `ci-runner` grants `--allow-all` to the separate Vite child process
+only: an ephemeral GitHub-hosted runner is trusted CI code, and Deno's sandbox
+currently refuses Vite's Linux platform detection when it probes special procfs
+paths such as `/proc/sys/fs/binfmt_misc/WSLInterop` under scoped permissions
+([denoland/deno#37062](https://github.com/denoland/deno/issues/37062)), failing
+the build with `NotCapable`. The launcher invocation in
+`scripts/build.sh` stays read-only in both cases, and the profile is always
+named explicitly — `scripts/ci.sh` sets `VITE_PERMISSION_PROFILE=ci-runner` for
+its throwaway-copy build, and nothing infers a profile from `CI` or any other
+ambient variable. Both profiles are recorded in the permission contract, so
+changing either one requires human approval. The broader profile is a temporary
+workaround: remove it once the upstream issue is fixed and the build passes with
+the restricted local profile.
+
 TypeScript is different in kind. Its semantic checker is a **native Go
 executable**; the `tsc` npm entry point is a launcher that resolves that
 executable and hands over to it. The launcher is not the semantic engine, so
@@ -662,7 +679,7 @@ of this documentation if it remains useful.
 | `wrangler.jsonc` | Worker entry, deployed name placeholder, compatibility date, source maps, asset binding, SPA fallback and `/api/*` routing |
 | `vite.config.ts` | Vite plus `@cloudflare/vite-plugin`: client and Worker environments, Worker source maps |
 | `scripts/` | Build, Worker types, deployment, CI, initialiser, deployment-artefact checker and their tests |
-| `scripts/vite-build.mjs` | Deno-owned Vite launcher, invoked by `scripts/build.sh`; resolves the installed CLI and both native bindings, then runs Vite under an explicit permission profile |
+| `scripts/vite-build.mjs` | Deno-owned Vite launcher, invoked by `scripts/build.sh`; resolves the installed CLI and both native bindings, then runs Vite under an explicitly selected permission profile (`local` by default, `ci-runner` in CI) |
 | `scripts/wrangler-types.mjs` | Deno-owned Wrangler type-generation launcher, invoked by `scripts/worker-types.sh`; resolves Wrangler, workerd and esbuild, then runs only `types` under an explicit permission profile |
 | `scripts/wrangler-dry-run.mjs` | Deno-owned Wrangler dry-run launcher, invoked by `scripts/deploy-dry-run.sh`; resolves Wrangler and esbuild, then runs only `deploy --dry-run` under a separate scoped profile |
 | `scripts/deno-no-node.sh` | PATH tripwire for project-owned execution; rejects command-name `node`/`nodejs` attempts |
@@ -1012,9 +1029,12 @@ approval and therefore blocks CI.
 
 Policies stay separate from measurements. The client API edition and the
 permission profiles are `declared`; discovery never infers, widens or grants
-them. Each policy names the contract fingerprints it was reviewed against, so a
-workerd upgrade fails verification until someone reaffirms the review rather than
-silently re-blessing the old decision.
+them. Both named Vite profiles — `vite-build` for `local` and
+`vite-build-ci-runner` for the CI-only grant — are part of that policy, so the
+broader CI grant is reviewed like any other decision instead of appearing as an
+unrecorded exception. Each policy names the contract fingerprints it was
+reviewed against, so a workerd upgrade fails verification until someone
+reaffirms the review rather than silently re-blessing the old decision.
 
 #### Worker type generation
 
@@ -1092,7 +1112,7 @@ Run these from the project root with dependencies installed. Commands marked
 | `deno task test:scripts` | Emscripten SDK-root resolution tests with fake layouts | Deno and Bash |
 | `deno task test:deploy` | Deployment-artefact checker unit tests in temporary fixtures | Deno |
 | `deno task test:boundary` | Configuration invariants, including negative canaries and Worker typecheck coverage | Deno |
-| `deno task test:vite` | Vite CLI/native-binding resolution and the explicit Vite permission profile | Deno |
+| `deno task test:vite` | Vite CLI/native-binding resolution, both named permission profiles and the Bash wiring that selects one | Deno |
 | `deno task test:wrangler-types` | Wrangler CLI/workerd/esbuild resolution and the explicit type-generation permission profile | Deno |
 | `deno task test:wrangler-dry-run` | Direct Wrangler CLI/esbuild resolution, dry-run profile, argument forwarding and exit propagation | Deno |
 | `deno task test:toolchain` | Installed-package and TypeScript library discovery primitives, including version-pinned resolution | Deno |

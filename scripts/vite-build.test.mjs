@@ -2,20 +2,25 @@
  * Tests for the Deno-owned Vite invocation.
  *
  * These tests resolve the installed package graph but do not run a production
- * build. They verify the two native bindings, the Vite CLI entry, and the exact
- * child-process permission profile.
+ * build. They verify the two native bindings, the Vite CLI entry, both named
+ * permission profiles, and the Bash wiring that selects one of them.
  */
 
 import assert from "./lib/assert.mjs";
+import { readFileSync } from "./lib/fs.mjs";
+import path from "./lib/path.mjs";
 import { describe, it } from "./lib/test.mjs";
 import {
   buildViteArgs,
   findPackage,
+  parseViteLauncherArgs,
   resolveViteBin,
   resolveViteInvocation,
 } from "./vite-build.mjs";
 
 const projectRoot = Deno.cwd();
+const buildScript = path.join(projectRoot, "scripts", "build.sh");
+const ciScript = path.join(projectRoot, "scripts", "ci.sh");
 
 describe("Deno-owned Vite invocation", () => {
   it("resolves the installed Vite CLI entry", () => {
@@ -48,7 +53,7 @@ describe("Deno-owned Vite invocation", () => {
     );
   });
 
-  it("grants only the explicit Vite build profile", () => {
+  it("keeps the restricted local profile as the default", () => {
     const invocation = resolveViteInvocation(projectRoot);
     const args = buildViteArgs(invocation);
 
@@ -80,6 +85,112 @@ describe("Deno-owned Vite invocation", () => {
       "Vite build must not have all access",
     );
     assert.equal(args.at(-1), "build");
+
+    // Naming the default explicitly must produce the same command line.
+    assert.deepEqual(args, buildViteArgs(invocation, [], "local"));
+  });
+
+  it("gives the ci-runner profile --allow-all and keeps the pinned flags", () => {
+    const invocation = resolveViteInvocation(projectRoot);
+    const args = buildViteArgs(
+      invocation,
+      ["--mode", "production"],
+      "ci-runner",
+    );
+
+    assert.ok(args.includes("--allow-all"), `missing --allow-all: ${args}`);
+    assert.ok(
+      args.includes("--cached-only"),
+      `missing --cached-only: ${args}`,
+    );
+    assert.ok(args.includes("--frozen"), `missing --frozen: ${args}`);
+
+    // --allow-all already implies every individual grant; repeating one would
+    // describe a narrower profile than the one that runs.
+    const individual = args.filter((argument) =>
+      argument.startsWith("--allow-") && argument !== "--allow-all"
+    );
+    assert.deepEqual(individual, []);
+
+    assert.deepEqual(args.slice(-4), [
+      invocation.viteBin,
+      "build",
+      "--mode",
+      "production",
+    ]);
+  });
+
+  it("fails clearly for an unknown permission profile", () => {
+    const invocation = resolveViteInvocation(projectRoot);
+
+    assert.throws(
+      () => buildViteArgs(invocation, [], "root"),
+      /unknown Vite permission profile "root"; expected one of: local, ci-runner/,
+    );
+  });
+
+  it("reads the profile name the launcher is given, not an ambient signal", () => {
+    const options = parseViteLauncherArgs([
+      "--permission-profile=ci-runner",
+      "--mode",
+      "production",
+    ]);
+
+    assert.deepEqual(options, {
+      profile: "ci-runner",
+      extraArgs: ["--mode", "production"],
+      printProfile: false,
+    });
+
+    // Without a selection the launcher stays on the default profile.
+    assert.equal(
+      parseViteLauncherArgs(["--mode", "production"]).profile,
+      "local",
+    );
+  });
+
+  it("keeps the outer launcher restricted and passes the profile by name", () => {
+    const lines = readFileSync(buildScript, "utf8").split("\n");
+    const marker = lines.findIndex((line) =>
+      line.includes("scripts/vite-build.mjs")
+    );
+    assert.ok(marker > 0, "scripts/build.sh must invoke the Vite launcher");
+
+    // Walk back to the `deno run \` line that starts the launcher invocation.
+    let start = marker;
+    while (start > 0 && !/^\s*deno run \\$/.test(lines[start])) start -= 1;
+    assert.match(lines[start], /^\s*deno run \\$/, "deno run must launch it");
+
+    const block = lines.slice(start, marker + 1).join("\n");
+
+    assert.doesNotMatch(block, /--allow-all/);
+    assert.doesNotMatch(
+      block,
+      /--allow-net|--allow-env|--allow-sys|--allow-ffi/,
+    );
+    assert.match(block, /--allow-read="\$PROJECT_ROOT,\$NODE_MODULES_REAL"/);
+    assert.equal(
+      block.match(/--allow-run/g)?.length,
+      1,
+      `exactly one --allow-run=: ${block}`,
+    );
+    assert.match(block, /--allow-run="\$DENO_BIN"/);
+    assert.match(
+      lines[marker + 1],
+      /--permission-profile=\$VITE_PERMISSION_PROFILE/,
+    );
+  });
+
+  it("selects ci-runner explicitly for the throwaway CI build only", () => {
+    const script = readFileSync(ciScript, "utf8");
+
+    assert.match(script, /VITE_PERMISSION_PROFILE=ci-runner deno task build/);
+    assert.equal(
+      script.match(/VITE_PERMISSION_PROFILE=/g)?.length,
+      1,
+      "the CI profile is selected once, for the throwaway build",
+    );
+    assert.doesNotMatch(script, /--allow-all/);
   });
 
   it("fails clearly when an installed package is absent", () => {

@@ -6,12 +6,20 @@
  * from the same functions and compares them with the approved policy, so an
  * unreviewed permission change fails the build.
  *
+ * Every named Vite profile is recorded — the restricted `local` default and the
+ * `ci-runner` profile that only `scripts/ci.sh` selects — so widening either
+ * one changes the policy and has to be approved by a human.
+ *
  * Absolute paths are normalised: the project root becomes `<root>` and any
  * other absolute path keeps only its basename. A contract is committed, so it
  * must not contain a path from the machine that authored it.
  */
 
-import { buildViteArgs } from "../vite-build.mjs";
+import {
+  buildViteArgs,
+  DEFAULT_VITE_PERMISSION_PROFILE,
+  VITE_PERMISSION_PROFILES,
+} from "../vite-build.mjs";
 import { buildWranglerDryRunArgs } from "../wrangler-dry-run.mjs";
 import { buildWranglerTypesArgs } from "../wrangler-types.mjs";
 
@@ -43,17 +51,29 @@ export function normalisePermissionFlags(args, root) {
 }
 
 /**
+ * Contract key for one Vite profile; the default profile keeps the plain name.
+ *
+ * Deriving the keys from the launcher's profile list means a profile cannot be
+ * added or renamed without changing the policy.
+ */
+function viteProfileKey(profile) {
+  return profile === DEFAULT_VITE_PERMISSION_PROFILE
+    ? "vite-build"
+    : `vite-build-${profile}`;
+}
+
+/**
  * Build the declared profile of every external-tool launcher.
  *
  * Synthetic invocation values are used for the Vite profile: only the declared
  * permission flags are compared, so no resolution or execution is involved.
  */
 export function describePermissionProfiles(root = Deno.cwd()) {
-  const viteArgs = buildViteArgs({
+  const viteInvocation = {
     viteBin: "<vite>",
     rolldown: "<rolldown>",
     lightningcss: "<lightningcss>",
-  });
+  };
 
   const wranglerTypesArgs = buildWranglerTypesArgs({
     wranglerCli: "<wrangler>",
@@ -66,8 +86,18 @@ export function describePermissionProfiles(root = Deno.cwd()) {
     root,
   );
 
+  const viteProfiles = Object.fromEntries(
+    VITE_PERMISSION_PROFILES.map((profile) => [
+      viteProfileKey(profile),
+      normalisePermissionFlags(
+        buildViteArgs(viteInvocation, [], profile),
+        root,
+      ),
+    ]),
+  );
+
   return {
-    "vite-build": normalisePermissionFlags(viteArgs, root),
+    ...viteProfiles,
     "wrangler-types": normalisePermissionFlags(wranglerTypesArgs, root),
     "wrangler-dry-run": normalisePermissionFlags(dryRunArgs, root),
   };

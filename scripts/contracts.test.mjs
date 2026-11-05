@@ -41,7 +41,10 @@ import {
   SCOPE_WORKERD_RUNTIME,
 } from "./contracts/discover.mjs";
 import { probeConfigSource, probeWorkerSource } from "./contracts/fixtures.mjs";
-import { normalisePermissionFlags } from "./contracts/permissions.mjs";
+import {
+  describePermissionProfiles,
+  normalisePermissionFlags,
+} from "./contracts/permissions.mjs";
 import {
   CONTRACT_STATES,
   isApproved,
@@ -503,6 +506,25 @@ describe("permission policy normalisation", () => {
     );
 
     assert.deepEqual(first, second);
+  });
+
+  it("describes both named Vite profiles", () => {
+    const profiles = describePermissionProfiles(root);
+
+    assert.deepEqual(profiles["vite-build"], [
+      "--allow-read",
+      "--allow-write",
+      "--allow-env",
+      "--allow-sys",
+      "--allow-ffi=<rolldown>",
+      "--allow-ffi=<lightningcss>",
+    ]);
+    assert.deepEqual(profiles["vite-build-ci-runner"], ["--allow-all"]);
+
+    // Both launchers are still recorded, so a change to either is a policy
+    // change rather than an unnoticed edit.
+    assert.ok(profiles["wrangler-types"].length > 0);
+    assert.ok(profiles["wrangler-dry-run"].length > 0);
   });
 });
 
