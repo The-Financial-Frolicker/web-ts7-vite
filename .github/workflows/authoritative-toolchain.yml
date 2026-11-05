@@ -88,6 +88,14 @@ jobs:
         # checked-out tree only; it is never committed, the original file is
         # restored, and a difference fails the job with a printed diff. Refreshing
         # is a reviewable source change, not something CI may perform for you.
+        #
+        # The refresh runs Vite (production-target probe), and Vite's platform
+        # detection probes procfs paths that Deno refuses under scoped permissions
+        # on hosted runners (denoland/deno#37062). The broader probe profile is
+        # selected for this step only — never workflow-wide — so every other step
+        # keeps the restricted default and a developer refresh stays restricted.
+        env:
+          VITE_PERMISSION_PROFILE: ci-runner
         run: |
           set -euo pipefail
           before="$(sha256sum toolchain-contracts.json | cut -d' ' -f1)"

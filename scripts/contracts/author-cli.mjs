@@ -19,6 +19,7 @@ import {
 } from "./store.mjs";
 import { resolveWorkerdGraph, ToolchainError } from "./toolchain.mjs";
 import { DiscoveryError } from "../lib/toolchain/discovery.mjs";
+import { DEFAULT_VITE_PROBE_PROFILE } from "../vite-build.mjs";
 import { readFileSync } from "../lib/fs.mjs";
 import path from "../lib/path.mjs";
 
@@ -27,13 +28,62 @@ const EXIT_FAILURE = 1;
 
 const USAGE = `Toolchain contract authoring (generator only).
 
-  refresh
+  refresh [--vite-permission-profile NAME]
       Derive every contract fact from the authorised configuration and the
       installed toolchain, then write ${CONTRACT_FILE}. Deterministic: no
-      timestamps, run identifiers, host paths or approval metadata.
+      timestamps, run identifiers, host paths or approval metadata. The Vite
+      target probe runs under NAME (\`local\` by default, \`ci-runner\` on a hosted
+      CI runner); unknown names are rejected and nothing is inferred from the
+      host.
 
   workerd-path
       Print the runtime selected by the Wrangler/Miniflare graph.`;
+
+/**
+ * Parse refresh arguments.
+ *
+ * `scripts/contract-refresh.sh` passes `--vite-permission-profile` explicitly
+ * (from `VITE_PERMISSION_PROFILE`, default `local`), so this parser never has to
+ * inspect the environment or guess from the host.
+ */
+export function parseRefreshArgs(argv) {
+  const options = { vitePermissionProfile: DEFAULT_VITE_PROBE_PROFILE };
+
+  for (let index = 0; index < argv.length; index += 1) {
+    const argument = argv[index];
+
+    if (argument === "--") continue;
+
+    if (argument === "--vite-permission-profile") {
+      const value = argv[index + 1];
+      if (value === undefined || value.startsWith("--")) {
+        throw new ContractError(
+          "--vite-permission-profile requires a profile name",
+        );
+      }
+      options.vitePermissionProfile = value;
+      index += 1;
+      continue;
+    }
+
+    if (argument.startsWith("--vite-permission-profile=")) {
+      const value = argument.slice("--vite-permission-profile=".length);
+      if (value.length === 0) {
+        throw new ContractError(
+          "--vite-permission-profile requires a profile name",
+        );
+      }
+      options.vitePermissionProfile = value;
+      continue;
+    }
+
+    throw new ContractError(
+      `unknown argument ${JSON.stringify(argument)}\n\n${USAGE}`,
+    );
+  }
+
+  return options;
+}
 
 /** Compare a previous lock with a freshly derived one, per scope. */
 export function describeLockChanges(previous, next) {
@@ -144,8 +194,13 @@ export async function main(argv = Deno.args, root = Deno.cwd(), io = console) {
     }
 
     if (command === "refresh") {
+      const { vitePermissionProfile } = parseRefreshArgs(argv.slice(1));
       const previous = previousLock(root, io);
-      const { document } = await deriveContracts({ root, io });
+      const { document } = await deriveContracts({
+        root,
+        io,
+        vitePermissionProfile,
+      });
 
       // Report before writing so a failure cannot leave the lock changed without
       // an explanation.

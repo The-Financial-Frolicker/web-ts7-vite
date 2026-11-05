@@ -1,7 +1,7 @@
 {
   "contracts": {
-    "launcher-permissions@sha256:c81c999bbc5756aedee96fcdcc2d3b410b55445ef4e681e52513f92cdb807f12": {
-      "fingerprint": "sha256:c81c999bbc5756aedee96fcdcc2d3b410b55445ef4e681e52513f92cdb807f12",
+    "launcher-permissions@sha256:b3cfa9ceca888d46c7ceb69031a73d8adb887842ec7e12e3fce4bbca46030e91": {
+      "fingerprint": "sha256:b3cfa9ceca888d46c7ceb69031a73d8adb887842ec7e12e3fce4bbca46030e91",
       "fingerprintInputs": {
         "launchers": {
           "edge-verify": [
@@ -19,6 +19,16 @@
             "--allow-ffi=<lightningcss>"
           ],
           "vite-build-ci-runner": [
+            "--allow-all"
+          ],
+          "vite-probe": [
+            "--allow-read",
+            "--allow-env",
+            "--allow-sys",
+            "--allow-ffi=<rolldown>",
+            "--allow-ffi=<lightningcss>"
+          ],
+          "vite-probe-ci-runner": [
             "--allow-all"
           ],
           "wrangler-dry-run": [
@@ -69,6 +79,26 @@
         },
         "launcher.vite-build-ci-runner": {
           "evidence": "scripts/vite-build.mjs buildViteArgs (ci-runner profile)",
+          "kind": "permission-profile",
+          "provenance": "derived",
+          "value": [
+            "--allow-all"
+          ]
+        },
+        "launcher.vite-probe": {
+          "evidence": "scripts/vite-build.mjs buildViteProbeArgs (local profile)",
+          "kind": "permission-profile",
+          "provenance": "derived",
+          "value": [
+            "--allow-read",
+            "--allow-env",
+            "--allow-sys",
+            "--allow-ffi=<rolldown>",
+            "--allow-ffi=<lightningcss>"
+          ]
+        },
+        "launcher.vite-probe-ci-runner": {
+          "evidence": "scripts/vite-build.mjs buildViteProbeArgs (ci-runner profile)",
           "kind": "permission-profile",
           "provenance": "derived",
           "value": [

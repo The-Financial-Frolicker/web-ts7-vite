@@ -16,8 +16,11 @@
 import { buildEdgeVerifyArgs } from "../edge-verify.mjs";
 import {
   buildViteArgs,
+  buildViteProbeArgs,
   DEFAULT_VITE_PERMISSION_PROFILE,
+  DEFAULT_VITE_PROBE_PROFILE,
   VITE_PERMISSION_PROFILES,
+  VITE_PROBE_PROFILES,
 } from "../vite-build.mjs";
 import { buildWranglerDryRunArgs } from "../wrangler-dry-run.mjs";
 import { buildWranglerTypesArgs } from "../wrangler-types.mjs";
@@ -51,15 +54,13 @@ export function normalisePermissionFlags(args, root) {
 }
 
 /**
- * Contract key for one Vite profile; the default profile keeps the plain name.
+ * Contract key for one named profile; the default profile keeps the base name.
  *
  * Deriving the keys from the launcher's profile list means a profile cannot be
  * added or renamed without changing the policy.
  */
-function viteProfileKey(profile) {
-  return profile === DEFAULT_VITE_PERMISSION_PROFILE
-    ? "vite-build"
-    : `vite-build-${profile}`;
+function profileKey(base, profile, defaultProfile) {
+  return profile === defaultProfile ? base : `${base}-${profile}`;
 }
 
 /**
@@ -95,7 +96,7 @@ export function describePermissionProfiles(root = Deno.cwd()) {
 
   const viteProfiles = Object.fromEntries(
     VITE_PERMISSION_PROFILES.map((profile) => [
-      viteProfileKey(profile),
+      profileKey("vite-build", profile, DEFAULT_VITE_PERMISSION_PROFILE),
       normalisePermissionFlags(
         buildViteArgs(viteInvocation, [], profile),
         root,
@@ -103,8 +104,21 @@ export function describePermissionProfiles(root = Deno.cwd()) {
     ]),
   );
 
+  // The production-target probe is Vite too, and its declared requirement is
+  // recorded the same way, so a widened probe cannot pass unreviewed.
+  const viteProbeProfiles = Object.fromEntries(
+    VITE_PROBE_PROFILES.map((profile) => [
+      profileKey("vite-probe", profile, DEFAULT_VITE_PROBE_PROFILE),
+      normalisePermissionFlags(
+        buildViteProbeArgs(viteInvocation, "<vite-probe>", "<root>", profile),
+        root,
+      ),
+    ]),
+  );
+
   return {
     ...viteProfiles,
+    ...viteProbeProfiles,
     "wrangler-types": normalisePermissionFlags(wranglerTypesArgs, root),
     "wrangler-dry-run": normalisePermissionFlags(dryRunArgs, root),
     "edge-verify": normalisePermissionFlags(edgeVerifyArgs, root),

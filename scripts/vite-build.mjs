@@ -313,6 +313,66 @@ export function parseViteLauncherArgs(argv) {
   return options;
 }
 
+/**
+ * Named permission profiles for the Vite production-target probe.
+ *
+ * The probe runs Vite too, so it needs the same two profiles as the build: the
+ * restricted `local` default and the explicit `ci-runner` grant. Declaring them
+ * here, beside the build profiles, keeps one module owning every Vite
+ * child-process grant, so the permission contract derives from a single source
+ * and the probe cannot drift from the build.
+ */
+export const VITE_PROBE_PROFILES = Object.freeze(["local", "ci-runner"]);
+
+/** The probe profile used when the caller names none. */
+export const DEFAULT_VITE_PROBE_PROFILE = "local";
+
+/** Permission flags for one named probe profile. */
+function probePermissionFlags(profile, invocation) {
+  switch (profile) {
+    case "local":
+      return [
+        "--allow-read",
+        "--allow-env",
+        "--allow-sys",
+        `--allow-ffi=${invocation.rolldown}`,
+        `--allow-ffi=${invocation.lightningcss}`,
+      ];
+    case "ci-runner":
+      // --allow-all already implies every individual grant; repeating one would
+      // describe a narrower profile than the one that runs.
+      return ["--allow-all"];
+    default:
+      return fail(
+        `unknown Vite probe permission profile ${JSON.stringify(profile)}; ` +
+          `expected one of: ${VITE_PROBE_PROFILES.join(", ")}`,
+      );
+  }
+}
+
+/**
+ * Build the probe's separate-Deno-process command line for a named profile.
+ *
+ * The profile is supplied explicitly by the caller (`contract:refresh` passes
+ * the value it was given); nothing here inspects the host, WSL, container state
+ * or CI variables.
+ */
+export function buildViteProbeArgs(
+  invocation,
+  script,
+  root,
+  profile = DEFAULT_VITE_PROBE_PROFILE,
+) {
+  return [
+    "run",
+    ...probePermissionFlags(profile, invocation),
+    "--cached-only",
+    "--frozen",
+    script,
+    root,
+  ];
+}
+
 /** CLI entry point; returns a process exit code. */
 export function main(argv = Deno.args, root = Deno.cwd()) {
   try {

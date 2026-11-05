@@ -111,4 +111,5 @@ deno run \
     --allow-net=127.0.0.1 \
     --allow-run="$DENO_BIN" \
     --allow-run="$WORKERD" \
-    scripts/contracts/author-cli.mjs refresh "$@"
+    scripts/contracts/author-cli.mjs refresh \
+    "--vite-permission-profile=${VITE_PERMISSION_PROFILE:-local}" "$@"

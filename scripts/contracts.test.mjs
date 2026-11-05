@@ -21,7 +21,10 @@ import os from "./lib/os.mjs";
 import path from "./lib/path.mjs";
 import { after, describe, it } from "./lib/test.mjs";
 
-import { describeLockChanges } from "./contracts/author-cli.mjs";
+import {
+  describeLockChanges,
+  parseRefreshArgs,
+} from "./contracts/author-cli.mjs";
 import {
   canonicalJson,
   contractKey,
@@ -53,6 +56,10 @@ import {
 } from "./contracts/fixtures.mjs";
 import { contractInputs } from "./contracts/identity.mjs";
 import { describePath } from "./contracts/toolchain.mjs";
+import {
+  buildViteProbeArgs,
+  DEFAULT_VITE_PROBE_PROFILE,
+} from "./vite-build.mjs";
 import {
   describePermissionProfiles,
   normalisePermissionFlags,
@@ -602,6 +609,17 @@ describe("declared permission profiles", () => {
     assert.ok(profiles["wrangler-types"].length > 0);
     assert.ok(profiles["wrangler-dry-run"].length > 0);
 
+    // The production-target probe runs Vite too, so its two profiles are
+    // recorded with the same exactness as the build's.
+    assert.deepEqual(profiles["vite-probe"], [
+      "--allow-read",
+      "--allow-env",
+      "--allow-sys",
+      "--allow-ffi=<rolldown>",
+      "--allow-ffi=<lightningcss>",
+    ]);
+    assert.deepEqual(profiles["vite-probe-ci-runner"], ["--allow-all"]);
+
     // The edge verifier's requirement is declared before the launcher exists, so
     // the profile cannot arrive unreviewed later. It is scoped to what the
     // verifier actually does: read the authorised criteria, write evidence,
@@ -867,6 +885,78 @@ describe("verification helpers", () => {
       generatedConfigProblems(root, runtime).join(" "),
       /compatibility_date/,
     );
+  });
+});
+
+describe("Vite probe profile", () => {
+  const invocation = {
+    viteBin: "<vite>",
+    rolldown: "/abs/rolldown.node",
+    lightningcss: "/abs/lightningcss.node",
+  };
+  const script = "<vite-probe>";
+  const root = "/work/project";
+
+  it("defaults to the restricted local profile", () => {
+    const args = buildViteProbeArgs(invocation, script, root);
+
+    assert.equal(DEFAULT_VITE_PROBE_PROFILE, "local");
+    assert.deepEqual(args, [
+      "run",
+      "--allow-read",
+      "--allow-env",
+      "--allow-sys",
+      `--allow-ffi=${invocation.rolldown}`,
+      `--allow-ffi=${invocation.lightningcss}`,
+      "--cached-only",
+      "--frozen",
+      script,
+      root,
+    ]);
+    assert.equal(args.includes("--allow-all"), false);
+  });
+
+  it("gives the explicitly selected CI profile --allow-all", () => {
+    const args = buildViteProbeArgs(invocation, script, root, "ci-runner");
+
+    assert.ok(args.includes("--allow-all"), `${args}`);
+    assert.ok(args.includes("--cached-only"), `${args}`);
+    assert.ok(args.includes("--frozen"), `${args}`);
+    assert.deepEqual(
+      args.filter((argument) =>
+        argument.startsWith("--allow-") && argument !== "--allow-all"
+      ),
+      [],
+    );
+    assert.deepEqual(args.slice(-2), [script, root]);
+  });
+
+  it("fails closed on an unknown profile name", () => {
+    assert.throws(
+      () => buildViteProbeArgs(invocation, script, root, "hosted"),
+      /unknown Vite probe permission profile "hosted"; expected one of: local, ci-runner/,
+    );
+  });
+
+  it("takes the profile from an explicit argument, never from the host", () => {
+    assert.deepEqual(parseRefreshArgs([]), { vitePermissionProfile: "local" });
+    assert.deepEqual(
+      parseRefreshArgs(["--vite-permission-profile=ci-runner"]),
+      { vitePermissionProfile: "ci-runner" },
+    );
+    assert.deepEqual(
+      parseRefreshArgs(["--vite-permission-profile", "ci-runner"]),
+      { vitePermissionProfile: "ci-runner" },
+    );
+    assert.throws(
+      () => parseRefreshArgs(["--vite-permission-profile="]),
+      /requires a profile name/,
+    );
+    assert.throws(
+      () => parseRefreshArgs(["--vite-permission-profile"]),
+      /requires a profile name/,
+    );
+    assert.throws(() => parseRefreshArgs(["--host"]), /unknown argument/);
   });
 });
 

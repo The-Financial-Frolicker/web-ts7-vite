@@ -59,6 +59,9 @@ const LAUNCHER_SOURCES = Object.freeze({
   "vite-build": "scripts/vite-build.mjs buildViteArgs (local profile)",
   "vite-build-ci-runner":
     "scripts/vite-build.mjs buildViteArgs (ci-runner profile)",
+  "vite-probe": "scripts/vite-build.mjs buildViteProbeArgs (local profile)",
+  "vite-probe-ci-runner":
+    "scripts/vite-build.mjs buildViteProbeArgs (ci-runner profile)",
   "wrangler-types": "scripts/wrangler-types.mjs buildWranglerTypesArgs",
   "wrangler-dry-run": "scripts/wrangler-dry-run.mjs buildWranglerDryRunArgs",
   "edge-verify": "scripts/edge-verify.mjs buildEdgeVerifyArgs",
@@ -324,6 +327,7 @@ export async function deriveContracts({
   io = console,
   probeTimeoutMs = 25_000,
   tempRoot,
+  vitePermissionProfile = "local",
 } = {}) {
   const identity = await currentIdentity(root);
   const toolchain = describeToolchain(root);
@@ -362,9 +366,12 @@ export async function deriveContracts({
       `libraries ${typescriptLibs.libraries.join(", ") || "none"}`,
   );
 
-  const viteTargets = discoverViteTargets(root);
+  const viteTargets = discoverViteTargets(root, {
+    profile: vitePermissionProfile,
+  });
   io.log(
-    `[refresh] vite production targets ${viteTargets.targets.join(", ")}`,
+    `[refresh] vite production targets ${viteTargets.targets.join(", ")} ` +
+      `(probe profile ${vitePermissionProfile})`,
   );
 
   const probe = await runCapabilityProbe({
