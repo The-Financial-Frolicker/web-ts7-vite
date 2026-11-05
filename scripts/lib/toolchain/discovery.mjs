@@ -156,14 +156,24 @@ export function discoverTypeScript(root) {
   };
 }
 
-/** Order ES editions from oldest to newest, with `esnext` last. */
+/**
+ * Order ES editions from oldest to newest, with `esnext` last.
+ *
+ * `es6` is an alias for `es2015`, so the two share a rank. The comparator then
+ * falls back to the id itself: without that tie-break the recorded order would
+ * follow the directory listing, which differs between filesystems and made the
+ * committed lock irreproducible on the authoritative runner.
+ */
 export function sortEditions(editions) {
   const rank = (id) => {
     if (id === "esnext") return Number.MAX_SAFE_INTEGER;
     if (id === "es6") return 2015;
     return Number(id.slice(2));
   };
-  return [...editions].sort((a, b) => rank(a) - rank(b));
+  // Code-unit comparison: locale-independent, so every machine agrees.
+  const byCodeUnit = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+
+  return [...editions].sort((a, b) => rank(a) - rank(b) || byCodeUnit(a, b));
 }
 
 /** The newest edition the installed compiler can declare. */

@@ -83,6 +83,16 @@ describe("edition ordering", () => {
     );
   });
 
+  it("orders the es6/es2015 alias deterministically, whatever the input order", () => {
+    // Both names are ES2015, so they share a rank; the id is the tie-break. Any
+    // other ordering would follow the directory listing and differ by machine.
+    const forwards = sortEditions(["es6", "es2015", "es2020"]);
+    const backwards = sortEditions(["es2020", "es2015", "es6"]);
+
+    assert.deepEqual(forwards, ["es2015", "es6", "es2020"]);
+    assert.deepEqual(backwards, forwards);
+  });
+
   it("reports the newest edition and refuses an empty set", () => {
     assert.equal(newestEdition(["es2022", "esnext"]), "esnext");
     assert.equal(newestEdition(["es2022", "es2023"]), "es2023");
