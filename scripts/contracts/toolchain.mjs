@@ -297,6 +297,22 @@ export function resolvePackageIdentity(root) {
 }
 
 /**
+ * Describe a path for a committed artefact.
+ *
+ * A lock is committed and reviewed, so it must not embed the authoring machine's
+ * layout. A path inside the project is recorded relative to the root; anything
+ * else — a shared package store, a global cache, a `node_modules` symlink — is
+ * recorded as `<external>/<basename>`. That stays byte-identical across machines
+ * without hiding which artefact was used.
+ */
+export function describePath(root, value) {
+  const relativePath = path.relative(root, value);
+  if (relativePath === "") return ".";
+  if (!relativePath.startsWith("..")) return relativePath;
+  return `<external>/${path.basename(value)}`;
+}
+
+/**
  * Build the informational identity block recorded in the contract document.
  *
  * These values explain *what was present* when the contract was approved. Only
@@ -311,7 +327,7 @@ export function describeToolchain(root) {
   const pins = readMisePins(root);
   const specifiers = readLockSpecifiers(root);
   const { typescript, vite, graph } = resolvePackageIdentity(root);
-  const relative = (value) => path.relative(root, value);
+  const relative = (value) => describePath(root, value);
 
   return {
     deno: {
@@ -469,6 +485,14 @@ export function describeEmscripten(root, env = Deno.env) {
         "upstream/emscripten/system/lib/libcxx is present; the SDK does " +
         "not expose a separate libc++ version file",
     };
+  } else {
+    // EMSDK is set here, so the reason must not claim otherwise: this SDK simply
+    // has no libc++ marker at the expected path, and the value stays unrecorded
+    // rather than being guessed from the Emscripten version.
+    provenance.standardLibrary = unavailable(
+      "the SDK has no upstream/emscripten/system/lib/libcxx marker; the C++ " +
+        "standard library is not identified from paths",
+    );
   }
 
   return provenance;

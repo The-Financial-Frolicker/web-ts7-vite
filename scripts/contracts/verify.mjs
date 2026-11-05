@@ -1,31 +1,32 @@
 /**
- * CI verification: enforce an approved contract, discover nothing.
+ * Read-only conformance verification.
  *
- * Every input here is a file read or an in-memory comparison. This module never
- * spawns workerd, Vite or any other tool, so CI cannot accidentally *create*
- * evidence — it can only confirm that the environment and the generated
- * configuration still match the decision a human approved.
+ * Verification recomputes the contract facts from the authorised source and the
+ * installed toolchain, compares them with the committed lock, and reports the
+ * result. Every input is a file read or an in-memory comparison: this module
+ * never spawns workerd, Vite or any other tool, so CI cannot create evidence —
+ * it can only establish whether the environment still conforms.
+ *
+ * Consequences that matter:
+ *   - a mismatch is a failure; verification never refreshes the lock;
+ *   - values that can only be measured are recorded by refresh and are not
+ *     re-measured here, so the fingerprints of their inputs carry the check;
+ *   - a per-run report is produced even when verification fails.
  */
 
 import { readFileSync } from "../lib/fs.mjs";
 import path from "../lib/path.mjs";
 import { canonicalJson, contractKey, fingerprintOf } from "./canonical.mjs";
-import {
-  CLIENT_TSCONFIG,
-  readLibs,
-  readWranglerConfig,
-  WORKER_TSCONFIG,
-} from "./config.mjs";
+import { CLIENT_TSCONFIG, WORKER_TSCONFIG } from "./config.mjs";
+import { contractInputs, currentIdentity } from "./identity.mjs";
 import {
   fingerprintInputs,
   SCOPE_TYPESCRIPT_LIBRARIES,
   SCOPE_WORKERD_RUNTIME,
   SCOPES,
 } from "./scopes.mjs";
-import { describePermissionProfiles } from "./permissions.mjs";
-import { ContractError, isApproved, unverifiedValues } from "./schema.mjs";
-import { loadDocument } from "./store.mjs";
-import { platformIdentity, resolvePackageIdentity } from "./toolchain.mjs";
+import { SCHEMA_VERSION, unverifiedValues } from "./schema.mjs";
+import { loadDocument, lockDigest } from "./store.mjs";
 
 export const DEPLOY_CONFIG = path.join("dist", "worker", "wrangler.json");
 
@@ -48,185 +49,276 @@ function rank(id) {
 }
 
 function compare(actual, expected) {
-  // Key order is not meaningful in JSON; compare the canonical form so a
-  // document round-tripped through disk never "differs" by ordering alone.
+  // Key order is not meaningful in JSON; compare the canonical form so a lock
+  // round-tripped through disk never "differs" by ordering alone.
   return canonicalJson(actual, 0) === canonicalJson(expected, 0);
 }
 
-/** Current toolchain identity, read without executing anything. */
-export function currentIdentity(root) {
-  const platform = platformIdentity();
-  const wrangler = readWranglerConfig(root);
-  const { typescript, vite, graph } = resolvePackageIdentity(root);
+/** Name the fingerprint inputs that differ, for a drift that needs explaining. */
+export function inputDifferences(recorded, derived) {
+  const names = new Set([
+    ...Object.keys(recorded ?? {}),
+    ...Object.keys(derived ?? {}),
+  ]);
+
+  return [...names].sort()
+    .filter((name) => !compare(recorded?.[name], derived?.[name]))
+    .map((name) => ({
+      name,
+      recorded: recorded?.[name] ?? null,
+      derived: derived?.[name] ?? null,
+    }));
+}
+
+/**
+ * Build the per-run conformance report from a lock and a fresh derivation.
+ *
+ * Pure with respect to the filesystem: the caller supplies the document and the
+ * identity, so this can be exercised on fixtures and cannot write anything.
+ */
+export async function buildConformanceReport({
+  document,
+  identity,
+  digest = null,
+}) {
+  const inputs = contractInputs(identity);
+  const scopes = [];
+  const problems = [];
+
+  for (const scope of SCOPES) {
+    const derivedInputs = fingerprintInputs(scope, inputs);
+    const derivedFingerprint = await fingerprintOf(derivedInputs);
+    const derivedKey = contractKey(scope, derivedFingerprint);
+
+    const exact = document.contracts[derivedKey];
+    if (exact !== undefined) {
+      // The key matches, so the scope is recorded — unless the recorded inputs
+      // do not match the fingerprint they are keyed by, which is what a
+      // hand-edited or corrupted lock looks like. Fail closed on that too.
+      const changed = inputDifferences(
+        exact.fingerprintInputs,
+        derivedInputs,
+      );
+      if (changed.length === 0) {
+        scopes.push({
+          scope,
+          status: "recorded",
+          recordedKey: derivedKey,
+          recordedFingerprint: exact.fingerprint,
+          derivedKey,
+          derivedFingerprint,
+          inputs: derivedInputs,
+        });
+        continue;
+      }
+
+      scopes.push({
+        scope,
+        status: "drifted",
+        recordedKey: derivedKey,
+        recordedFingerprint: exact.fingerprint,
+        derivedKey,
+        derivedFingerprint,
+        inputs: derivedInputs,
+        recordedInputs: exact.fingerprintInputs,
+        changedInputs: changed,
+      });
+      problems.push(
+        `scope ${scope} is internally inconsistent: the recorded inputs do ` +
+          `not match the fingerprint they are keyed by (${
+            changed.map((entry) => entry.name).join(", ")
+          }). Run \`deno task contract:refresh\` and commit the result.`,
+      );
+      continue;
+    }
+
+    const recorded = Object.entries(document.contracts)
+      .filter(([, contract]) => contract.scope === scope);
+
+    if (recorded.length === 0) {
+      scopes.push({
+        scope,
+        status: "unrecorded",
+        recordedKey: null,
+        recordedFingerprint: null,
+        derivedKey,
+        derivedFingerprint,
+        inputs: derivedInputs,
+      });
+      problems.push(
+        `scope ${scope} is unrecorded: the lock contains no contract for it. ` +
+          `Run \`deno task contract:refresh\` on the authorised platform and ` +
+          `commit the result.`,
+      );
+      continue;
+    }
+
+    const [recordedKey, contract] = recorded[0];
+    scopes.push({
+      scope,
+      status: "drifted",
+      recordedKey,
+      recordedFingerprint: contract.fingerprint,
+      derivedKey,
+      derivedFingerprint,
+      inputs: derivedInputs,
+      recordedInputs: contract.fingerprintInputs,
+      changedInputs: inputDifferences(
+        contract.fingerprintInputs,
+        derivedInputs,
+      ),
+    });
+    problems.push(
+      `scope ${scope} has drifted: the lock records ${contract.fingerprint}, ` +
+        `the current configuration derives ${derivedFingerprint}. Inspect the ` +
+        `changed inputs, then run \`deno task contract:refresh\` and review the ` +
+        `resulting lock change.`,
+    );
+  }
 
   return {
-    platform,
-    wrangler,
-    typescript,
-    vite,
-    graph,
-    inputs: {
-      platform: platform.key,
-      workerd: {
-        version: graph.workerdVersion,
-        compatibilityDate: wrangler.compatibilityDate,
-        compatibilityFlags: wrangler.compatibilityFlags,
-      },
-      vite: { version: vite.manifest.version },
-      typescript: { version: typescript.manifest.version },
-    },
+    schemaVersion: SCHEMA_VERSION,
+    verdict: problems.length === 0 ? "conformant" : "drifted",
+    lockDigest: digest,
+    platform: identity.platform.key,
+    scopes,
+    problems,
   };
 }
 
-/** Locate the approved contract for one scope, distinguishing stale from absent. */
-export async function findContract(document, scope, inputs) {
-  const fingerprint = await fingerprintOf(fingerprintInputs(scope, inputs));
-  const key = contractKey(scope, fingerprint);
-  const contract = document.contracts[key];
-
-  if (contract !== undefined) return { key, contract };
-
-  const inputsLabel = JSON.stringify(fingerprintInputs(scope, inputs));
-  const known = Object.entries(document.contracts)
-    .filter(([, entry]) => entry.scope === scope)
-    .map(([knownKey]) => knownKey);
-
-  if (known.length > 0) {
-    throw new ContractError(
-      `the approved ${scope} contract is stale: the installed toolchain ` +
-        `fingerprints to ${fingerprint}, but the document approves ` +
-        `${known.join(", ")}. Inputs: ${inputsLabel}. ` +
-        `Run the local discovery and approval cycle and commit the result.`,
-    );
-  }
-
-  throw new ContractError(
-    `no approved contract for scope ${scope}. Inputs: ${inputsLabel}. ` +
-      `Run the local discovery and approval cycle and commit the result.`,
-  );
+/** The recorded contract for a scope, when the scope conformed. */
+function recordedContract(document, report, scope) {
+  const entry = report.scopes.find((candidate) => candidate.scope === scope);
+  if (entry === undefined || entry.status !== "recorded") return undefined;
+  return document.contracts[entry.recordedKey];
 }
 
-export async function verifyContracts(root = Deno.cwd()) {
-  const document = loadDocument(root);
-  const identity = currentIdentity(root);
-  const problems = [];
-  const notes = [];
+/**
+ * Enforce the interpreter the lock was authored with.
+ *
+ * Deno is deliberately *not* a conformance scope: it changes no recorded
+ * compatibility fact, and a scope's key must be a function of the environment's
+ * contract-relevant identity. It is recorded as provenance, and conformance
+ * compares that record with the running interpreter — so adopting a different
+ * Deno without recording it fails, while the distinction between "what was
+ * recorded" and "what is verified" stays visible.
+ */
+export function denoProblems(document, running = Deno.version.deno) {
+  const recorded = document?.toolchain?.deno?.version;
 
-  const located = {};
-  for (const scope of SCOPES) {
-    try {
-      located[scope] = await findContract(document, scope, identity.inputs);
-    } catch (error) {
-      if (error instanceof ContractError) problems.push(error.message);
-      else throw error;
-    }
+  if (typeof recorded !== "string" || recorded.length === 0) {
+    return [
+      "the lock records no Deno version; run `deno task contract:refresh` on " +
+      "the authorised toolchain and commit the result",
+    ];
   }
 
-  if (problems.length > 0) return { document, problems, notes };
+  if (recorded === running) return [];
 
-  for (const scope of SCOPES) {
-    const { key, contract } = located[scope];
+  return [
+    `the lock records Deno ${recorded}, but this process is Deno ${running}. ` +
+    `Install the authorised toolchain (\`mise install\`), or run ` +
+    `\`deno task contract:refresh\` and review the change if moving Deno is ` +
+    `intended.`,
+  ];
+}
 
-    if (!isApproved(contract)) {
-      problems.push(describeUnapproved(key, contract));
-    }
+/**
+ * Rules that compare recorded values with each other or with the build output.
+ *
+ * Fingerprint equality already proves the *inputs* still match; these checks
+ * catch a lock that is internally inconsistent (for example a worker edition the
+ * installed TypeScript does not ship) or a generated configuration that no
+ * longer reflects the recorded one.
+ */
+export function ruleProblems(document, report, identity, root) {
+  const problems = [];
 
-    const unverified = unverifiedValues(contract);
+  problems.push(...denoProblems(document));
+
+  for (const entry of report.scopes) {
+    if (entry.status !== "recorded") continue;
+    const unverified = unverifiedValues(document.contracts[entry.recordedKey]);
     if (unverified.length > 0) {
       problems.push(
-        `contract ${key} contains unverified values: ${unverified.join(", ")}`,
-      );
-    }
-
-    const current = fingerprintInputs(scope, identity.inputs);
-    if (!compare(contract.fingerprintInputs, current)) {
-      problems.push(
-        `contract ${key} fingerprint inputs do not match the current toolchain`,
+        `scope ${entry.scope} records unverified values: ${
+          unverified.join(", ")
+        }`,
       );
     }
   }
 
-  const runtime = located[SCOPE_WORKERD_RUNTIME].contract;
-  const typescriptContract = located[SCOPE_TYPESCRIPT_LIBRARIES].contract;
-  const clientPolicy = document.policies.clientApiEdition;
-  const permissionPolicy = document.policies.permissionProfiles;
-
-  if (clientPolicy === undefined) {
-    problems.push("the document declares no clientApiEdition policy");
-  }
-  if (permissionPolicy === undefined) {
-    problems.push("the document declares no permissionProfiles policy");
-  }
-
-  const workerDeclared = declaredEdition(readLibs(root, WORKER_TSCONFIG));
-  const workerExpected = runtime.values["typescript.worker.libEdition"]?.value;
-  if (workerExpected === undefined) {
-    problems.push(
-      "the workerd-runtime contract declares no typescript.worker.libEdition",
-    );
-  } else if (workerDeclared !== workerExpected) {
-    problems.push(
-      `${WORKER_TSCONFIG} declares ${
-        workerDeclared ?? "no ES edition"
-      }, but the ` +
-        `approved contract measured ${workerExpected}`,
-    );
-  }
-
-  const tsEditions = typescriptContract.values["typescript.editions"]?.value;
-  if (!Array.isArray(tsEditions)) {
-    problems.push(
-      "the typescript-libraries contract declares no typescript.editions",
-    );
-  } else if (
-    typeof workerExpected === "string" && !tsEditions.includes(workerExpected)
-  ) {
-    problems.push(
-      `the contract derives worker edition ${workerExpected}, but the installed ` +
-        `TypeScript does not provide it (${tsEditions.join(", ")})`,
-    );
-  }
-
-  const clientDeclared = declaredEdition(readLibs(root, CLIENT_TSCONFIG));
-  if (clientPolicy !== undefined && clientDeclared !== clientPolicy.value) {
-    problems.push(
-      `${CLIENT_TSCONFIG} declares ${
-        clientDeclared ?? "no ES edition"
-      }, but the ` +
-        `approved client API policy is ${clientPolicy.value}`,
-    );
-  }
-  problems.push(...clientEditionProblems(clientPolicy, tsEditions));
-
-  const runtimeDate = runtime.values["runtime.compatibility.date"]?.value;
-  const runtimeFlags = runtime.values["runtime.compatibility.flags"]?.value;
-  if (runtimeDate !== identity.wrangler.compatibilityDate) {
-    problems.push(
-      `wrangler.jsonc compatibility_date is ${identity.wrangler.compatibilityDate}, ` +
-        `but the approved contract measured ${runtimeDate}`,
-    );
-  }
-  if (!compare(runtimeFlags, identity.wrangler.compatibilityFlags)) {
-    problems.push(
-      `wrangler.jsonc compatibility_flags are ` +
-        `${JSON.stringify(identity.wrangler.compatibilityFlags)}, but the ` +
-        `approved contract measured ${JSON.stringify(runtimeFlags)}`,
-    );
-  }
-
-  problems.push(...generatedConfigProblems(root, runtime));
-  problems.push(...policyProblems(document, located, root));
-
-  notes.push(`verified ${SCOPES.length} scopes for ${identity.platform.key}`);
-  notes.push(
-    `Vite ${identity.vite.manifest.version} target mapping is fixed by the ` +
-      `approved vite-syntax-target contract; CI does not re-run Vite`,
+  const runtime = recordedContract(document, report, SCOPE_WORKERD_RUNTIME);
+  const typescript = recordedContract(
+    document,
+    report,
+    SCOPE_TYPESCRIPT_LIBRARIES,
   );
 
-  return { document, problems, notes };
+  const tsEditions = typescript?.values["typescript.editions"]?.value;
+  const workerRecorded = runtime?.values["typescript.worker.libEdition"]?.value;
+
+  if (runtime !== undefined) {
+    const workerDeclared = declaredEdition(identity.typescript.workerLib);
+    if (workerRecorded === undefined) {
+      problems.push(
+        "the workerd-runtime contract records no typescript.worker.libEdition",
+      );
+    } else if (workerDeclared !== workerRecorded) {
+      problems.push(
+        `${WORKER_TSCONFIG} declares ${
+          workerDeclared ?? "no ES edition"
+        }, but the lock records ${workerRecorded}`,
+      );
+    }
+  }
+
+  if (typescript !== undefined && !Array.isArray(tsEditions)) {
+    problems.push(
+      "the typescript-libraries contract records no typescript.editions",
+    );
+  }
+
+  if (Array.isArray(tsEditions)) {
+    if (
+      typeof workerRecorded === "string" && !tsEditions.includes(workerRecorded)
+    ) {
+      problems.push(
+        `the lock derives worker edition ${workerRecorded}, but the installed ` +
+          `TypeScript does not provide it (${tsEditions.join(", ")})`,
+      );
+    }
+
+    const clientDeclared = declaredEdition(identity.typescript.clientLib);
+    problems.push(...clientEditionProblems(clientDeclared, tsEditions));
+  }
+
+  if (runtime !== undefined) {
+    problems.push(...generatedConfigProblems(root, runtime));
+  }
+
+  return problems;
 }
 
-/** Compare the generated deployment configuration with the contract. */
+/** A declared client edition must exist in the compiler that is installed. */
+export function clientEditionProblems(clientEdition, tsEditions) {
+  if (
+    clientEdition === null || clientEdition === undefined ||
+    !Array.isArray(tsEditions)
+  ) {
+    return [];
+  }
+  if (tsEditions.includes(clientEdition)) return [];
+
+  return [
+    `the client lib declared in ${CLIENT_TSCONFIG} is ${clientEdition}, but ` +
+    `the installed TypeScript does not provide that edition (${
+      tsEditions.join(", ")
+    })`,
+  ];
+}
+
+/** Compare the generated deployment configuration with the lock. */
 export function generatedConfigProblems(root, runtime) {
   const file = path.join(root, DEPLOY_CONFIG);
   let text;
@@ -250,8 +342,8 @@ export function generatedConfigProblems(root, runtime) {
   if (config.compatibility_date !== expectedDate) {
     problems.push(
       `${DEPLOY_CONFIG} compatibility_date is ` +
-        `${JSON.stringify(config.compatibility_date)}, but the approved ` +
-        `contract measured ${JSON.stringify(expectedDate)}`,
+        `${JSON.stringify(config.compatibility_date)}, but the lock records ` +
+        `${JSON.stringify(expectedDate)}`,
     );
   }
   if (!compare(config.compatibility_flags ?? [], expectedFlags)) {
@@ -259,80 +351,55 @@ export function generatedConfigProblems(root, runtime) {
       `${DEPLOY_CONFIG} compatibility_flags are ` +
         `${
           JSON.stringify(config.compatibility_flags ?? [])
-        }, but the approved ` +
-        `contract measured ${JSON.stringify(expectedFlags)}`,
+        }, but the lock records ${JSON.stringify(expectedFlags)}`,
     );
   }
 
   return problems;
 }
 
-/** Policy freshness (was it reviewed against these contracts?) and conformance. */
-export function policyProblems(document, located, root) {
-  const problems = [];
-  const currentKeys = new Set(
-    Object.values(located).map((entry) => entry.key),
-  );
-
-  for (const [name, policy] of Object.entries(document.policies)) {
-    for (const reviewed of policy.reviewedAgainst) {
-      if (!currentKeys.has(reviewed)) {
-        problems.push(
-          `policy ${name} was reviewed against ${reviewed}, which is not the ` +
-            `current contract; rediscover and reaffirm the policy`,
-        );
-      }
-    }
-  }
-
-  const permissions = document.policies.permissionProfiles;
-  if (permissions !== undefined) {
-    const declared = describePermissionProfiles(root);
-    if (!compare(permissions.value, declared)) {
-      problems.push(
-        "the permission profiles declared by scripts/*.mjs differ from the " +
-          "approved policy; review and reaffirm before granting anything",
-      );
-    }
-  }
-
-  return problems;
-}
-
-/** Explain why a contract is not acceptable to CI, naming its lifecycle state. */
-export function describeUnapproved(key, contract) {
-  if (contract.state === "bootstrap") {
-    return `contract ${key} is a provisional bootstrap baseline (${
-      contract.bootstrap?.reason ?? "no reason recorded"
-    }); a human must approve it before CI can accept it`;
-  }
-  if (contract.state === "candidate") {
-    return `contract ${key} is an unapproved candidate; run the explicit ` +
-      `approval step and commit the result`;
-  }
-
-  return `contract ${key} declares state ${JSON.stringify(contract.state)} ` +
-    `but its approval does not cover fingerprint ${contract.fingerprint}`;
-}
-
 /**
- * A declared client edition must exist in the compiler that is installed.
+ * Verify the current environment against the committed lock.
  *
- * The policy is a human decision about browser APIs, but it is expressed as a
- * TypeScript edition, so an edition the compiler does not ship cannot be
- * verified at all.
+ * Returns the per-run report whether or not verification passes, so a failing
+ * run still produces machine-readable evidence.
  */
-export function clientEditionProblems(clientPolicy, tsEditions) {
-  if (
-    clientPolicy === undefined || !Array.isArray(tsEditions) ||
-    typeof clientPolicy.value !== "string"
-  ) {
-    return [];
-  }
-  if (tsEditions.includes(clientPolicy.value)) return [];
+export async function verifyContracts(root = Deno.cwd()) {
+  const document = loadDocument(root);
+  const digest = await lockDigest(document);
+  const identity = await currentIdentity(root);
+  const report = await buildConformanceReport({
+    document,
+    identity,
+    digest,
+  });
 
-  return [
-    `the client API policy declares ${clientPolicy.value}, but the installed ` +
-    `TypeScript does not provide that edition (${tsEditions.join(", ")})`,
+  const problems = [
+    ...report.problems,
+    ...ruleProblems(document, report, identity, root),
   ];
+  report.problems = problems;
+  report.verdict = problems.length === 0 ? "conformant" : "drifted";
+
+  return {
+    document,
+    identity,
+    report,
+    problems,
+    notes: [
+      `lock ${digest}`,
+      `checked ${SCOPES.length} scopes for ${identity.platform.key}`,
+      "verification performs no discovery: measured values are recorded by " +
+      "`deno task contract:refresh`",
+    ],
+  };
+}
+
+/** Human-readable one-line status for a scope entry. */
+export function summariseScope(entry) {
+  const recorded = entry.recordedFingerprint === null
+    ? "(none)"
+    : entry.recordedFingerprint.replace("sha256:", "").slice(0, 12);
+  const derived = entry.derivedFingerprint.replace("sha256:", "").slice(0, 12);
+  return `${entry.scope} ${entry.status} recorded=${recorded} derived=${derived}`;
 }

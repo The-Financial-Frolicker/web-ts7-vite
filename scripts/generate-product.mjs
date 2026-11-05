@@ -35,8 +35,7 @@ export const EXIT_WRITE = 3;
 
 /** Tasks that only make sense in the generator. */
 export const GENERATOR_ONLY_TASKS = Object.freeze([
-  "contract:discover",
-  "contract:approve",
+  "contract:refresh",
   "test:toolchain",
   "test:init",
   "init:project",
@@ -139,7 +138,7 @@ export function productTasks(tasks) {
 
   for (const name of GENERATOR_ONLY_TASKS) delete next[name];
   next["test:contracts"] =
-    "bash scripts/deno-no-node.sh deno test --allow-read --allow-write --allow-env scripts/contracts.verify.test.mjs scripts/contract-accept.test.mjs";
+    "bash scripts/deno-no-node.sh deno test --allow-read --allow-write --allow-env scripts/contracts.verify.test.mjs";
   next["validate"] = `bash scripts/deno-no-node.sh bash -c '${
     PRODUCT_VALIDATE.map((name) => `deno task ${name}`).join(" && ")
   }'`;

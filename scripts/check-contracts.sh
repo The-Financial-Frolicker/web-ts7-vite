@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Verify the installed toolchain and configuration against the approved contract.
+# Verify the installed toolchain and configuration against the committed lock.
 #
-# This is the CI-facing half of the contract lifecycle: it reads files, compares
-# values and probes nothing. It grants read, env and nothing else — no run, no
-# net, no write — which is itself the evidence that CI cannot discover or
-# approve anything.
+# This is the CI-facing half of the contract model: it reads files, recomputes
+# the derived facts and compares them with the committed lock. It grants read and
+# env and nothing else — no run, no net, no write — which is itself the evidence
+# that CI cannot derive, probe or rewrite the lock it is checked against.
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

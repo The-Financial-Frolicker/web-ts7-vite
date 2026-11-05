@@ -1,32 +1,32 @@
 /**
- * Reading and writing the contract artefact.
+ * Reading and writing the contract lock.
  *
- * The approved document is committed; the candidate produced by discovery is
- * not. Nothing here can approve anything: `approve.mjs` owns that decision and
- * records who made it.
+ * `contract:refresh` is the only operation that writes the lock. Verification
+ * loads it, compares it and reports; it has no write path, and its launcher runs
+ * without write permission, so a conformance failure can never repair itself by
+ * rewriting the record it is checked against.
  */
 
 import { readFileSync } from "../lib/fs.mjs";
 import path from "../lib/path.mjs";
-import { canonicalJson } from "./canonical.mjs";
-import { ContractError, isApproved, validateDocument } from "./schema.mjs";
+import { canonicalJson, fingerprintOf } from "./canonical.mjs";
+import { ContractError, validateDocument } from "./schema.mjs";
 
 export const CONTRACT_FILE = "toolchain-contracts.json";
-export const CANDIDATE_FILE = path.join(".contracts", "candidate.json");
 
 function fail(message) {
   throw new ContractError(message);
 }
 
-/** Load and validate a contract document. */
+/** Load and validate the committed lock. */
 export function loadDocument(root, file = CONTRACT_FILE) {
   let text;
   try {
     text = readFileSync(path.join(root, file), "utf8");
   } catch {
     fail(
-      `no contract document at ${file}. Run the local discovery and approval ` +
-        `cycle: deno task contract:discover && deno task contract:approve`,
+      `no contract lock at ${file}. Derive it on the authorised platform with ` +
+        `\`deno task contract:refresh\` and commit the result`,
     );
   }
 
@@ -40,7 +40,7 @@ export function loadDocument(root, file = CONTRACT_FILE) {
   return validateDocument(parsed);
 }
 
-/** True when a contract document exists at `file`. */
+/** True when a lock exists at `file`. */
 export function documentExists(root, file = CONTRACT_FILE) {
   try {
     Deno.statSync(path.join(root, file));
@@ -50,7 +50,7 @@ export function documentExists(root, file = CONTRACT_FILE) {
   }
 }
 
-/** Validate, canonicalise and write a document. */
+/** Validate, canonicalise and write a lock. Refresh is the only caller. */
 export function writeDocument(root, document, file = CONTRACT_FILE) {
   validateDocument(document);
   const target = path.join(root, file);
@@ -69,31 +69,21 @@ export function writeDocument(root, document, file = CONTRACT_FILE) {
 }
 
 /**
- * Add the candidate's contracts to the approved document, preserving history.
+ * Digest of the whole lock.
  *
- * Existing approved contracts are never replaced implicitly. `replace` is the
- * explicit opt-in used when re-approving the same fingerprint; a new
- * fingerprint is simply added alongside its predecessors.
+ * Per-run reports and evidence cross-reference this value instead of a path or a
+ * timestamp, so two runs against the same lock are comparable.
  */
-export function mergeContracts(existing, candidate) {
-  return {
-    ...existing,
-    schemaVersion: candidate.schemaVersion,
-    toolchain: candidate.toolchain,
-    contracts: {
-      ...existing.contracts,
-      ...candidate.contracts,
-    },
-  };
+export function lockDigest(document) {
+  return fingerprintOf(document);
 }
 
-/** Stable, human-readable summary of a document. */
+/** Stable summary of a lock: one entry per recorded scope. */
 export function summarise(document) {
   return Object.entries(document.contracts).map(([key, contract]) => ({
     key,
     scope: contract.scope,
-    state: contract.state,
-    approved: isApproved(contract),
+    fingerprint: contract.fingerprint,
     values: Object.keys(contract.values).length,
   }));
 }

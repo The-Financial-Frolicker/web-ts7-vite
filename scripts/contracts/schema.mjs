@@ -1,49 +1,51 @@
 /**
- * Shape validation for the approved contract document.
+ * Shape validation for the v2 contract lock.
  *
- * The document is a reviewed engineering artefact, so validation is strict:
- * unknown provenance values, an unapproved contract or an `unverified` value in
- * a mandatory slot are all errors rather than warnings. CI must fail closed on
- * a contract it cannot understand.
+ * The lock records mechanically derived facts about the authorised
+ * configuration and the installed toolchain. It records no lifecycle state and
+ * no approval: nothing in it is a human decision, so there is nothing for a
+ * human to certify here. The source configuration is the specification; the
+ * lock is what the machine derived from it.
+ *
+ * Validation is strict and fails closed: an unknown field, a v1 lifecycle
+ * field, a fingerprint that does not match its key, or an `unverified` value is
+ * an error rather than a warning.
  */
+
+import { contractKey } from "./canonical.mjs";
+import { SCOPES } from "./scopes.mjs";
+
+export const SCHEMA_VERSION = 2;
 
 /**
- * The approval lifecycle of a single contract.
+ * Per-run conformance status of one scope.
  *
- *   candidate  produced by discovery; not reviewable by CI
- *   bootstrap  a provisional development baseline carried over without a
- *              human decision; not reviewable by CI, and never records an
- *              approver because there was none
- *   approved   an explicit human decision, bound to this exact fingerprint
- *
- * The smallest model that keeps "no human has decided yet" from being
- * indistinguishable from "a human decided".
+ * These are computed by verification and never stored: `recorded` means the
+ * current derivation matches the committed lock, `drifted` means a contract
+ * exists for the scope but describes different facts, and `unrecorded` means the
+ * lock has no contract for that scope at all.
  */
-export const CONTRACT_STATES = Object.freeze([
-  "candidate",
-  "bootstrap",
-  "approved",
+export const CONTRACT_STATUSES = Object.freeze([
+  "recorded",
+  "drifted",
+  "unrecorded",
 ]);
 
-/** True when the contract carries a valid human approval for its fingerprint. */
-export function isApproved(contract) {
-  return contract.state === "approved" &&
-    contract.approved !== null &&
-    contract.approved.fingerprint === contract.fingerprint;
-}
-
-export const SCHEMA_VERSION = 1;
-
+/**
+ * How a recorded value was established.
+ *
+ * There is deliberately no "declared": a value no derivation supports does not
+ * belong in a lock. Human decisions belong in the source configuration the lock
+ * is derived from.
+ */
 export const PROVENANCE = Object.freeze([
-  /** Read from an authoritative source (project configuration, lockfile). */
+  /** Read from the project's own configuration or installed package manifests. */
   "authoritative",
-  /** Measured in this environment (a probe that produced evidence). */
+  /** Measured by a probe in the authoring environment. */
   "observed",
-  /** Computed from other contract values, with the rule stated in evidence. */
+  /** Computed from other values by a rule stated in the evidence. */
   "derived",
-  /** A human decision. Never inferred, never widened automatically. */
-  "declared",
-  /** Evidence is missing or the probe failed; the contract cannot be approved. */
+  /** Evidence is missing or a probe failed; conformance cannot be established. */
   "unverified",
 ]);
 
@@ -72,6 +74,31 @@ function requireString(value, label) {
   return value;
 }
 
+const DOCUMENT_FIELDS = new Set(["schemaVersion", "toolchain", "contracts"]);
+const CONTRACT_FIELDS = new Set([
+  "scope",
+  "fingerprint",
+  "fingerprintInputs",
+  "values",
+]);
+
+/** v1 fields, named so the migration error explains itself. */
+const OBSOLETE_DOCUMENT_FIELDS = new Set(["policies"]);
+const OBSOLETE_CONTRACT_FIELDS = new Set(["state", "approved", "bootstrap"]);
+
+function rejectUnknownFields(object, allowed, obsolete, label) {
+  for (const key of Object.keys(object)) {
+    if (allowed.has(key)) continue;
+    if (obsolete.has(key)) {
+      fail(
+        `${label} declares ${JSON.stringify(key)}, which is v1 lifecycle ` +
+          `metadata; a v2 lock records derived facts only`,
+      );
+    }
+    fail(`${label} has unknown field ${JSON.stringify(key)}`);
+  }
+}
+
 /** Validate one keyed value entry and return it. */
 export function validateValue(key, entry, contractKeyLabel) {
   const label = `${contractKeyLabel} value ${JSON.stringify(key)}`;
@@ -91,129 +118,94 @@ export function validateValue(key, entry, contractKeyLabel) {
   return entry;
 }
 
-/** Validate one scoped contract; returns the parsed fingerprint inputs. */
+/** Validate one scoped contract; returns it. */
 export function validateContract(key, contract) {
   requireObject(contract, `contract ${JSON.stringify(key)}`);
-  requireString(contract.scope, `contract ${key} scope`);
-  requireString(contract.fingerprint, `contract ${key} fingerprint`);
+  rejectUnknownFields(
+    contract,
+    CONTRACT_FIELDS,
+    OBSOLETE_CONTRACT_FIELDS,
+    `contract ${key}`,
+  );
+
+  const scope = requireString(contract.scope, `contract ${key} scope`);
+  if (!SCOPES.includes(scope)) {
+    fail(
+      `contract ${key} has unknown scope ${JSON.stringify(scope)}; expected ` +
+        `one of ${SCOPES.join(", ")}`,
+    );
+  }
+
+  const fingerprint = requireString(
+    contract.fingerprint,
+    `contract ${key} fingerprint`,
+  );
+  if (!/^sha256:[0-9a-f]{64}$/.test(fingerprint)) {
+    fail(
+      `contract ${key} fingerprint is ${JSON.stringify(fingerprint)}; ` +
+        `expected sha256:<64 hex characters>`,
+    );
+  }
+  if (contractKey(scope, fingerprint) !== key) {
+    fail(
+      `contract key ${JSON.stringify(key)} does not match its scope and ` +
+        `fingerprint (${contractKey(scope, fingerprint)})`,
+    );
+  }
+
   requireObject(
     contract.fingerprintInputs,
     `contract ${key} fingerprintInputs`,
   );
   requireObject(contract.values, `contract ${key} values`);
-
-  if (Object.keys(contract.fingerprintInputs).length === 0) {
-    fail(`contract ${key} has empty fingerprintInputs`);
-  }
-  if (Object.keys(contract.values).length === 0) {
-    fail(`contract ${key} has no values`);
-  }
-
   for (const [valueKey, entry] of Object.entries(contract.values)) {
     validateValue(valueKey, entry, `contract ${key}`);
-  }
-
-  if (!CONTRACT_STATES.includes(contract.state)) {
-    fail(
-      `contract ${key} has state ${JSON.stringify(contract.state)}; ` +
-        `expected one of ${CONTRACT_STATES.join(", ")}`,
-    );
-  }
-
-  if (contract.state === "approved") {
-    requireObject(contract.approved, `contract ${key} approved`);
-    requireString(contract.approved.by, `contract ${key} approved.by`);
-    requireString(contract.approved.at, `contract ${key} approved.at`);
-    requireString(contract.approved.reason, `contract ${key} approved.reason`);
-    requireString(
-      contract.approved.fingerprint,
-      `contract ${key} approved.fingerprint`,
-    );
-    if (contract.approved.fingerprint !== contract.fingerprint) {
-      fail(
-        `contract ${key} is approved for fingerprint ` +
-          `${contract.approved.fingerprint}, but its own fingerprint is ` +
-          `${contract.fingerprint}; an approval is bound to one fingerprint`,
-      );
-    }
-    if (contract.bootstrap != null) {
-      fail(`contract ${key} cannot be both approved and bootstrap`);
-    }
-  } else {
-    if (contract.approved != null) {
-      fail(
-        `contract ${key} is ${contract.state} but carries an approval record; ` +
-          `only an explicit approval may record an approver`,
-      );
-    }
-    if (contract.state === "bootstrap") {
-      requireObject(contract.bootstrap, `contract ${key} bootstrap`);
-      requireString(contract.bootstrap.at, `contract ${key} bootstrap.at`);
-      requireString(
-        contract.bootstrap.reason,
-        `contract ${key} bootstrap.reason`,
-      );
-    } else if (contract.bootstrap != null) {
-      fail(`contract ${key} is a candidate but carries bootstrap metadata`);
-    }
   }
 
   return contract;
 }
 
-/** Values whose provenance makes a contract unapprovable. */
+/** Values whose provenance makes the contract unconformant. */
 export function unverifiedValues(contract) {
   return Object.entries(contract.values)
     .filter(([, entry]) => entry.provenance === "unverified")
     .map(([key]) => key);
 }
 
-/** Validate a whole document. Throws `ContractError` on the first problem. */
+/** Validate a whole lock document. Throws `ContractError` on the first problem. */
 export function validateDocument(document) {
-  requireObject(document, "contract document");
+  requireObject(document, "contract lock");
 
   if (document.schemaVersion !== SCHEMA_VERSION) {
     fail(
-      `contract document schemaVersion is ${
+      `contract lock schemaVersion is ${
         JSON.stringify(document.schemaVersion)
-      }; ` +
-        `this tool reads version ${SCHEMA_VERSION}`,
+      }; this tool reads version ${SCHEMA_VERSION}. A v1 document is not ` +
+        `readable: run \`deno task contract:refresh\` and commit the result.`,
     );
   }
 
-  requireObject(document.toolchain, "contract document toolchain");
-  requireObject(document.contracts, "contract document contracts");
-  requireObject(document.policies, "contract document policies");
+  rejectUnknownFields(
+    document,
+    DOCUMENT_FIELDS,
+    OBSOLETE_DOCUMENT_FIELDS,
+    "contract lock",
+  );
 
+  requireObject(document.toolchain, "contract lock toolchain");
+  requireObject(document.contracts, "contract lock contracts");
+
+  const seen = new Set();
   for (const [key, contract] of Object.entries(document.contracts)) {
     validateContract(key, contract);
-  }
-
-  for (const [name, policy] of Object.entries(document.policies)) {
-    requireObject(policy, `policy ${name}`);
-    if (policy.provenance !== "declared") {
+    if (seen.has(contract.scope)) {
       fail(
-        `policy ${name} must have provenance "declared"; ` +
-          `discovery must never infer or widen a policy`,
+        `contract lock records scope ${JSON.stringify(contract.scope)} more ` +
+          `than once; one scope has one contract`,
       );
     }
-    requireString(policy.rationale, `policy ${name} rationale`);
-    requireString(policy.decidedBy, `policy ${name} decidedBy`);
-    requireString(policy.decidedAt, `policy ${name} decidedAt`);
-    if (!Array.isArray(policy.reviewedAgainst)) {
-      fail(`policy ${name} reviewedAgainst must be an array`);
-    }
-    if (!Array.isArray(policy.checkedAgainst)) {
-      fail(`policy ${name} checkedAgainst must be an array`);
-    }
+    seen.add(contract.scope);
   }
 
   return document;
-}
-
-/** Keys of contracts that do not carry a valid human approval. */
-export function unapprovedContracts(document) {
-  return Object.entries(document.contracts)
-    .filter(([, contract]) => !isApproved(contract))
-    .map(([key]) => key);
 }

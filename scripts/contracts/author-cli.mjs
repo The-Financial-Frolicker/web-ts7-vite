@@ -1,196 +1,178 @@
 /**
- * Authoring CLI: discovery and approval. Generator-only.
+ * Authoring CLI: contract refresh. Generator-only.
  *
- * The generated product receives `cli.mjs` (verify/status/show/accept) and
- * never this module, so a product has no code path that can discover or
- * approve a contract.
+ * `refresh` is the only operation in the project that writes the lock. It is run
+ * deliberately, on the authorised platform, and its output is reviewed and
+ * committed like any other source change. The generated product never receives
+ * this module, so a product cannot derive or rewrite its own contract.
  */
 
-import { approveCandidate } from "./approve.mjs";
+import { canonicalJson } from "./canonical.mjs";
 import { ConfigError } from "./config.mjs";
-import { discoverContracts } from "./discover.mjs";
+import { deriveContracts } from "./discover.mjs";
+import { ContractError, SCHEMA_VERSION } from "./schema.mjs";
 import {
-  ContractError,
-  unverifiedValues,
-  validateDocument,
-} from "./schema.mjs";
-import {
-  CANDIDATE_FILE,
+  CONTRACT_FILE,
   documentExists,
   loadDocument,
-  summarise,
   writeDocument,
 } from "./store.mjs";
 import { resolveWorkerdGraph, ToolchainError } from "./toolchain.mjs";
 import { DiscoveryError } from "../lib/toolchain/discovery.mjs";
+import { readFileSync } from "../lib/fs.mjs";
+import path from "../lib/path.mjs";
 
 const EXIT_OK = 0;
 const EXIT_FAILURE = 1;
-const EXIT_UNCERTAIN = 2;
 
 const USAGE = `Toolchain contract authoring (generator only).
 
-  discover [--timeout MS]
-      Probe the installed toolchain and write ${CANDIDATE_FILE}. Exits 2 when a
-      value could not be established. Never approves anything.
-
-  approve --by NAME --reason TEXT [--client-api-edition EDITION] [--replace] [--reaffirm]
-      Record an explicit human approval of the candidate. Without --reaffirm,
-      existing policies are carried forward unchanged.
+  refresh
+      Derive every contract fact from the authorised configuration and the
+      installed toolchain, then write ${CONTRACT_FILE}. Deterministic: no
+      timestamps, run identifiers, host paths or approval metadata.
 
   workerd-path
       Print the runtime selected by the Wrangler/Miniflare graph.`;
 
-const FLAGS = new Map([
-  ["--by", "by"],
-  ["--reason", "reason"],
-  ["--client-api-edition", "clientApiEdition"],
-  ["--timeout", "timeout"],
-]);
-
-function parseArgs(argv) {
-  const options = { command: argv[0], replace: false, reaffirm: false };
-  for (let index = 1; index < argv.length; index += 1) {
-    const argument = argv[index];
-    if (argument === "--") continue;
-    if (argument === "--replace") {
-      options.replace = true;
-      continue;
-    }
-    if (argument === "--reaffirm") {
-      options.reaffirm = true;
-      continue;
-    }
-    if (argument === "--help" || argument === "-h") {
-      options.help = true;
-      continue;
-    }
-
-    const name = FLAGS.get(argument);
-    if (name === undefined) {
-      throw new ContractError(
-        `unknown argument ${JSON.stringify(argument)}\n\n${USAGE}`,
-      );
-    }
-
-    const value = argv[index + 1];
-    if (value === undefined || value.startsWith("--")) {
-      throw new ContractError(`${argument} requires a value`);
-    }
-    options[name] = value;
-    index += 1;
-  }
-
-  return options;
-}
-
-async function runDiscover(root, options, io) {
-  const timeout = options.timeout === undefined
-    ? 25_000
-    : Number(options.timeout);
-  if (!Number.isFinite(timeout) || timeout <= 0) {
-    throw new ContractError(
-      "--timeout must be a positive number of milliseconds",
-    );
-  }
-
-  const { document, diagnostics } = await discoverContracts({
-    root,
-    io,
-    probeTimeoutMs: timeout,
-  });
-
-  writeDocument(root, document, CANDIDATE_FILE);
-  for (const diagnostic of diagnostics) io.error(`[discover] ${diagnostic}`);
-
-  const uncertain = Object.values(document.contracts)
-    .flatMap((contract) => unverifiedValues(contract));
-
-  io.log(`Candidate written to ${CANDIDATE_FILE}.`);
-  for (const key of Object.keys(document.contracts)) io.log(`  ${key}`);
-
-  if (uncertain.length > 0) {
-    io.error(
-      `Discovery is inconclusive: ${uncertain.length} value(s) could not be ` +
-        `established (${
-          uncertain.join(", ")
-        }). The candidate cannot be approved.`,
-    );
-    return EXIT_UNCERTAIN;
-  }
-
-  io.log(
-    `Next: deno task contract:approve -- --by "Your Name" --reason "..." ` +
-      `--client-api-edition <edition>`,
+/** Compare a previous lock with a freshly derived one, per scope. */
+export function describeLockChanges(previous, next) {
+  const changes = [];
+  const before = new Map(
+    Object.values(previous?.contracts ?? {}).map((contract) => [
+      contract.scope,
+      contract,
+    ]),
   );
-  return EXIT_OK;
-}
+  const after = new Map(
+    Object.values(next.contracts).map((contract) => [contract.scope, contract]),
+  );
 
-function runApprove(root, options, io) {
-  const candidate = loadDocument(root, CANDIDATE_FILE);
-  const existing = documentExists(root)
-    ? loadDocument(root)
-    : { schemaVersion: 1, toolchain: {}, contracts: {}, policies: {} };
+  for (const [scope, contract] of after) {
+    const recorded = before.get(scope);
 
-  const document = approveCandidate({
-    existing,
-    candidate,
-    by: options.by,
-    reason: options.reason,
-    at: new Date().toISOString(),
-    replace: options.replace,
-    reaffirm: options.reaffirm,
-    clientApiEdition: options.clientApiEdition,
-    root,
-  });
+    if (recorded === undefined) {
+      changes.push({
+        scope,
+        kind: "added",
+        valueChanges: Object.keys(contract.values).sort(),
+      });
+      continue;
+    }
 
-  validateDocument(document);
-  const target = writeDocument(root, document);
-  io.log(`Approved contract written to ${target}.`);
+    const valueChanges = diffValueKeys(recorded.values, contract.values);
+    if (
+      recorded.fingerprint === contract.fingerprint && valueChanges.length === 0
+    ) {
+      changes.push({ scope, kind: "unchanged", valueChanges: [] });
+      continue;
+    }
 
-  for (const entry of summarise(document)) {
-    io.log(`  ${entry.key} ${entry.state}`);
+    changes.push({
+      scope,
+      kind: recorded.fingerprint === contract.fingerprint
+        ? "values"
+        : "fingerprint",
+      valueChanges,
+    });
   }
-  io.log("Review the file, then commit it.");
-  return EXIT_OK;
+
+  for (const scope of before.keys()) {
+    if (!after.has(scope)) {
+      changes.push({ scope, kind: "removed", valueChanges: [] });
+    }
+  }
+
+  return changes.sort((left, right) => left.scope.localeCompare(right.scope));
 }
 
-function runWorkerdPath(root, io) {
-  io.log(resolveWorkerdGraph(root).binary);
-  return EXIT_OK;
+/** Recorded value keys whose content differs between two contracts. */
+function diffValueKeys(previous = {}, next = {}) {
+  const keys = new Set([...Object.keys(previous), ...Object.keys(next)]);
+  return [...keys].sort().filter((key) =>
+    canonicalJson(previous[key] ?? null, 0) !==
+      canonicalJson(next[key] ?? null, 0)
+  );
 }
 
-/** CLI entry point; returns an exit code instead of exiting directly. */
-export async function main(argv = Deno.args, root = Deno.cwd(), io = console) {
+/**
+ * Load the previous lock for comparison, when it is comparable.
+ *
+ * A v1 document is not readable by this tool, and replacing it is the documented
+ * migration: the new lock is reported as entirely new rather than as a diff
+ * against a model that no longer exists. Anything else — an unreadable v2 file —
+ * still fails loudly.
+ */
+function previousLock(root, io) {
+  if (!documentExists(root)) return undefined;
+
+  const file = path.join(root, CONTRACT_FILE);
+  let parsed;
   try {
-    const options = parseArgs(argv);
+    parsed = JSON.parse(readFileSync(file, "utf8"));
+  } catch (error) {
+    throw new ContractError(
+      `${CONTRACT_FILE} is not valid JSON: ${error.message}`,
+    );
+  }
 
-    if (options.help || options.command === undefined) {
-      io.log(USAGE);
-      return options.command === undefined && !options.help
-        ? EXIT_FAILURE
-        : EXIT_OK;
+  if (parsed?.schemaVersion !== SCHEMA_VERSION) {
+    io.log(
+      `[refresh] previous lock has schemaVersion ${
+        JSON.stringify(parsed?.schemaVersion)
+      }; recording a fresh v${SCHEMA_VERSION} lock`,
+    );
+    return undefined;
+  }
+
+  return loadDocument(root);
+}
+
+/** CLI entry point; returns an exit code. */
+export async function main(argv = Deno.args, root = Deno.cwd(), io = console) {
+  const command = argv[0];
+
+  if (command === "--help" || command === "-h") {
+    io.log(USAGE);
+    return EXIT_OK;
+  }
+
+  try {
+    if (command === "workerd-path") {
+      io.log(resolveWorkerdGraph(root).binary);
+      return EXIT_OK;
     }
 
-    switch (options.command) {
-      case "discover":
-        return await runDiscover(root, options, io);
-      case "approve":
-        return runApprove(root, options, io);
-      case "workerd-path":
-        return runWorkerdPath(root, io);
-      default:
-        io.error(
-          `unknown command ${JSON.stringify(options.command)}\n\n${USAGE}`,
-        );
-        return EXIT_FAILURE;
+    if (command === "refresh") {
+      const previous = previousLock(root, io);
+      const { document } = await deriveContracts({ root, io });
+
+      // Report before writing so a failure cannot leave the lock changed without
+      // an explanation.
+      for (const change of describeLockChanges(previous, document)) {
+        const detail = change.valueChanges.length > 0
+          ? ` (${change.valueChanges.join(", ")})`
+          : "";
+        io.log(`[refresh] ${change.scope}: ${change.kind}${detail}`);
+      }
+
+      const target = writeDocument(root, document);
+      io.log(
+        `[refresh] wrote ${target} with ${
+          Object.keys(document.contracts).length
+        } scopes`,
+      );
+      return EXIT_OK;
     }
+
+    io.error(`unknown command ${JSON.stringify(command)}\n\n${USAGE}`);
+    return EXIT_FAILURE;
   } catch (error) {
     if (
-      error instanceof ContractError || error instanceof ToolchainError ||
-      error instanceof ConfigError || error instanceof DiscoveryError
+      error instanceof ContractError || error instanceof ConfigError ||
+      error instanceof ToolchainError || error instanceof DiscoveryError
     ) {
-      io.error(`Error: ${error.message}`);
+      io.error(`Contract refresh failed: ${error.message}`);
       return EXIT_FAILURE;
     }
     throw error;

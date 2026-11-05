@@ -270,8 +270,7 @@ describe("product task manifest", () => {
   it("removes generator-only tasks and repoints product tests", () => {
     const tasks = productTasks({
       "check:contracts": "check",
-      "contract:discover": "discover",
-      "contract:approve": "approve",
+      "contract:refresh": "refresh",
       "test:toolchain": "toolchain",
       "test:toolchain-config": "toolchain config",
       "toolchain:prepare": "prepare",
@@ -281,6 +280,7 @@ describe("product task manifest", () => {
       validate: "old chain",
     });
 
+    assert.equal("contract:refresh" in tasks, false);
     assert.equal("contract:discover" in tasks, false);
     assert.equal("contract:approve" in tasks, false);
     assert.equal("test:toolchain" in tasks, false);
@@ -291,9 +291,11 @@ describe("product task manifest", () => {
     assert.equal("init:project" in tasks, false);
     assert.equal(tasks["check:contracts"], "check");
     assert.match(tasks["test:contracts"], /contracts\.verify\.test\.mjs/);
-    assert.match(tasks["test:contracts"], /contract-accept\.test\.mjs/);
     assert.match(tasks.validate, /deno task check:contracts/);
-    assert.doesNotMatch(tasks.validate, /contract:discover|contract:approve/);
+    assert.doesNotMatch(
+      tasks.validate,
+      /contract:refresh|contract:discover|contract:approve/,
+    );
   });
 });
 describe("generator-only toolchain boundary", () => {
@@ -440,8 +442,9 @@ describe("product validation and contract verification", () => {
         "scripts/check-contracts.sh",
         "scripts/contracts/cli.mjs",
         "scripts/contracts/verify.mjs",
+        "scripts/contracts/identity.mjs",
         "scripts/contracts.verify.test.mjs",
-        "scripts/contract-accept.test.mjs",
+        "scripts/edge-verify.mjs",
       ]
     ) {
       assert.equal(
@@ -487,14 +490,14 @@ describe("product validation and contract verification", () => {
     assert.doesNotMatch(result.output, /Task not found|Module not found/);
     assert.match(result.output, /\[verify\]/);
 
-    // Verification either confirms an approved contract or refuses an
-    // unapproved one. The lifecycle outcome itself is asserted by the contract
-    // suites; here the requirement is that a product can execute the task.
+    // Verification either confirms conformance or reports drift. The outcome
+    // itself is asserted by the contract suites; here the requirement is that a
+    // product can execute the task and produce a machine-readable report.
     if (result.code === 0) {
-      assert.match(result.output, /Toolchain contracts OK/);
+      assert.match(result.output, /Conformance OK/);
     } else {
       assert.equal(result.code, 1, result.output);
-      assert.match(result.output, /Toolchain contracts are not satisfied/);
+      assert.match(result.output, /Contract conformance failed/);
     }
   });
 });

@@ -133,7 +133,6 @@ run_build_checks() {
         --exclude=./build-wasm \
         --exclude=./.wrangler \
         --exclude=./public/wasm \
-        --exclude=./.contracts \
         --exclude='./.aider*' \
         -cf - . | tar -C "$WORK_DIR" -xf -
     ln -s "$PROJECT_ROOT/node_modules" "$WORK_DIR/node_modules"

@@ -26,7 +26,7 @@
     "test:deploy": "bash scripts/deno-no-node.sh deno test --allow-read --allow-write --allow-env scripts/check-deploy-artifacts.test.mjs",
     "test:boundary": "bash scripts/deno-no-node.sh deno test --allow-read --allow-write --allow-run --allow-env scripts/check-node-boundary.test.mjs",
     "test:toolchain": "bash scripts/deno-no-node.sh deno test --allow-read --allow-write --allow-env scripts/toolchain.test.mjs",
-    "test:contracts": "bash scripts/deno-no-node.sh deno test --allow-read --allow-write --allow-run --allow-env scripts/contracts.test.mjs scripts/contracts.verify.test.mjs scripts/contract-accept.test.mjs scripts/emscripten-provenance.test.mjs",
+    "test:contracts": "bash scripts/deno-no-node.sh deno test --allow-read --allow-write --allow-run --allow-env scripts/contracts.test.mjs scripts/contracts.verify.test.mjs scripts/emscripten-provenance.test.mjs",
     "test:vite": "bash scripts/deno-no-node.sh deno test --allow-read scripts/vite-build.test.mjs",
     "test:wrangler-types": "bash scripts/deno-no-node.sh deno test --allow-read scripts/wrangler-types.test.mjs",
     "test:wrangler-dry-run": "bash scripts/deno-no-node.sh deno test --allow-read --allow-env=HOME,XDG_CONFIG_HOME scripts/wrangler-dry-run.test.mjs",

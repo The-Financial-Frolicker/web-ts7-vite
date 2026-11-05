@@ -14,11 +14,13 @@
 export const SCOPE_WORKERD_RUNTIME = "workerd-runtime";
 export const SCOPE_VITE_TARGET = "vite-syntax-target";
 export const SCOPE_TYPESCRIPT_LIBRARIES = "typescript-libraries";
+export const SCOPE_LAUNCHER_PERMISSIONS = "launcher-permissions";
 
 export const SCOPES = Object.freeze([
   SCOPE_WORKERD_RUNTIME,
   SCOPE_VITE_TARGET,
   SCOPE_TYPESCRIPT_LIBRARIES,
+  SCOPE_LAUNCHER_PERMISSIONS,
 ]);
 
 /**
@@ -48,11 +50,34 @@ export const COMPONENTS = Object.freeze({
   },
   vite: {
     keyFor: [SCOPE_VITE_TARGET],
-    inputs: (identity) => ({ vite: identity.vite.version }),
+    inputs: (identity) => ({
+      vite: identity.vite.version,
+      // The configured production target is part of the authorised source: an
+      // override in vite.config.ts changes what the client bundle may use.
+      buildTarget: identity.vite.buildTarget,
+    }),
   },
   typescript: {
     keyFor: [SCOPE_TYPESCRIPT_LIBRARIES],
-    inputs: (identity) => ({ typescript: identity.typescript.version }),
+    inputs: (identity) => ({
+      typescript: identity.typescript.version,
+      // The declared `lib` lists are the authorised API surface of each
+      // program, so they belong to the fingerprint of the libraries contract.
+      clientLib: identity.typescript.clientLib,
+      workerLib: identity.typescript.workerLib,
+    }),
+  },
+  /**
+   * Launcher permission profiles.
+   *
+   * The recorded requirement is what each launcher *declares* it needs, derived
+   * from its own argument builder. What the execution environment actually
+   * grants is a runtime matter: a `NotCapable` failure is a conformance or
+   * execution failure and never widens this profile.
+   */
+  launchers: {
+    keyFor: [SCOPE_LAUNCHER_PERMISSIONS],
+    inputs: (identity) => ({ launchers: identity.launchers }),
   },
   emscripten: {
     // Non-key everywhere today; key only for a C++ compiler-capability contract.

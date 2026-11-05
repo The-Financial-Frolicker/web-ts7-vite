@@ -1,0 +1,107 @@
+name: Authoritative toolchain
+
+# Evidence from the platform the contract is recorded for, on a real
+# GitHub-hosted ubuntu-24.04 runner.
+#
+# This workflow is generator-only and is deliberately NOT listed in
+# `scripts/product-manifest.mjs`: a generated product inherits its contract and
+# has no refresh capability, so it has nothing to prove here. Keeping it out of
+# the product is also why the shipped `ci.yml` stays free of generator-only
+# tasks.
+#
+# It answers two questions the ordinary CI job cannot:
+#   * does the declared toolchain (`toolchain.toml`) match what is installed;
+#   * does a canonical refresh on ubuntu-24.04 reproduce the committed lock
+#     byte for byte?
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: authoritative-toolchain-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  MISE_YES: "1"
+  DENO_NO_UPDATE_CHECK: "1"
+
+jobs:
+  authoritative-toolchain:
+    name: Authoritative toolchain (ubuntu-24.04)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          # This job only reads, derives and compares.
+          persist-credentials: false
+
+      - name: Install the pinned toolchain with mise
+        uses: jdx/mise-action@v5
+        with:
+          # The project's only installation mechanism: every pin in `.mise.toml`
+          # at its exact version, including the Emscripten SDK, with the same
+          # cache key as the other jobs.
+          cache: true
+          cache_save_post: true
+          install: true
+
+      - name: Confirm the authorised Emscripten SDK
+        # Canonical refresh records how the WASM artefact is produced, so the SDK
+        # must be present and exported. `contract:refresh` refuses to run without
+        # it rather than recording degraded provenance.
+        run: |
+          mise exec -- bash -c 'printf "EMSDK=%s\n" "${EMSDK:-<unset>}"; test -d "${EMSDK:-/nonexistent}"'
+          mise exec -- emcc --version | head -n 1
+
+      - name: Cache Deno's npm download cache
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/deno
+          key: deno-npm-${{ runner.os }}-${{ hashFiles('deno.lock') }}
+          restore-keys: |
+            deno-npm-${{ runner.os }}-
+
+      - name: Install npm dependencies
+        run: mise exec -- deno install --frozen
+
+      - name: Toolchain conformance
+        # Resolves every declaration, compares the installed versions with
+        # `toolchain.toml`, and checks `.mise.toml` against its projection.
+        # Nothing is installed: preparation already happened in the step above.
+        run: mise exec -- deno task toolchain:prepare -- --check
+
+      - name: Contract conformance (committed lock)
+        run: mise exec -- deno task check:contracts
+
+      - name: Canonical refresh reproduces the committed lock
+        # Verification by re-derivation. The refresh rewrites the record on the
+        # checked-out tree only; it is never committed, the original file is
+        # restored, and a difference fails the job with a printed diff. Refreshing
+        # is a reviewable source change, not something CI may perform for you.
+        run: |
+          set -euo pipefail
+          before="$(sha256sum toolchain-contracts.json | cut -d' ' -f1)"
+          echo "committed lock sha256: $before"
+          mise exec -- deno task contract:refresh
+          after="$(sha256sum toolchain-contracts.json | cut -d' ' -f1)"
+          echo "refreshed lock sha256: $after"
+          if [ "$before" != "$after" ]; then
+            echo "::error::canonical refresh on ubuntu-24.04 does not reproduce the committed lock"
+            git --no-pager diff -- toolchain-contracts.json
+            git checkout -- toolchain-contracts.json
+            exit 1
+          fi
+          echo "The committed lock is reproducible on ubuntu-24.04."
+
+      - name: Build validation in a throwaway copy
+        run: mise exec -- bash scripts/ci.sh build

@@ -68,7 +68,6 @@ export const PRODUCT_MANIFEST = Object.freeze({
     "scripts/build-scripts.test.mjs",
     "scripts/deno-no-node.test.mjs",
     "scripts/contracts.verify.test.mjs",
-    "scripts/contract-accept.test.mjs",
     "scripts/lib/assert.mjs",
     "scripts/lib/command.mjs",
     "scripts/lib/fs.mjs",
@@ -82,9 +81,11 @@ export const PRODUCT_MANIFEST = Object.freeze({
     "scripts/contracts/scopes.mjs",
     "scripts/contracts/store.mjs",
     "scripts/contracts/toolchain.mjs",
+    "scripts/contracts/identity.mjs",
     "scripts/contracts/permissions.mjs",
     "scripts/contracts/verify.mjs",
     "scripts/contracts/cli.mjs",
+    "scripts/edge-verify.mjs",
   ]),
 });
 
@@ -109,14 +110,12 @@ export const GENERATOR_ONLY = Object.freeze([
   "scripts/emscripten-provenance.test.mjs",
   "scripts/toolchain.test.mjs",
   "scripts/generate-product.test.mjs",
-  "scripts/contract-discover.sh",
-  "scripts/contract-approve.sh",
+  "scripts/contract-refresh.sh",
   "scripts/lib/toolchain/vite.mjs",
   "scripts/lib/toolchain/vite-probe.mjs",
   "scripts/contracts/discover.mjs",
   "scripts/contracts/fixtures.mjs",
   "scripts/contracts/workerd-probe.mjs",
-  "scripts/contracts/approve.mjs",
   "scripts/contracts/author-cli.mjs",
   // The generator itself: the product manifest and the generation operation.
   "scripts/product-manifest.mjs",
@@ -130,7 +129,6 @@ export const GENERATOR_ONLY = Object.freeze([
   "scripts/toolchain-config.test.mjs",
   "scripts/lib/toolchain/versions.mjs",
   "scripts/lib/toolchain/resolve.mjs",
-  ".contracts",
 ]);
 
 /** Fail closed if the two lists ever overlap. */

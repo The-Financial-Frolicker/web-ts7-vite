@@ -133,7 +133,8 @@ named explicitly — `scripts/ci.sh` sets `VITE_PERMISSION_PROFILE=ci-runner` fo
 both builds it performs in its throwaway copy (the initial build and the rebuild
 inside `deploy:dry-run`), and nothing infers a profile from `CI` or any other
 ambient variable. Both profiles are recorded in the permission contract, so
-changing either one requires human approval. The broader profile is a temporary
+changing either one changes the launcher-permissions fingerprint and requires a
+refresh and review. The broader profile is a temporary
 workaround: remove it once the upstream issue is fixed and the build passes with
 the restricted local profile.
 
@@ -254,8 +255,8 @@ The boundary is enforced by three mechanisms, each proving something different:
 
 | # | Mechanism | Scope | Where it runs |
 | --- | --- | --- | --- |
-| 1. Configuration invariants | `deno task check:contracts` | Consumes the approved toolchain contract and verifies the installed toolchain, both `tsconfig.json` libraries and Wrangler's compatibility settings against it. Performs no discovery | `validate`, `scripts/ci.sh`, CI |
-| `deno task test:contracts` | Contract lifecycle unit tests — canonical fingerprints, provenance rules, approval refusals and verification helpers — on synthetic fixtures | Deno |
+| 1. Configuration invariants | `deno task check:contracts` | Recomputes the contract facts and compares them with the committed lock: installed toolchain, both `tsconfig.json` libraries, Wrangler's compatibility settings and the declared launcher permission profiles. Performs no derivation | `validate`, `scripts/ci.sh`, CI |
+| `deno task test:contracts` | Contract unit tests — canonical fingerprints, provenance rules, refresh determinism, drift detection and verification helpers — on synthetic fixtures | Deno |
 | `deno task check:node-boundary` | `package.json`, `deno.lock`, both `tsconfig.json` files, `wrangler.jsonc` | `validate`, `scripts/ci.sh static`, CI |
 | 2. Compiler diagnostics | `deno task check:client`, `check:worker` | `src/`, every `worker/*.ts` module | `validate`, `scripts/ci.sh static`, CI |
 | 3. Delivered artefacts | `deno task check:deploy` | `dist/worker`, `dist/client`, published WASM glue, generated Wrangler configuration | `scripts/ci.sh build`, `deno task deploy`, CI |
@@ -686,11 +687,11 @@ of this documentation if it remains useful.
 | `scripts/deno-no-node.sh` | PATH tripwire for project-owned execution; rejects command-name `node`/`nodejs` attempts |
 | `scripts/resolve-python.sh` | Resolves the `emcc` interpreter: `EMSDK_PYTHON`, then a host `python3` that satisfies the SDK requirement, then a mise-provisioned fallback at that same requirement |
 | `scripts/deploy-dry-run.sh` | Builds, validates artefacts and invokes the Deno dry-run launcher; never deploys |
-| `scripts/contract-discover.sh` | Local discovery entry point (generator only): resolves the runtime through the generator-only authoring CLI, writes `.contracts/candidate.json`, never approves; `--print-workerd` prints the resolved runtime path without probing |
-| `scripts/contracts/` | Contract model: scopes and fingerprints, schema and lifecycle, verification, product CLI (`cli.mjs`), plus generator-only discovery, probing and authoring |
+| `scripts/contract-refresh.sh` | Contract refresh entry point (generator only): derives the lock from the authorised configuration and the installed toolchain via the authoring CLI; `--print-workerd` prints the resolved runtime path without probing |
+| `scripts/contracts/` | Contract model: scopes and fingerprints, schema and conformance, verification, product CLI (`cli.mjs`), plus generator-only derivation, probing and authoring |
 | `.mise.toml`, `deno.json`, `package.json`, `deno.lock` | Pinned tools (`.mise.toml` is the generated projection), task definitions and the locked dependency graph |
 | `toolchain.toml` | Authoritative desired tool versions; generator-only, because a product never re-pins the toolchain that created it |
-| `toolchain-contracts.json` | The committed contract artefact a product inherits; verification accepts only an approved contract |
+| `toolchain-contracts.json` | The committed contract lock: derived facts a product inherits; verification accepts only a conformant lock |
 | `worker-configuration.d.ts` | Generated, tracked Worker `Env` types; never edit by hand |
 
 ### Development server
@@ -776,9 +777,10 @@ verified statically and by the deployment dry run (see
 
 Type-checking, production bundling and runtime capability are three different
 questions, and the project answers each with evidence rather than assumption.
-The answers live in [`toolchain-contracts.json`](toolchain-contracts.json),
-which is produced by local discovery, reviewed and approved by a person, and
-then merely *consumed* by CI.
+The answers live in [`toolchain-contracts.json`](toolchain-contracts.json), the
+committed **contract lock**. The lock is *derived*, not decided: `deno task
+contract:refresh` records what the authorised configuration and the installed
+toolchain imply, and CI recomputes the same facts and only verifies them.
 
 - **Language level (authoring).** Both `tsconfig.json` files set
   `target: "ESNext"`, so authors are not capped below what the installed
@@ -789,88 +791,102 @@ then merely *consumed* by CI.
   installed runtime actually supports, probed with this project's compatibility
   date and flags, and `deno task check:contracts` fails if the declaration
   drifts from that measurement.
-- **Client `lib`.** `ES2023` is a declared policy, not a discovered fact: no
-  installed tool carries a browser-API database, so the correspondence between an
-  ES edition and Vite's resolved browsers stays a human decision. The policy
-  records the contracts it was reviewed against, so a Vite or TypeScript change
-  forces a review instead of silently widening the claim.
+- **Client `lib`.** `ES2023` is an *authoritative* declaration in
+  `tsconfig.json`, recorded in the lock together with the compiler's shipped
+  editions; `check:contracts` fails if the declaration names an edition the
+  installed TypeScript does not provide. No installed tool carries a
+  browser-API database, so the correspondence between an ES edition and Vite's
+  resolved browsers stays a documented limitation rather than a mechanical
+  check — which is why the Vite target is recorded alongside it.
 - **Production browser target.** Vite owns the mapping from its default
   `baseline-widely-available` to concrete browsers, and that mapping changes
-  between releases. Discovery records the resolved set in the
-  `vite-syntax-target` contract; CI compares the installed Vite version, which
-  is what fixes the mapping, instead of re-running Vite.
+  between releases. `vite.config.ts` may override `build.target`; the reader
+  accepts exactly one string or string-array literal and fails closed on
+  anything else. The lock records both the configured target and the resolved
+  browser list.
 - **Development server.** Its transform policy is separate from the production
   browser target and is not affected by any of this.
 
 No Babel, legacy-browser plugin or polyfill is used: the target is a maintained
 Baseline, not a legacy matrix.
 
-#### Toolchain contracts: discover locally, consume in CI
+#### Toolchain contracts: derive, record, verify
 
-The contract is an approved engineering decision, not a cache of whatever a probe
-happened to report. The lifecycle has two halves that never overlap:
+The lock is a record of facts, not an approval. Nothing in it is a human
+decision, so there is nothing in it for a human to certify; what a human
+authorises is the **source configuration** the facts are derived from.
 
-1. **Discover locally.** `deno task contract:discover` resolves the installed
-   toolchain from the project's own dependency graph — Wrangler → Miniflare →
-   workerd, cross-checked against the Vite plugin's graph — reads the
-   compatibility date and flags from `wrangler.jsonc`, asks the installed Vite
-   for its production target, reads TypeScript's shipped `lib` editions, and
-   runs a capability probe inside the real `workerd` binary. It writes
-   `.contracts/candidate.json` and never approves anything. Deno's permissions
-   scope *which* executables may start; they do not sandbox `workerd` or Vite
-   once running, exactly as for the existing Vite and Wrangler launchers.
-2. **Approve explicitly.** `deno task contract:approve -- --by "Name" --reason
-   "…" --client-api-edition es2023` records who approved what and why. It refuses
-   a candidate containing an `unverified` value, and refuses to overwrite an
-   approved contract without `--replace`.
-3. **Consume in CI.** `deno task check:contracts` reads the committed artefact,
-   recomputes the fingerprint from the installed packages, and verifies the
-   configuration against the approved values. It never starts workerd or Vite —
-   its permission profile is `--allow-read` and `--allow-env`, which is itself
-   the evidence that it cannot discover or approve anything.
+1. **Authorise the design in source.** `wrangler.jsonc` (compatibility date and
+   flags), both `tsconfig.json` files (`lib`), `vite.config.ts` (`build.target`),
+   the pinned dependency set (`package.json`, `deno.lock`) and the launcher
+   argument builders are the specification. Changing any of them changes what
+   the lock must say.
+2. **Record the facts explicitly.** `deno task contract:refresh` resolves the
+   toolchain from the project's own dependency graph (Wrangler → Miniflare →
+   workerd, cross-checked against the Vite plugin), reads the configuration,
+   asks the installed Vite and TypeScript what they provide, and runs a
+   capability probe inside the real `workerd` binary. It writes
+   `toolchain-contracts.json` and nothing else. It is the **only** writer, it
+   never runs in CI, and its output is deterministic: no timestamps, run
+   identifiers, host paths or approval metadata, so a second run on the same
+   authorised configuration is byte-identical.
 
-The artefact is a dictionary of contracts keyed by scope and fingerprint
+   Canonical refresh happens on the **authorised platform** (`ubuntu-24.04`,
+   `linux-x86_64-gnu`) with the pinned mise toolchain **and the Emscripten SDK
+   available**: the lock records how the WASM artefact is produced, so refresh
+   refuses to run when `EMSDK` is unset rather than recording degraded
+   provenance. Run it as `mise exec -- deno task contract:refresh`.
+3. **Review the change, not the facts.** The lock lives in version control, so a
+   source change that moves a contract shows up as a lock diff in the same pull
+   request. The reviewer authorises the change; the machine derives the values.
+4. **Verify in CI.** `deno task check:contracts` recomputes the facts, compares
+   them with the committed lock, reports one status per scope, and fails on
+   `drifted` or `unrecorded`. It never starts workerd or Vite: its permission
+   profile is `--allow-read` and `--allow-env`, which is itself the evidence
+   that it cannot derive or rewrite anything.
+
+Drift is a failure to investigate, never an automatic refresh: a run that could
+repair its own contract could never fail.
+
+A scope is reported as one of three statuses:
+
+| Status | Meaning | CI |
+| --- | --- | --- |
+| `recorded` | The current derivation matches the committed lock | accepted |
+| `drifted` | A contract exists for the scope but describes different facts | rejected |
+| `unrecorded` | The lock has no contract for that scope | rejected |
+
+Each verification run prints a machine-readable conformance report on stdout
+(schema version, verdict, per-scope status, current and recorded fingerprints,
+changed inputs and the lock digest) and human diagnostics on stderr. The report
+is produced even when the verdict is a failure, and it distinguishes a missing
+contract from a changed one.
+
+The lock is a dictionary of contracts keyed by scope and fingerprint
 (`workerd-runtime@sha256:…`, `vite-syntax-target@sha256:…`,
-`typescript-libraries@sha256:…`). Each fingerprint covers only the inputs that
-can change that contract: the runtime contract covers workerd, the compatibility
-date, the flags and the platform, but not Vite or TypeScript, so unrelated
-upgrades do not force rediscovery.
+`typescript-libraries@sha256:…`, `launcher-permissions@sha256:…`). Each
+fingerprint covers only the inputs that can change that contract: the runtime
+contract covers workerd, the compatibility date, the flags and the platform, but
+not Vite or TypeScript, so unrelated upgrades do not force a refresh.
 
 Every value records what kind of statement it is:
 
 | Provenance | Meaning |
 | --- | --- |
 | `authoritative` | Read from the project's own configuration or installed package manifests |
-| `observed` | Measured by a probe in this environment |
+| `observed` | Measured by a probe in the authoring environment |
 | `derived` | Computed from other values by a rule stated in its evidence |
-| `declared` | A human decision, recorded with who decided and what it was reviewed against |
-| `unverified` | Evidence is missing or a probe failed; the contract cannot be approved |
+| `unverified` | Evidence is missing or a probe failed; conformance cannot be established |
 
-Each contract also carries a lifecycle state:
+There is no `declared` provenance: a value no derivation supports does not belong
+in a lock. Human decisions live in the source the lock is derived from.
 
-| State | Meaning | CI |
-| --- | --- | --- |
-| `candidate` | Fresh discovery output; nobody has reviewed it | rejected |
-| `bootstrap` | A provisional baseline carried over without a human decision; it records no approver, because there was none | rejected |
-| `approved` | An explicit human approval, bound to that contract's fingerprint (approver, reason, time) | accepted |
-
-CI accepts only `approved` contracts whose approval names the current
-fingerprint. Approval is an explicit operation (`deno task contract:approve`)
-and is never inferred from a file existing or from a successful discovery run.
-
-The committed `toolchain-contracts.json` is currently **bootstrap**: it carries
-measurements and policies from the S9.1 work but no human approval. `deno task
-check:contracts`, `deno task validate` and CI therefore fail, by design, until a
-person approves it:
-
-```bash
-deno task contract:discover            # refresh the evidence
-deno task contract:approve -- --by "Your Name" --reason "why this is right" \
-    --client-api-edition es2023 --replace
-```
-
-The first genuine approval also re-states the policies under the approver's
-name; a provisional baseline's policy authorship is never inherited silently.
+The recorded Deno version is enforced, not merely recorded: verification compares
+the lock's `toolchain.deno.version` with the interpreter that is running, so
+adopting a different Deno fails until the authorised toolchain is installed or
+the lock is refreshed and the change reviewed. Deno is deliberately not a scope:
+it determines no compatibility fact, so it stays provenance plus an explicit
+conformance check rather than a fingerprint.
 
 #### Generator repository and generated product
 
@@ -889,20 +905,20 @@ generator tree is never modified.
 
 - **Included:** application source and assets, runtime/build configuration,
   `deno.lock`, `.mise.toml`, project CI workflow, the inherited
-  `toolchain-contracts.json` (approved or bootstrap — a product verifies it as
-  it stands and CI accepts only an approved artefact), build/deploy/smoke
+  `toolchain-contracts.json` (the lock a product inherits as-is — a product
+  verifies it and CI accepts only a conformant lock), build/deploy/smoke
   tooling, and the *verifier*
   (`scripts/contracts/{scopes,schema,config,store,toolchain,permissions,verify,
   canonical,cli}.mjs`, `scripts/check-contracts.sh`), plus product-side contract
   tests.
-- **Excluded:** discovery and probing (`discover.mjs`, `fixtures.mjs`,
-  `workerd-probe.mjs`, `lib/toolchain/vite*.mjs`), authoring (`approve.mjs`,
-  `author-cli.mjs`, `contract-discover.sh`, `contract-approve.sh`), toolchain
+- **Excluded:** derivation and probing (`discover.mjs`, `fixtures.mjs`,
+  `workerd-probe.mjs`, `lib/toolchain/vite*.mjs`), authoring (`author-cli.mjs`,
+  `contract-refresh.sh`), toolchain
   management (`toolchain.toml`, `toolchain-prepare.mjs`,
   `lib/toolchain/{versions,resolve}.mjs`, `toolchain-config.test.mjs` and the
   `toolchain:prepare` / `test:toolchain-config` tasks), the
   generator regression suite (`generate-product.test.mjs`, `test:generator`),
-  the initialiser, and local `.contracts/` state. Because the list is positive,
+  and the initialiser. Because the list is positive,
   a new generator file does not enter a product until someone adds it and
   justifies it; `assertManifestDisjoint()` and
   `assertProductBoundary()` fail closed on a mistake.
@@ -910,19 +926,11 @@ generator tree is never modified.
 An existing non-empty destination is refused (exit 2); generation never
 overwrites an unrelated project.
 
-**Updating a contract is not regenerating the product.** A product can install a
-new baseline that a human approved elsewhere:
-
-```bash
-deno task contract:accept -- --from /path/to/approved/toolchain-contracts.json
-```
-
-`accept` validates the artefact and refuses anything that is not in `approved`
-state, including bootstrap baselines and candidates. Accepting is **not**
-approving, and an approval record is a review trail, not a cryptographic
-signature: the artefact is trusted because it arrives through a reviewed
-delivery process. The product contains no command that can discover or approve a
-contract.
+**A product verifies; it never refreshes.** The product ships `verify`, `status`
+and `show`, and has no command that can derive, refresh or rewrite its lock.
+Changing a product's contract means changing the generator template and
+delivering the resulting lock through the reviewed update path — the product
+cannot manufacture its own record.
 
 #### Component identity, scoped fingerprints and build provenance
 
@@ -954,10 +962,10 @@ changed compiler does not by itself mean a runtime contract broke;
 `buildProvenanceDigest()` exists to make compiler changes visible without
 implying either.
 
-The committed contracts are **bootstrap**: measured, but not approved. CI rejects
-them until a person runs `contract:approve` with a real identity, reason and
-`--reaffirm`; a bootstrap baseline's policy authorship is never inherited
-silently.
+The committed lock describes this repository as it stands, so CI verifies rather
+than approves: a source change that moves a contract fails conformance until
+`deno task contract:refresh` records the new facts and the resulting lock diff is
+reviewed with the change that caused it.
 
 #### Toolchain version selection
 
@@ -1009,6 +1017,13 @@ projection is compared as a whole file, so a hand-edited comment is drift exactl
 like a changed version; `--check` has no separate task alias — `--check` is its
 mode.
 
+CI runs the check, never the preparation: `mise exec -- deno task
+toolchain:prepare -- --check` in the `validate` job and again in the
+authoritative job below. Installing remains mise's job (`jdx/mise-action`
+installs every pin from `.mise.toml` in one step), so the distinction between
+"prepare the environment" and "verify the environment" is preserved and the
+check cannot change the thing it measures.
+
 Provenance keeps three distinct facts per tool — **requested** (explicit,
 `latest`, or the implicit default), **resolved** (the exact version chosen for
 this run) and **installed** (what was observed afterwards) — and is written to
@@ -1028,14 +1043,15 @@ and a failed probe is never recorded as an unsupported capability. A capability
 probe that cannot start the runtime leaves the value `unverified`, which blocks
 approval and therefore blocks CI.
 
-Policies stay separate from measurements. The client API edition and the
-permission profiles are `declared`; discovery never infers, widens or grants
-them. Both named Vite profiles — `vite-build` for `local` and
-`vite-build-ci-runner` for the CI-only grant — are part of that policy, so the
-broader CI grant is reviewed like any other decision instead of appearing as an
-unrecorded exception. Each policy names the contract fingerprints it was
-reviewed against, so a workerd upgrade fails verification until someone
-reaffirms the review rather than silently re-blessing the old decision.
+Policies are derived facts now, not declarations. The client API edition is read
+from `tsconfig.json` and checked against the compiler's shipped editions; the
+launcher permission profiles are derived from each launcher's own argument
+builder, and both named Vite profiles — `vite-build` for `local` and
+`vite-build-ci-runner` for the CI-only grant — are recorded in the
+`launcher-permissions` contract. Widening a profile therefore changes a
+fingerprint, which fails conformance until the lock is refreshed and the change
+reviewed. Nothing here is approved separately: the review happens on the source
+change that caused it.
 
 #### Worker type generation
 
@@ -1118,13 +1134,12 @@ Run these from the project root with dependencies installed. Commands marked
 | `deno task test:wrangler-dry-run` | Direct Wrangler CLI/esbuild resolution, dry-run profile, argument forwarding and exit propagation | Deno |
 | `deno task test:toolchain` | Installed-package and TypeScript library discovery primitives, including version-pinned resolution | Deno |
 | `deno task test:toolchain-config` | Toolchain configuration: parsing, validation, resolution, installation, verification and the `.mise.toml` projection, with an injected mise (generator only) | Deno |
-| `deno task test:contracts` | Contract lifecycle: canonical fingerprints, provenance, approval refusals, policy review links and verification helpers | Deno |
+| `deno task test:contracts` | Contract conformance: canonical fingerprints, refresh determinism, drift detection, permission-profile derivation and verification helpers | Deno |
 | `deno task test:generator` | Generator/product boundary: allowlist copying, task rewrite, determinism, generator-only toolchain exclusion and the product's own validation/contract verification (generator only) | Dependencies; generator repository only |
 | `deno task test:no-node` | Node-exclusion tripwire: rejection, exit/argument propagation, legitimate tools, parent isolation and Node-absent operation | Deno |
-| `deno task check:contracts` | Enforces the approved contract: fingerprint match, approval state and fingerprint binding, tsconfig libraries, Wrangler and generated compatibility settings, permission policies. No discovery | Dependencies |
-| `deno task status:contracts` | Prints each contract's lifecycle state; exits non-zero while any contract still needs a human decision | Dependencies |
-| `deno task contract:discover` | Local discovery of the installed toolchain, including a real workerd capability probe; writes `.contracts/candidate.json` (development station only). `scripts/contract-discover.sh --print-workerd` reports the resolved runtime without probing | Dependencies, workerd |
-| `deno task contract:approve` | Approves a candidate (`--by`, `--reason`, `--client-api-edition`); refuses unverified values and silent overwrites | A discovered candidate |
+| `deno task check:contracts` | Conformance gate: recomputes the contract facts, compares them with the committed lock, reports one status per scope and prints the machine-readable report. Drift or a missing scope fails. No derivation, no writes | Dependencies |
+| `deno task status:contracts` | Prints one line per scope (`recorded`, `drifted`, `unrecorded`); exits non-zero unless every scope is recorded | Dependencies |
+| `deno task contract:refresh` | Derives every contract fact — including a real workerd capability probe — and writes `toolchain-contracts.json`. Requires the authorised platform (`ubuntu-24.04`) and the pinned toolchain with `EMSDK` available; it refuses to run without the SDK. `scripts/contract-refresh.sh --print-workerd` reports the resolved runtime without probing | Dependencies, workerd, Emscripten SDK |
 | `deno task check:worker-types` | `worker-configuration.d.ts` is current | Initialised project, dependencies |
 | `deno task types:worker` | Regenerates `worker-configuration.d.ts` (writes) | Initialised project, dependencies |
 | `deno task test:wasm` | Build-tree WASM smoke test on Deno, Node globals hidden (`19 + 23 = 42`) | Build required |
@@ -1141,9 +1156,9 @@ tasks only.
 
 The `validate` chain is the same shape in both trees: a generated product
 rewrites it to the tasks it actually received, and it also keeps
-`check:contracts` **last**, after every independent check and test suite. An
-inherited contract that is bootstrap, stale or unapproved therefore never hides
-the product's own suites; the gate still fails the chain at the end.
+`check:contracts` **last**, after every independent check and test suite. A
+drifted or unrecorded contract therefore never hides the product's own suites;
+the gate still fails the chain at the end.
 
 ### `scripts/ci.sh` modes and `deno task ci`
 
@@ -1160,9 +1175,9 @@ mode:
 
 | Mode | Work performed |
 | --- | --- |
-| `static` | Formatting, linting, client and Worker typechecks, the Node dependency-boundary check and tests, Worker runtime tests, contract lifecycle tests, the generator-only suites where present, Vite/Wrangler/Node-exclusion tests, then the strict contract gate last |
+| `static` | Formatting, linting, client and Worker typechecks, the Node dependency-boundary check and tests, Worker runtime tests, contract conformance tests, the generator-only suites where present, Vite/Wrangler/Node-exclusion tests, then the strict contract gate last |
 | `build` | Build/deployment tooling tests, dependency check, throwaway build copy, throwaway identity (generator repository only; a generated product is already initialised and ships no initialiser), Worker types freshness, full build, deployment-artefact check, both Deno WASM smoke tests, Deno-owned Wrangler dry run, then the strict contract gate last |
-| `all` | `static` followed by `build` (the default). `static` ends at the gate, so while the committed contracts are bootstrap, run `bash scripts/ci.sh build` separately to exercise the build checks |
+| `all` | `static` followed by `build` (the default). `static` ends at the conformance gate; if the environment has drifted, run `deno task contract:refresh` on the authorised platform and review the lock diff first |
 
 The checkout is never modified. The build mode copies the working tree
 (including uncommitted changes) to a temporary directory, leaving out Git
@@ -1321,15 +1336,16 @@ The workflow runs on two jobs:
   credentials, installs the pinned toolchain with `jdx/mise-action` (caching
   mise's install and download directories, including the Emscripten SDK, under a
   key derived from `.mise.toml`; the post-step save also captures Emscripten's
-  compiler cache), verifies the pinned Deno/CMake/Ninja/Emscripten versions, runs
-  `scripts/resolve-python.sh` for the same interpreter the build will use, caches
-  `~/.cache/deno` under a key derived from `deno.lock`, and installs dependencies
-  with `deno install --frozen`. It then runs formatting, linting, both
-  typechecks, the Node dependency-boundary check and tests, Worker runtime tests,
-  toolchain discovery and contract lifecycle tests, the guarded generator-only
-  suites (`test:toolchain-config`, `test:generator`), and the Vite, Wrangler and
-  Node-exclusion suites. The strict contract gate is the **last** step of this
-  job, so a rejected contract cannot hide any of them.
+  compiler cache), verifies the pinned Deno/CMake/Ninja/Emscripten versions,
+  checks the declared toolchain with `deno task toolchain:prepare -- --check`,
+  runs `scripts/resolve-python.sh` for the same interpreter the build will use,
+  caches `~/.cache/deno` under a key derived from `deno.lock`, and installs
+  dependencies with `deno install --frozen`. It then runs formatting, linting,
+  both typechecks, the Node dependency-boundary check and tests, Worker runtime
+  tests, toolchain discovery and contract conformance tests, the guarded
+  generator-only suites (`test:toolchain-config`, `test:generator`), and the
+  Vite, Wrangler and Node-exclusion suites. The strict contract gate is the
+  **last** step of this job, so a rejected contract cannot hide any of them.
 - **Build validation.** Runs `needs: validate` with `if: !cancelled()`: the
   dependency only orders the jobs, so this job runs whether the static job passed
   or failed. The workflow as a whole still fails when either job fails, and the
@@ -1341,6 +1357,21 @@ The workflow runs on two jobs:
   last, so the generated configuration is compared with build output present.
   Emscripten's interpreter is resolved inside the build, so no separate
   diagnostic step is duplicated.
+- **Authoritative toolchain (`ubuntu-24.04`).** A separate, **generator-only**
+  workflow ([`.github/workflows/authoritative-toolchain.yml`](.github/workflows/authoritative-toolchain.yml),
+  not shipped to products) runs on the same triggers, on the platform the
+  contract is recorded for. It installs the same pinned toolchain through mise
+  (the only installation mechanism), proves `EMSDK` is present and exported,
+  installs dependencies with `deno install --frozen`, then runs
+  `deno task toolchain:prepare -- --check` (declared toolchain versus installed
+  toolchain), `deno task check:contracts` against the committed lock, and
+  finally **verification by re-derivation**: it hashes the committed
+  `toolchain-contracts.json`, runs `deno task contract:refresh` on the
+  checked-out tree, and requires the hash to be unchanged. A difference prints
+  the diff, restores the file and fails the job. That refresh is never
+  committed — it exists to prove the record is reproducible on the authorised
+  platform, and a mismatch is an investigation, not an invitation to refresh
+  blindly. The job ends with `bash scripts/ci.sh build`.
 
 The raw template is statically checked because its placeholder is not a valid
 Worker name, which is why build validation happens in the throwaway copy. CI has
@@ -1352,10 +1383,10 @@ workflow runs the individual static steps and `scripts/ci.sh build`, rather than
 invoking `scripts/ci.sh all` itself, so a failing static gate cannot suppress the
 build job.
 
-While the committed contracts are bootstrap, both jobs end red by design: the
-static job at its gate, the build job at the same gate after every build check
-has run. Resolving that is the deferred generator development-state versus
-product-acceptance decision, not a workflow change.
+Both jobs end at the conformance gate. Because the committed lock records this
+repository's own facts, the gate passes while the environment matches it, and
+fails the run when a source change moved a contract without a refreshed lock —
+which is the review signal, not a workflow problem.
 
 ## Troubleshooting
 

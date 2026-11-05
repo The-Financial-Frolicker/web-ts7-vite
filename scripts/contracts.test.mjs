@@ -1,11 +1,11 @@
 /**
- * Tests for the two-phase contract architecture.
+ * Tests for the deterministic contract system.
  *
  * Everything here runs on synthetic fixtures: no workerd, no Vite, no installed
- * npm packages. The properties under test are the ones CI depends on — stable
- * fingerprints, strict provenance, refusal to approve uncertainty, refusal to
- * overwrite silently, and policy review that cannot be bypassed by a toolchain
- * change.
+ * npm packages (the last describe block reads the real repository read-only).
+ * The properties under test are the ones CI depends on — stable fingerprints,
+ * complete input coverage, deterministic refresh, read-only verification, and a
+ * report that distinguishes a missing contract from a changed one.
  */
 import assert from "./lib/assert.mjs";
 import { run } from "./lib/command.mjs";
@@ -13,59 +13,78 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
-  readdirSync,
   readFileSync,
   rmSync,
-  symlinkSync,
   writeFileSync,
 } from "./lib/fs.mjs";
 import os from "./lib/os.mjs";
 import path from "./lib/path.mjs";
 import { after, describe, it } from "./lib/test.mjs";
 
+import { describeLockChanges } from "./contracts/author-cli.mjs";
 import {
   canonicalJson,
   contractKey,
   fingerprintOf,
 } from "./contracts/canonical.mjs";
 import {
+  DEFAULT_VITE_BUILD_TARGET,
   readLibs,
+  readViteBuildTarget,
   readWranglerConfig,
   stripJsonc,
 } from "./contracts/config.mjs";
 import {
+  buildLock,
   deriveWorkerLibEdition,
   fingerprintInputs,
+  requireEmscripten,
+  SCOPE_LAUNCHER_PERMISSIONS,
   SCOPE_TYPESCRIPT_LIBRARIES,
   SCOPE_VITE_TARGET,
   SCOPE_WORKERD_RUNTIME,
+  SCOPES,
 } from "./contracts/discover.mjs";
-import { probeConfigSource, probeWorkerSource } from "./contracts/fixtures.mjs";
+import {
+  capabilitiesForEdition,
+  EDITIONS,
+  probeConfigSource,
+  probeWorkerSource,
+} from "./contracts/fixtures.mjs";
+import { contractInputs } from "./contracts/identity.mjs";
+import { describePath } from "./contracts/toolchain.mjs";
 import {
   describePermissionProfiles,
   normalisePermissionFlags,
 } from "./contracts/permissions.mjs";
 import {
-  CONTRACT_STATES,
-  isApproved,
-  unapprovedContracts,
+  CONTRACT_STATUSES,
+  SCHEMA_VERSION,
   unverifiedValues,
   validateDocument,
 } from "./contracts/schema.mjs";
-import { approveCandidate, buildPolicies } from "./contracts/approve.mjs";
+import {
+  CONTRACT_FILE,
+  loadDocument,
+  lockDigest,
+  summarise,
+  writeDocument,
+} from "./contracts/store.mjs";
+import {
+  buildConformanceReport,
+  clientEditionProblems,
+  declaredEdition,
+  denoProblems,
+  generatedConfigProblems,
+  summariseScope,
+  verifyContracts,
+} from "./contracts/verify.mjs";
 import {
   mapProbeOutcome,
   parseHttpResponse,
 } from "./contracts/workerd-probe.mjs";
-import {
-  clientEditionProblems,
-  declaredEdition,
-  describeUnapproved,
-  findContract,
-  generatedConfigProblems,
-  policyProblems,
-} from "./contracts/verify.mjs";
 
+const projectRoot = path.resolve(import.meta.dirname, "..");
 const temporaryRoots = [];
 
 after(() => {
@@ -89,104 +108,107 @@ function write(root, file, contents) {
   );
 }
 
-/** A minimal value entry with a chosen provenance. */
-function value(provenance, v = true) {
-  return { kind: "capability", value: v, provenance, evidence: "test fixture" };
+function value(provenance, entry = true) {
+  return { kind: "test", value: entry, provenance, evidence: "fixture" };
 }
 
-/** Lifecycle fields for an explicitly approved contract. */
-function approvedRecord(fingerprint) {
+/** A synthetic identity in the shape derivation consumes. */
+function identity(overrides = {}) {
   return {
-    state: "approved",
-    approved: {
-      by: "reviewer",
-      at: "2026-01-01T00:00:00.000Z",
-      reason: "test",
-      fingerprint,
+    platform: { key: "linux-x64-gnu" },
+    wrangler: {
+      compatibilityDate: "2026-10-30",
+      compatibilityFlags: [],
+      file: "wrangler.jsonc",
     },
-    bootstrap: null,
+    graph: { workerdVersion: "1.20261023.1" },
+    vite: {
+      manifest: { version: "8.3.5" },
+      buildTarget: DEFAULT_VITE_BUILD_TARGET,
+    },
+    typescript: {
+      manifest: { version: "7.0.2" },
+      clientLib: ["ES2023", "DOM"],
+      workerLib: ["ES2025"],
+    },
+    launchers: {
+      "vite-build": ["--allow-read", "--allow-write"],
+      "edge-verify": ["--allow-read", "--allow-net=127.0.0.1"],
+    },
+    ...overrides,
   };
 }
 
-/** A contract document with one approved contract per scope. */
-function makeDocument(overrides = {}) {
-  const runtimeValues = overrides.runtimeValues ?? {
-    "typescript.worker.libEdition": value("derived", "es2023"),
-    "runtime.compatibility.date": {
-      kind: "configuration",
-      value: "2026-10-30",
-      provenance: "authoritative",
-      evidence: "wrangler.jsonc",
-    },
-    "runtime.compatibility.flags": {
-      kind: "configuration",
-      value: [],
-      provenance: "authoritative",
-      evidence: "wrangler.jsonc",
-    },
-  };
-
-  const contracts = {
-    [contractKey(SCOPE_WORKERD_RUNTIME, "sha256:aaaa")]: {
-      scope: SCOPE_WORKERD_RUNTIME,
-      fingerprint: "sha256:aaaa",
-      fingerprintInputs: {
-        workerd: "1.0.0",
-        compatibilityDate: "2026-10-30",
-        compatibilityFlags: [],
-        platform: "linux-x64",
-      },
-      ...approvedRecord("sha256:aaaa"),
-      values: runtimeValues,
-    },
-    [contractKey(SCOPE_VITE_TARGET, "sha256:bbbb")]: {
-      scope: SCOPE_VITE_TARGET,
-      fingerprint: "sha256:bbbb",
-      fingerprintInputs: { vite: "1.0.0", platform: "linux-x64" },
-      ...approvedRecord("sha256:bbbb"),
-      values: { "vite.build.targets": value("observed", ["chrome120"]) },
-    },
-    [contractKey(SCOPE_TYPESCRIPT_LIBRARIES, "sha256:cccc")]: {
-      scope: SCOPE_TYPESCRIPT_LIBRARIES,
-      fingerprint: "sha256:cccc",
-      fingerprintInputs: { typescript: "1.0.0", platform: "linux-x64" },
-      ...approvedRecord("sha256:cccc"),
-      values: {
+/** Minimal valid values per scope. */
+function scopeValues(scope) {
+  switch (scope) {
+    case SCOPE_WORKERD_RUNTIME:
+      return {
+        "runtime.compatibility.date": {
+          kind: "configuration",
+          value: "2026-10-30",
+          provenance: "authoritative",
+          evidence: "wrangler.jsonc",
+        },
+        "runtime.compatibility.flags": {
+          kind: "configuration",
+          value: [],
+          provenance: "authoritative",
+          evidence: "wrangler.jsonc",
+        },
+        "typescript.worker.libEdition": value("derived", "es2025"),
+      };
+    case SCOPE_TYPESCRIPT_LIBRARIES:
+      return {
+        "typescript.clientLib": value("authoritative", ["ES2023", "DOM"]),
+        "typescript.workerLib": value("authoritative", ["ES2025"]),
         "typescript.editions": value("observed", [
           "es2022",
           "es2023",
-          "esnext",
+          "es2025",
         ]),
-        "typescript.libraries": value("observed", ["dom"]),
-      },
-    },
-  };
+      };
+    case SCOPE_LAUNCHER_PERMISSIONS:
+      return { "launcher.vite-build": value("derived", ["--allow-read"]) };
+    default:
+      return {
+        "vite.build.target": value("authoritative", DEFAULT_VITE_BUILD_TARGET),
+        "vite.build.targets": value("observed", ["chrome111"]),
+      };
+  }
+}
 
-  return {
-    schemaVersion: 1,
-    toolchain: {},
-    contracts,
-    policies: {
-      clientApiEdition: {
-        provenance: "declared",
-        value: "es2023",
-        rationale: "test",
-        decidedBy: "reviewer",
-        decidedAt: "2026-01-01T00:00:00.000Z",
-        reviewedAgainst: Object.keys(contracts),
-        checkedAgainst: ["tsconfig.json compilerOptions.lib"],
-      },
-      permissionProfiles: {
-        provenance: "declared",
-        value: { "vite-build": ["--allow-read"] },
-        rationale: "test",
-        decidedBy: "reviewer",
-        decidedAt: "2026-01-01T00:00:00.000Z",
-        reviewedAgainst: Object.keys(contracts),
-        checkedAgainst: ["scripts/vite-build.mjs buildViteArgs"],
-      },
-    },
-  };
+/** Build a lock from a synthetic identity. */
+function lockFor(who = identity(), values = {}) {
+  const merged = Object.fromEntries(
+    SCOPES.map((scope) => [scope, values[scope] ?? scopeValues(scope)]),
+  );
+  return buildLock({
+    identity: who,
+    toolchain: { deno: { version: Deno.version.deno } },
+    values: merged,
+  });
+}
+
+/** Identity with one field replaced, for drift tests. */
+function withInput(name, value) {
+  const base = identity();
+  if (name === "buildTarget") {
+    return identity({ vite: { ...base.vite, buildTarget: value } });
+  }
+  if (name === "clientLib") {
+    return identity({ typescript: { ...base.typescript, clientLib: value } });
+  }
+  if (name === "workerLib") {
+    return identity({ typescript: { ...base.typescript, workerLib: value } });
+  }
+  if (name === "launchers") return identity({ launchers: value });
+  if (name === "compatibilityDate") {
+    return identity({
+      wrangler: { ...base.wrangler, compatibilityDate: value },
+    });
+  }
+  throw new Error(`unknown input ${name}`);
 }
 
 describe("canonical serialisation", () => {
@@ -267,115 +289,180 @@ describe("JSONC configuration readers", () => {
     write(root, "wrangler.jsonc", '{ "name": "x" }');
     assert.throws(() => readWranglerConfig(root), /compatibility_date/);
   });
+
+  it("reads the declared Vite build target", () => {
+    const root = makeRoot();
+    write(
+      root,
+      "vite.config.ts",
+      'export default { build: { target: "chrome111" } };\n',
+    );
+    assert.equal(readViteBuildTarget(root), "chrome111");
+
+    write(
+      root,
+      "vite.config.ts",
+      'export default { build: { target: ["es2022", "chrome111"] } };\n',
+    );
+    assert.deepEqual(readViteBuildTarget(root), ["es2022", "chrome111"]);
+  });
+
+  it("records Vite's symbolic default and fails closed on expressions", () => {
+    const root = makeRoot();
+    write(
+      root,
+      "vite.config.ts",
+      "// target: 'not-a-declaration'\nexport default { build: {} };\n",
+    );
+    assert.equal(readViteBuildTarget(root), DEFAULT_VITE_BUILD_TARGET);
+
+    write(
+      root,
+      "vite.config.ts",
+      "export default { build: { target: browserTarget } };\n",
+    );
+    assert.throws(() => readViteBuildTarget(root), /must be a string literal/);
+
+    write(
+      root,
+      "vite.config.ts",
+      'export default { build: { target: "a" }, other: { target: "b" } };\n',
+    );
+    assert.throws(() => readViteBuildTarget(root), /more than once/);
+  });
 });
 
 describe("schema validation", () => {
-  it("accepts a well-formed document", () => {
-    validateDocument(makeDocument());
+  it("accepts a well-formed lock", async () => {
+    const document = await lockFor();
+    validateDocument(document);
+    assert.equal(document.schemaVersion, SCHEMA_VERSION);
+    assert.equal(SCHEMA_VERSION, 2);
   });
 
-  it("rejects an unknown provenance value", () => {
-    const document = makeDocument({
-      runtimeValues: { "typescript.worker.libEdition": value("guessed") },
-    });
+  it("rejects v1 lifecycle metadata and unknown fields", async () => {
+    const document = await lockFor();
+    const [key] = Object.keys(document.contracts);
+
+    for (const field of ["state", "approved", "bootstrap"]) {
+      const copy = structuredClone(document);
+      copy.contracts[key][field] = "approved";
+      assert.throws(() => validateDocument(copy), /v1 lifecycle metadata/);
+    }
+
+    const withPolicies = structuredClone(document);
+    withPolicies.policies = {};
+    assert.throws(
+      () => validateDocument(withPolicies),
+      /v1 lifecycle metadata/,
+    );
+
+    const extra = structuredClone(document);
+    extra.contracts[key].reviewedBy = "someone";
+    assert.throws(() => validateDocument(extra), /unknown field/);
+  });
+
+  it("rejects an unknown provenance value", async () => {
+    const document = await lockFor();
+    const contract = Object.values(document.contracts)[0];
+    contract.values["x.test"] = value("declared");
     assert.throws(() => validateDocument(document), /expected one of/);
   });
 
-  it("rejects a policy that discovery could have produced", () => {
-    const document = makeDocument();
-    document.policies.clientApiEdition.provenance = "observed";
-    assert.throws(
-      () => validateDocument(document),
-      /must have provenance "declared"/,
-    );
-  });
-
   it("lists unverified values", () => {
-    const contract = makeDocument({
-      runtimeValues: {
-        "a": value("observed"),
-        "b": value("unverified"),
-      },
-    }).contracts[contractKey(SCOPE_WORKERD_RUNTIME, "sha256:aaaa")];
-
+    const contract = {
+      values: { a: value("observed"), b: value("unverified") },
+    };
     assert.deepEqual(unverifiedValues(contract), ["b"]);
   });
 
-  it("rejects a document from a different schema version", () => {
-    const document = makeDocument();
-    document.schemaVersion = 99;
-    assert.throws(() => validateDocument(document), /schemaVersion/);
+  it("rejects a document from a different schema version", async () => {
+    const document = await lockFor();
+    document.schemaVersion = 1;
+    assert.throws(() => validateDocument(document), /contract:refresh/);
+  });
+
+  it("exposes exactly the three conformance statuses", () => {
+    assert.deepEqual([...CONTRACT_STATUSES], [
+      "recorded",
+      "drifted",
+      "unrecorded",
+    ]);
   });
 });
 
-describe("fingerprint inputs", () => {
-  const identity = {
-    platform: "linux-x64",
-    workerd: {
-      version: "1.2.3",
-      compatibilityDate: "2026-10-30",
-      compatibilityFlags: ["x"],
-    },
-    vite: { version: "8.0.0" },
-    typescript: { version: "7.0.2" },
-  };
+describe("fingerprint coverage", () => {
+  it("fingerprints every contract-relevant input", () => {
+    const mirror = contractInputs(identity());
 
-  it("includes only the inputs that can change that contract", () => {
     assert.deepEqual(
-      Object.keys(fingerprintInputs(SCOPE_WORKERD_RUNTIME, identity)).sort(),
+      Object.keys(fingerprintInputs(SCOPE_WORKERD_RUNTIME, mirror)).sort(),
       ["compatibilityDate", "compatibilityFlags", "platform", "workerd"],
     );
     assert.deepEqual(
-      Object.keys(fingerprintInputs(SCOPE_VITE_TARGET, identity)).sort(),
-      ["platform", "vite"],
+      Object.keys(fingerprintInputs(SCOPE_VITE_TARGET, mirror)).sort(),
+      ["buildTarget", "platform", "vite"],
     );
     assert.deepEqual(
-      Object.keys(fingerprintInputs(SCOPE_TYPESCRIPT_LIBRARIES, identity))
+      Object.keys(fingerprintInputs(SCOPE_TYPESCRIPT_LIBRARIES, mirror))
         .sort(),
-      ["platform", "typescript"],
+      ["clientLib", "platform", "typescript", "workerLib"],
+    );
+    assert.deepEqual(
+      Object.keys(fingerprintInputs(SCOPE_LAUNCHER_PERMISSIONS, mirror))
+        .sort(),
+      ["launchers", "platform"],
     );
   });
 
-  it("does not invalidate a runtime contract when only Vite changes", async () => {
-    const before = await fingerprintOf(
-      fingerprintInputs(SCOPE_WORKERD_RUNTIME, identity),
-    );
-    const after = await fingerprintOf(
-      fingerprintInputs(SCOPE_WORKERD_RUNTIME, {
-        ...identity,
-        vite: { version: "9.0.0" },
-      }),
-    );
+  it("changes only the scope a changed input belongs to", async () => {
+    const base = await lockFor();
 
-    assert.equal(before, after);
+    for (
+      const [input, scope] of [
+        ["buildTarget", SCOPE_VITE_TARGET],
+        ["clientLib", SCOPE_TYPESCRIPT_LIBRARIES],
+        ["workerLib", SCOPE_TYPESCRIPT_LIBRARIES],
+        ["compatibilityDate", SCOPE_WORKERD_RUNTIME],
+        ["launchers", SCOPE_LAUNCHER_PERMISSIONS],
+      ]
+    ) {
+      const changed = withInput(
+        input,
+        input === "compatibilityDate" ? "2026-11-01" : { changed: true },
+      );
+      const report = await buildConformanceReport({
+        document: base,
+        identity: changed,
+      });
+
+      const statuses = Object.fromEntries(
+        report.scopes.map((entry) => [entry.scope, entry.status]),
+      );
+      for (const [name, status] of Object.entries(statuses)) {
+        assert.equal(
+          status,
+          name === scope ? "drifted" : "recorded",
+          `${input} must affect only ${scope}: ${name} is ${status}`,
+        );
+      }
+    }
   });
 });
 
 describe("worker edition derivation", () => {
-  const editionIds = [
-    "es2015.core",
-    "es2016.array.includes",
-    "es2017.object.entries",
-    "es2018.promise.finally",
-    "es2019.object.fromEntries",
-    "es2020.bigint",
-    "es2021.promise.any",
-    "es2022.object.hasOwn",
-    "es2023.array.toSorted",
-    "es2024.object.groupBy",
-    "es2025.set.union",
-  ];
-
-  function results(outcome = "supported", overrides = {}) {
-    const entries = {};
-    for (const id of editionIds) {
-      entries[id] = { outcome: overrides[id] ?? outcome };
+  function results(defaultOutcome, overrides = {}) {
+    const map = {};
+    for (const edition of EDITIONS) {
+      for (const entry of capabilitiesForEdition(edition)) {
+        map[entry.id] = { outcome: overrides[entry.id] ?? defaultOutcome };
+      }
     }
-    return entries;
+    return map;
   }
 
   it("claims the newest edition when every probe is supported", () => {
-    const derived = deriveWorkerLibEdition(results());
+    const derived = deriveWorkerLibEdition(results("supported"));
 
     assert.equal(derived.edition, "es2025");
     assert.equal(derived.provenance, "derived");
@@ -387,7 +474,6 @@ describe("worker edition derivation", () => {
     );
 
     assert.equal(derived.edition, "es2023");
-    assert.equal(derived.provenance, "derived");
     assert.match(derived.evidence, /es2024\.object\.groupBy unsupported/);
   });
 
@@ -473,7 +559,7 @@ describe("probe plumbing", () => {
   });
 });
 
-describe("permission policy normalisation", () => {
+describe("declared permission profiles", () => {
   const root = "/home/someone/project";
 
   it("replaces machine-specific paths with stable placeholders", () => {
@@ -494,21 +580,14 @@ describe("permission policy normalisation", () => {
     ]);
   });
 
-  it("produces the same policy on a different machine", () => {
-    const other = "/opt/checkout";
-    const first = normalisePermissionFlags(
-      ["--allow-ffi=/a/b/rolldown.node"],
-      root,
-    );
-    const second = normalisePermissionFlags(
-      ["--allow-ffi=/x/y/rolldown.node"],
-      other,
-    );
+  it("produces the same profiles on a different machine", () => {
+    const first = describePermissionProfiles(root);
+    const second = describePermissionProfiles("/opt/checkout");
 
-    assert.deepEqual(first, second);
+    assert.equal(canonicalJson(first), canonicalJson(second));
   });
 
-  it("describes both named Vite profiles", () => {
+  it("records every launcher, including the CI and edge profiles", () => {
     const profiles = describePermissionProfiles(root);
 
     assert.deepEqual(profiles["vite-build"], [
@@ -520,160 +599,223 @@ describe("permission policy normalisation", () => {
       "--allow-ffi=<lightningcss>",
     ]);
     assert.deepEqual(profiles["vite-build-ci-runner"], ["--allow-all"]);
-
-    // Both launchers are still recorded, so a change to either is a policy
-    // change rather than an unnoticed edit.
     assert.ok(profiles["wrangler-types"].length > 0);
     assert.ok(profiles["wrangler-dry-run"].length > 0);
+
+    // The edge verifier's requirement is declared before the launcher exists, so
+    // the profile cannot arrive unreviewed later. It is scoped to what the
+    // verifier actually does: read the authorised criteria, write evidence,
+    // speak to Chrome over loopback, and start that one executable.
+    assert.deepEqual(profiles["edge-verify"], [
+      "--allow-read=<root>/acceptance",
+      "--allow-write=<root>/artifacts",
+      "--allow-net=127.0.0.1",
+      "--allow-run=<chrome>",
+    ]);
+
+    // Broad grants the verifier does not need: Chrome's own traffic to the
+    // deployed Worker is outside Deno's sandbox, and a child process inherits
+    // the environment without a Deno grant.
+    for (
+      const forbidden of [
+        "--allow-env",
+        "--allow-sys",
+        "--allow-ffi",
+        "--allow-all",
+        "--allow-read",
+        "--allow-write",
+        "--allow-net",
+        "--allow-run",
+      ]
+    ) {
+      assert.equal(
+        profiles["edge-verify"].includes(forbidden),
+        false,
+        `edge-verify must not declare ${forbidden}`,
+      );
+    }
+  });
+
+  it("is fingerprinted deterministically and independently of the host", async () => {
+    const mirror = contractInputs(
+      identity({ launchers: describePermissionProfiles(root) }),
+    );
+    const other = contractInputs(
+      identity({ launchers: describePermissionProfiles("/opt/checkout") }),
+    );
+
+    assert.equal(
+      await fingerprintOf(
+        fingerprintInputs(SCOPE_LAUNCHER_PERMISSIONS, mirror),
+      ),
+      await fingerprintOf(
+        fingerprintInputs(SCOPE_LAUNCHER_PERMISSIONS, other),
+      ),
+    );
   });
 });
 
-describe("approval", () => {
-  const runtimeKey = contractKey(SCOPE_WORKERD_RUNTIME, "sha256:aaaa");
+describe("refresh", () => {
+  it("builds a v2 lock with one contract per scope", async () => {
+    const document = await lockFor();
+    validateDocument(document);
 
-  function candidate() {
-    const document = makeDocument();
-    document.policies = {};
-    for (const contract of Object.values(document.contracts)) {
-      contract.state = "candidate";
-      contract.approved = null;
-      contract.bootstrap = null;
+    assert.equal(document.schemaVersion, 2);
+    assert.equal(Object.keys(document.contracts).length, SCOPES.length);
+    for (const scope of SCOPES) {
+      const contract = Object.values(document.contracts).find((entry) =>
+        entry.scope === scope
+      );
+      assert.equal(
+        contractKey(scope, contract.fingerprint) in document.contracts,
+        true,
+      );
     }
-    return document;
-  }
-
-  const base = {
-    by: "reviewer",
-    reason: "reviewed",
-    at: "2026-02-02T00:00:00.000Z",
-    root: "/tmp",
-  };
-
-  it("refuses a candidate containing an unverified value", () => {
-    const document = candidate();
-    document.contracts[runtimeKey].values["runtime.probe"] = value(
-      "unverified",
-    );
-
-    assert.throws(
-      () =>
-        approveCandidate({
-          ...base,
-          existing: makeDocument(),
-          candidate: document,
-          replace: true,
-          clientApiEdition: "es2023",
-        }),
-      /unverified values/,
-    );
   });
 
-  it("requires a named approver and a stated reason", () => {
-    assert.throws(
-      () =>
-        approveCandidate({
-          ...base,
-          by: "  ",
-          existing: makeDocument(),
-          candidate: candidate(),
-          replace: true,
-        }),
-      /named approver/,
-    );
-    assert.throws(
-      () =>
-        approveCandidate({
-          ...base,
-          reason: "",
-          existing: makeDocument(),
-          candidate: candidate(),
-          replace: true,
-        }),
-      /stated reason/,
-    );
+  it("is deterministic for the same authorised configuration", async () => {
+    const first = await lockFor();
+    const second = await lockFor();
+
+    assert.equal(canonicalJson(first), canonicalJson(second));
+    assert.equal(await lockDigest(first), await lockDigest(second));
+
+    // No timestamps, run identifiers or approval metadata: the lock is facts.
+    const serialised = canonicalJson(first);
+    assert.doesNotMatch(serialised, /"approved"|"bootstrap"|"state"|"at":/);
+    assert.doesNotMatch(serialised, new RegExp(os.tmpdir()));
   });
 
-  it("refuses to overwrite an approved contract without --replace", () => {
-    assert.throws(
-      () =>
-        approveCandidate({
-          ...base,
-          existing: makeDocument(),
-          candidate: candidate(),
-          clientApiEdition: "es2023",
-        }),
-      /already approved/,
-    );
+  it("writes canonical bytes that reload identically", async () => {
+    const root = makeRoot("refresh-");
+    const document = await lockFor();
+
+    const target = writeDocument(root, document);
+    const firstBytes = readFileSync(target, "utf8");
+    const reloaded = loadDocument(root);
+
+    assert.equal(canonicalJson(reloaded), canonicalJson(document));
+    assert.equal(await lockDigest(reloaded), await lockDigest(document));
+
+    writeDocument(root, reloaded);
+    assert.equal(readFileSync(target, "utf8"), firstBytes);
   });
 
-  it("carries policies forward verbatim when not reaffirming", () => {
-    const existing = makeDocument();
-    const approved = approveCandidate({
-      ...base,
-      existing,
-      candidate: candidate(),
-      replace: true,
-    });
-
-    assert.deepEqual(approved.policies, existing.policies);
-  });
-
-  it("rebuilds policy review links when reaffirming", () => {
-    const document = candidate();
-    const approved = approveCandidate({
-      ...base,
-      existing: makeDocument(),
-      candidate: document,
-      replace: true,
-      reaffirm: true,
-      clientApiEdition: "es2022",
-    });
-
-    assert.equal(approved.policies.clientApiEdition.value, "es2022");
-    assert.deepEqual(
-      [...approved.policies.clientApiEdition.reviewedAgainst].sort(),
-      [
-        contractKey(SCOPE_TYPESCRIPT_LIBRARIES, "sha256:cccc"),
-        contractKey(SCOPE_VITE_TARGET, "sha256:bbbb"),
-      ].sort(),
-    );
-    assert.deepEqual(
-      approved.policies.permissionProfiles.reviewedAgainst,
-      [contractKey(SCOPE_WORKERD_RUNTIME, "sha256:aaaa")],
-    );
-  });
-
-  it("requires an explicit declared edition when policies are created", () => {
-    assert.throws(
-      () =>
-        buildPolicies({
-          contracts: candidate().contracts,
-          by: "reviewer",
-          at: base.at,
-          clientApiEdition: undefined,
-          root: "/tmp",
-        }),
-      /declared client API edition is required/,
-    );
-  });
-
-  it("keeps every pre-existing contract when adding a new fingerprint", () => {
-    const existing = makeDocument();
-    const document = candidate();
-    delete document.contracts[runtimeKey];
-
-    const approved = approveCandidate({
-      ...base,
-      existing,
-      candidate: document,
-      replace: true,
-    });
+  it("reports what it recorded relative to the previous lock", async () => {
+    const previous = await lockFor();
+    const unchanged = describeLockChanges(previous, await lockFor());
 
     assert.deepEqual(
-      Object.keys(approved.contracts).sort(),
-      Object.keys(existing.contracts).sort(),
+      unchanged.map((change) => change.kind),
+      SCOPES.map(() => "unchanged"),
     );
-    assert.deepEqual(approved.policies, existing.policies);
+
+    // A value-only change is not a fingerprint change.
+    const values = await lockFor(identity(), {
+      [SCOPE_WORKERD_RUNTIME]: {
+        ...scopeValues(SCOPE_WORKERD_RUNTIME),
+        "runtime.capability.es2025.set.union": value("observed", "supported"),
+      },
+    });
+    const valueChanges = describeLockChanges(previous, values);
+    const runtime = valueChanges.find((change) =>
+      change.scope === SCOPE_WORKERD_RUNTIME
+    );
+    assert.equal(runtime.kind, "values");
+    assert.deepEqual(runtime.valueChanges, [
+      "runtime.capability.es2025.set.union",
+    ]);
+
+    // A changed input changes the fingerprint of exactly one scope.
+    const drifted = await lockFor(withInput("buildTarget", "chrome111"));
+    const fingerprintChanges = describeLockChanges(previous, drifted);
+    assert.deepEqual(
+      fingerprintChanges.filter((change) => change.kind === "fingerprint")
+        .map((change) => change.scope),
+      [SCOPE_VITE_TARGET],
+    );
+
+    // A scope that disappears from a derived lock is reported, not ignored.
+    const removed = describeLockChanges(previous, {
+      schemaVersion: 2,
+      toolchain: {},
+      contracts: Object.fromEntries(
+        Object.entries(previous.contracts).filter(([, contract]) =>
+          contract.scope !== SCOPE_VITE_TARGET
+        ),
+      ),
+    });
+    assert.equal(
+      removed.find((change) => change.scope === SCOPE_VITE_TARGET).kind,
+      "removed",
+    );
+  });
+});
+
+describe("conformance", () => {
+  it("passes when the derivation matches the lock", async () => {
+    const report = await buildConformanceReport({
+      document: await lockFor(),
+      identity: identity(),
+      digest: "sha256:lock",
+    });
+
+    assert.equal(report.verdict, "conformant");
+    assert.deepEqual(report.problems, []);
+    assert.equal(report.schemaVersion, 2);
+    assert.equal(report.lockDigest, "sha256:lock");
+    assert.equal(report.scopes.length, SCOPES.length);
+  });
+
+  it("fails on drift and names the changed inputs", async () => {
+    const report = await buildConformanceReport({
+      document: await lockFor(),
+      identity: withInput("clientLib", ["ES2025", "DOM"]),
+    });
+
+    assert.equal(report.verdict, "drifted");
+    const entry = report.scopes.find((scope) =>
+      scope.scope === SCOPE_TYPESCRIPT_LIBRARIES
+    );
+    assert.equal(entry.status, "drifted");
+    assert.deepEqual(entry.changedInputs.map((change) => change.name), [
+      "clientLib",
+    ]);
+    assert.match(report.problems.join(" "), /has drifted/);
+  });
+
+  it("distinguishes an unrecorded scope from a drifted one", async () => {
+    const document = await lockFor();
+    for (const [key, contract] of Object.entries(document.contracts)) {
+      if (contract.scope === SCOPE_VITE_TARGET) delete document.contracts[key];
+    }
+
+    const report = await buildConformanceReport({
+      document,
+      identity: identity(),
+    });
+
+    const entry = report.scopes.find((scope) =>
+      scope.scope === SCOPE_VITE_TARGET
+    );
+    assert.equal(entry.status, "unrecorded");
+    assert.equal(entry.recordedKey, null);
+    assert.equal(entry.recordedFingerprint, null);
+    assert.match(report.problems.join(" "), /is unrecorded/);
+  });
+
+  it("never rewrites the lock, even when verification fails", async () => {
+    const root = makeRoot("conformance-");
+    const target = writeDocument(root, await lockFor());
+    const before = readFileSync(target, "utf8");
+
+    const report = await buildConformanceReport({
+      document: loadDocument(root),
+      identity: withInput("compatibilityDate", "2026-11-01"),
+    });
+
+    assert.equal(report.verdict, "drifted");
+    assert.equal(readFileSync(target, "utf8"), before);
   });
 });
 
@@ -684,11 +826,35 @@ describe("verification helpers", () => {
     assert.equal(declaredEdition(["DOM"]), null);
   });
 
-  it("compares the generated configuration with the contract", () => {
-    const root = makeRoot();
-    const runtime = makeDocument().contracts[
-      contractKey(SCOPE_WORKERD_RUNTIME, "sha256:aaaa")
-    ];
+  it("requires the declared client edition to exist in the compiler", () => {
+    assert.deepEqual(clientEditionProblems("es2023", ["es2022", "es2023"]), []);
+    assert.match(
+      clientEditionProblems("es2030", ["es2023"]).join(" "),
+      /does not provide that edition/,
+    );
+    assert.deepEqual(clientEditionProblems(null, ["es2023"]), []);
+    assert.deepEqual(clientEditionProblems("es2023", undefined), []);
+  });
+
+  it("summarises a scope for humans", () => {
+    const line = summariseScope({
+      scope: SCOPE_WORKERD_RUNTIME,
+      status: "drifted",
+      recordedFingerprint: `sha256:${"a".repeat(64)}`,
+      derivedFingerprint: `sha256:${"b".repeat(64)}`,
+    });
+
+    assert.match(line, /workerd-runtime drifted/);
+    assert.match(line, /recorded=aaaaaaaaaaaa/);
+    assert.match(line, /derived=bbbbbbbbbbbb/);
+  });
+
+  it("compares the generated configuration with the recorded values", async () => {
+    const root = makeRoot("generated-");
+    const document = await lockFor();
+    const runtime = Object.values(document.contracts).find((contract) =>
+      contract.scope === SCOPE_WORKERD_RUNTIME
+    );
 
     assert.deepEqual(generatedConfigProblems(root, runtime), []);
 
@@ -696,390 +862,241 @@ describe("verification helpers", () => {
       compatibility_date: "2026-01-01",
       compatibility_flags: [],
     });
-    const problems = generatedConfigProblems(root, runtime);
-    assert.equal(problems.length, 1);
-    assert.match(problems[0], /compatibility_date/);
-  });
 
-  it("flags a policy that was reviewed against a different contract", () => {
-    const document = makeDocument();
-    document.policies.clientApiEdition.reviewedAgainst = [
-      "workerd-runtime@sha256:dead",
-    ];
-
-    const problems = policyProblems(document, {
-      [SCOPE_WORKERD_RUNTIME]: {
-        key: contractKey(SCOPE_WORKERD_RUNTIME, "sha256:aaaa"),
-      },
-      [SCOPE_VITE_TARGET]: {
-        key: contractKey(SCOPE_VITE_TARGET, "sha256:bbbb"),
-      },
-      [SCOPE_TYPESCRIPT_LIBRARIES]: {
-        key: contractKey(SCOPE_TYPESCRIPT_LIBRARIES, "sha256:cccc"),
-      },
-    }, "/tmp");
-
-    assert.match(problems.join(" "), /not the current contract/);
-  });
-
-  it("flags a permission profile that drifted from the approved policy", () => {
-    const document = makeDocument();
-    const problems = policyProblems(
-      document,
-      {
-        [SCOPE_WORKERD_RUNTIME]: {
-          key: contractKey(SCOPE_WORKERD_RUNTIME, "sha256:aaaa"),
-        },
-      },
-      "/tmp",
+    assert.match(
+      generatedConfigProblems(root, runtime).join(" "),
+      /compatibility_date/,
     );
-
-    assert.match(problems.join(" "), /permission profiles declared by scripts/);
   });
 });
 
-describe("approval lifecycle", () => {
-  const runtimeKey = contractKey(SCOPE_WORKERD_RUNTIME, "sha256:aaaa");
-
-  it("exposes exactly three lifecycle states", () => {
-    assert.deepEqual([...CONTRACT_STATES], [
-      "candidate",
-      "bootstrap",
-      "approved",
-    ]);
-  });
-
-  it("rejects a bootstrap contract as authoritatively approved", () => {
-    const document = makeDocument();
-    const contract = document.contracts[runtimeKey];
-    contract.state = "bootstrap";
-    contract.approved = null;
-    contract.bootstrap = {
-      at: "2026-01-01T00:00:00.000Z",
-      reason: "provisional",
-    };
-
-    assert.equal(isApproved(contract), false);
-    assert.deepEqual(unapprovedContracts(document), [runtimeKey]);
-    assert.match(
-      describeUnapproved(runtimeKey, contract),
-      /bootstrap baseline/,
-    );
-    assert.match(
-      describeUnapproved(runtimeKey, contract),
-      /human must approve/,
-    );
-  });
-
-  it("rejects a bootstrap contract that still claims an approver", () => {
-    const document = makeDocument();
-    const contract = document.contracts[runtimeKey];
-    contract.state = "bootstrap";
-
+describe("refresh preconditions", () => {
+  it("requires the authorised Emscripten SDK", () => {
+    const missing = new Map();
     assert.throws(
-      () => validateDocument(document),
-      /only an explicit approval may record an approver/,
+      () => requireEmscripten(missing),
+      /EMSDK is not set/,
     );
-  });
 
-  it("rejects a candidate contract as approved", () => {
-    const document = makeDocument();
-    const contract = document.contracts[runtimeKey];
-    contract.state = "candidate";
-    contract.approved = null;
-
-    assert.equal(isApproved(contract), false);
-    assert.match(
-      describeUnapproved(runtimeKey, contract),
-      /unapproved candidate/,
-    );
-    validateDocument(document);
-  });
-
-  it("accepts an approval bound to the contract's own fingerprint", () => {
-    const document = makeDocument();
-    validateDocument(document);
-    assert.equal(isApproved(document.contracts[runtimeKey]), true);
-    assert.deepEqual(unapprovedContracts(document), []);
-  });
-
-  it("rejects an approval copied from another fingerprint", () => {
-    const document = makeDocument();
-    document.contracts[runtimeKey].approved.fingerprint = "sha256:deadbeef";
-
-    assert.equal(isApproved(document.contracts[runtimeKey]), false);
+    const notADirectory = (target) => ({ isDirectory: false, target });
     assert.throws(
-      () => validateDocument(document),
-      /an approval is bound to one fingerprint/,
+      () =>
+        requireEmscripten(new Map([["EMSDK", "/opt/emsdk"]]), notADirectory),
+      /not a readable SDK directory/,
     );
-  });
 
-  it("rejects an approval without an approver or a reason", () => {
-    for (const field of ["by", "reason"]) {
-      const document = makeDocument();
-      document.contracts[runtimeKey].approved[field] = "";
-
-      assert.throws(
-        () => validateDocument(document),
-        new RegExp(`approved\\.${field} must be a non-empty string`),
-      );
-    }
-  });
-
-  it("cannot be manufactured by discovery: approval is a separate act", () => {
-    const discovered = makeDocument();
-    for (const contract of Object.values(discovered.contracts)) {
-      contract.state = "candidate";
-      contract.approved = null;
-      contract.bootstrap = null;
-    }
-    discovered.policies = {};
-
-    // Discovery output is a valid document, but never an approved one.
-    validateDocument(discovered);
-    assert.equal(unapprovedContracts(discovered).length, 3);
-
-    const approved = approveCandidate({
-      existing: discovered,
-      candidate: discovered,
-      by: "reviewer",
-      reason: "reviewed the evidence",
-      at: "2026-02-02T00:00:00.000Z",
-      clientApiEdition: "es2023",
-      root: "/tmp",
-    });
-
-    for (const contract of Object.values(approved.contracts)) {
-      assert.equal(contract.state, "approved");
-      assert.equal(contract.approved.fingerprint, contract.fingerprint);
-      assert.equal(contract.approved.by, "reviewer");
-    }
-    assert.equal(unapprovedContracts(approved).length, 0);
-  });
-
-  it("forces reaffirmation when promoting a bootstrap baseline", () => {
-    const existing = makeDocument();
-    for (const contract of Object.values(existing.contracts)) {
-      contract.state = "bootstrap";
-      contract.approved = null;
-      contract.bootstrap = {
-        at: "2026-01-01T00:00:00.000Z",
-        reason: "provisional",
-      };
-    }
-    for (const policy of Object.values(existing.policies)) {
-      policy.decidedBy = "unrecorded (bootstrap)";
-    }
-
-    const approved = approveCandidate({
-      existing,
-      candidate: makeDocument(),
-      by: "actual-human",
-      reason: "promote provisional baseline",
-      at: "2026-02-02T00:00:00.000Z",
-      clientApiEdition: "es2023",
-      root: "/tmp",
-    });
-
-    assert.equal(approved.policies.clientApiEdition.decidedBy, "actual-human");
+    const ok = (target) => ({ isDirectory: true, target });
     assert.equal(
-      approved.policies.permissionProfiles.decidedBy,
-      "actual-human",
+      requireEmscripten(new Map([["EMSDK", "/opt/emsdk"]]), ok),
+      "/opt/emsdk",
     );
   });
 });
 
-describe("contract lookup and project boundary", () => {
-  const projectRoot = path.resolve(import.meta.dirname, "..");
+describe("recorded interpreter", () => {
+  it("passes when the running Deno is the recorded one", async () => {
+    const document = await lockFor();
+    assert.deepEqual(denoProblems(document), []);
+  });
 
-  function absoluteStrings(value, where, offenders) {
-    if (typeof value === "string") {
-      if (value.startsWith("/")) offenders.push(`${where} = ${value}`);
-      return;
-    }
-    if (Array.isArray(value)) {
-      value.forEach((entry, index) =>
-        absoluteStrings(entry, `${where}[${index}]`, offenders)
+  it("fails when a different Deno runs, naming both versions", async () => {
+    const document = await lockFor();
+    const problems = denoProblems(document, "1.0.0");
+
+    assert.equal(problems.length, 1);
+    assert.match(problems[0], /records Deno/);
+    assert.match(problems[0], /1\.0\.0/);
+    assert.match(problems[0], /contract:refresh/);
+  });
+
+  it("fails closed when the lock records no Deno version", async () => {
+    const document = await lockFor();
+    delete document.toolchain.deno;
+
+    assert.match(denoProblems(document).join(" "), /records no Deno version/);
+  });
+
+  it("keeps provenance out of every conformance fingerprint", async () => {
+    const who = identity();
+    const withProvenance = await lockFor();
+    const other = await buildLock({
+      identity: who,
+      toolchain: {
+        deno: { version: "0.0.0-other-machine" },
+        emscripten: { sdkVersion: { value: "0.0.0", available: false } },
+      },
+      values: Object.fromEntries(
+        SCOPES.map((scope) => [scope, scopeValues(scope)]),
+      ),
+    });
+
+    // The provenance block is recorded, not fingerprinted: the same authorised
+    // environment yields the same contracts on any machine that records them.
+    for (const scope of SCOPES) {
+      const left = Object.values(withProvenance.contracts).find((contract) =>
+        contract.scope === scope
       );
-      return;
+      const right = Object.values(other.contracts).find((contract) =>
+        contract.scope === scope
+      );
+      assert.equal(left.fingerprint, right.fingerprint, scope);
     }
-    if (value !== null && typeof value === "object") {
-      for (const [key, entry] of Object.entries(value)) {
-        absoluteStrings(entry, `${where}.${key}`, offenders);
+
+    // …which is precisely why the interpreter needs its own explicit check.
+    assert.match(denoProblems(other).join(" "), /records Deno 0\.0\.0-other/);
+  });
+});
+
+describe("committed lock", () => {
+  const lock = JSON.parse(
+    readFileSync(path.join(projectRoot, CONTRACT_FILE), "utf8"),
+  );
+
+  it("is a v2 lock with no approval metadata", () => {
+    validateDocument(lock);
+    assert.equal(lock.schemaVersion, 2);
+    assert.equal("policies" in lock, false);
+
+    for (const contract of Object.values(lock.contracts)) {
+      for (const field of ["state", "approved", "bootstrap"]) {
+        assert.equal(field in contract, false, `${field} must be absent`);
       }
     }
-  }
-
-  it("distinguishes a stale contract from an absent one", async () => {
-    const document = makeDocument();
-    const inputs = {
-      workerd: {
-        version: "9.9.9",
-        compatibilityDate: "2026-10-30",
-        compatibilityFlags: [],
-      },
-      platform: "linux-x64",
-    };
-
-    let stale = "";
-    try {
-      await findContract(document, SCOPE_WORKERD_RUNTIME, inputs);
-    } catch (error) {
-      stale = error.message;
-    }
-    assert.match(stale, /contract is stale/);
-    assert.match(stale, /local discovery and approval cycle/);
-
-    delete document.contracts[contractKey(SCOPE_VITE_TARGET, "sha256:bbbb")];
-    let absent = "";
-    try {
-      await findContract(document, SCOPE_VITE_TARGET, {
-        vite: { version: "1.0.0" },
-        platform: "linux-x64",
-      });
-    } catch (error) {
-      absent = error.message;
-    }
-    assert.match(absent, /no approved contract for scope vite-syntax-target/);
   });
 
-  it("requires the declared client edition to exist in the compiler contract", () => {
-    assert.deepEqual(
-      clientEditionProblems({ value: "es2023" }, ["es2022", "es2023"]),
-      [],
+  it("records every scope exactly once", () => {
+    const scopes = Object.values(lock.contracts).map((contract) =>
+      contract.scope
     );
-    assert.match(
-      clientEditionProblems({ value: "es2030" }, ["es2023"]).join(" "),
-      /does not provide that edition/,
-    );
-    assert.deepEqual(clientEditionProblems(undefined, ["es2023"]), []);
-    assert.deepEqual(clientEditionProblems({ value: "es2023" }, undefined), []);
+    assert.deepEqual([...scopes].sort(), [...SCOPES].sort());
+    assert.equal(new Set(scopes).size, scopes.length);
   });
 
-  // The approved artefact is committed and read in every clone, so a path from
-  // the machine that authored it would make it machine-specific.
-  it("commits an artefact with no machine-specific absolute paths", () => {
-    const document = JSON.parse(
-      readFileSync(path.join(projectRoot, "toolchain-contracts.json"), "utf8"),
-    );
+  it("contains no machine-specific absolute or escaping path", () => {
     const offenders = [];
-    absoluteStrings(document, "document", offenders);
+    (function scan(entry, where) {
+      if (typeof entry === "string") {
+        if (entry.startsWith("/")) offenders.push(`${where} = ${entry}`);
+        if (entry.split("/").includes("..")) {
+          offenders.push(`${where} escapes the project root: ${entry}`);
+        }
+        return;
+      }
+      if (entry === null || typeof entry !== "object") return;
+      for (const [key, child] of Object.entries(entry)) {
+        scan(child, `${where}.${key}`);
+      }
+    })(lock, "lock");
 
-    assert.deepEqual(
-      offenders,
-      [],
-      `absolute paths in the artefact: ${offenders.join("; ")}`,
-    );
+    assert.deepEqual(offenders, [], offenders.join("; "));
   });
 
-  // The template is initialised in place, so the only generator-local state is
-  // the discovery scratch directory; it must never become project content.
-  it("keeps local discovery state out of the project", () => {
-    const ignore = readFileSync(path.join(projectRoot, ".gitignore"), "utf8");
-    assert.match(ignore, /^\/\.contracts\/$/m);
+  it("describes external artefact locations without leaking a layout", () => {
+    const root = "/home/someone/project";
+
+    assert.equal(
+      describePath(root, `${root}/node_modules/.deno/vite@1/node_modules/vite`),
+      "node_modules/.deno/vite@1/node_modules/vite",
+    );
+    // A shared store or a symlinked node_modules resolves outside the project.
+    assert.equal(
+      describePath(
+        root,
+        "/opt/shared/deno/node_modules/.deno/vite@1/node_modules/vite",
+      ),
+      "<external>/vite",
+    );
+    assert.equal(describePath(root, root), ".");
+  });
+
+  it("summarises one entry per scope", () => {
+    const rows = summarise(lock);
+    assert.equal(rows.length, SCOPES.length);
+    for (const row of rows) {
+      assert.equal(typeof row.fingerprint, "string");
+      assert.ok(row.values > 0);
+    }
   });
 });
 
-describe("discovery entry point wiring", () => {
-  const projectRoot = path.resolve(import.meta.dirname, "..");
-  const discoverScript = path.join(
+describe("refresh entry point wiring", () => {
+  const refreshScript = path.join(
     projectRoot,
     "scripts",
-    "contract-discover.sh",
+    "contract-refresh.sh",
   );
-  const hasDependencies = existsSync(
-    path.join(projectRoot, "node_modules"),
-  );
+  const hasDependencies = existsSync(path.join(projectRoot, "node_modules"));
 
-  /** Run the real shell entry point in `root`, exactly as the task does. */
-  function runDiscover(root, args) {
-    return run("/bin/bash", {
-      args: [path.join(root, "scripts", "contract-discover.sh"), ...args],
-      cwd: root,
+  it("targets the generator-only authoring CLI", () => {
+    const script = readFileSync(refreshScript, "utf8");
+
+    assert.match(script, /scripts\/contracts\/author-cli\.mjs refresh/);
+    assert.match(script, /scripts\/contracts\/author-cli\.mjs workerd-path/);
+    assert.doesNotMatch(script, /scripts\/contracts\/cli\.mjs/);
+
+    // Only the generator CLI defines `refresh`; the product CLI must not.
+    assert.match(
+      readFileSync(
+        path.join(projectRoot, "scripts/contracts/author-cli.mjs"),
+        "utf8",
+      ),
+      /command === "refresh"/,
+    );
+    assert.doesNotMatch(
+      readFileSync(path.join(projectRoot, "scripts/contracts/cli.mjs"), "utf8"),
+      /command === "refresh"|case "refresh"/,
+    );
+  });
+
+  it("is the only writer of the lock", () => {
+    const script = readFileSync(refreshScript, "utf8");
+    assert.match(
+      script,
+      /--allow-write="\$PROJECT_ROOT\/toolchain-contracts\.json/,
+    );
+
+    // Verification keeps the narrow read-only profile: it cannot repair drift.
+    const verifyScript = readFileSync(
+      path.join(projectRoot, "scripts/check-contracts.sh"),
+      "utf8",
+    );
+    assert.doesNotMatch(verifyScript, /--allow-write/);
+  });
+
+  it("resolves the runtime without deriving anything", {
+    skip: !hasDependencies,
+  }, () => {
+    const result = run("/bin/bash", {
+      args: [refreshScript, "--print-workerd"],
+      cwd: projectRoot,
       env: {
         ...Deno.env.toObject(),
         PATH: `${path.dirname(Deno.execPath())}:${Deno.env.get("PATH") ?? ""}`,
       },
     });
-  }
-
-  it("resolves the runtime through the generator authoring CLI", {
-    skip: !hasDependencies,
-  }, () => {
-    // `--print-workerd` exercises the shell script, its Node-exclusion wrapper,
-    // the Deno invocation and the CLI subcommand without probing anything.
-    const result = runDiscover(projectRoot, ["--print-workerd"]);
 
     assert.equal(result.code, 0, result.stderr);
     const printed = result.stdout.trim();
     assert.match(printed, /\/bin\/workerd$/, printed);
     assert.equal(existsSync(printed), true, `${printed} does not exist`);
-    assert.equal(
-      (Deno.statSync(printed).mode & 0o111) !== 0,
-      true,
-      `${printed} is not executable`,
-    );
   });
+});
 
-  it("targets the CLI that actually defines the subcommand", () => {
-    const script = readFileSync(discoverScript, "utf8");
-    assert.match(
-      script,
-      /scripts\/contracts\/author-cli\.mjs workerd-path/,
-    );
-    assert.doesNotMatch(
-      script,
-      /scripts\/contracts\/cli\.mjs workerd-path/,
-    );
+describe("repository conformance", () => {
+  it("conforms end to end in this repository", {
+    skip: !existsSync(path.join(projectRoot, "node_modules")),
+  }, async () => {
+    const { report, problems, notes } = await verifyContracts(projectRoot);
 
-    // The distinction matters: only the generator-only authoring CLI defines
-    // the subcommand, and the product CLI must keep having no discovery path.
-    assert.match(
-      readFileSync(
-        path.join(projectRoot, "scripts", "contracts", "author-cli.mjs"),
-        "utf8",
-      ),
-      /case "workerd-path"/,
-    );
-    assert.doesNotMatch(
-      readFileSync(
-        path.join(projectRoot, "scripts", "contracts", "cli.mjs"),
-        "utf8",
-      ),
-      /"workerd-path"/,
-    );
-  });
-
-  it("fails when the entry point is rewired to the product CLI", {
-    skip: !hasDependencies,
-  }, () => {
-    // Shadow root holding the real modules and dependencies plus a deliberately
-    // rewired copy of the script: the original defect, reproduced safely. The
-    // positive test above cannot pass unless the wiring is correct.
-    const shadow = makeRoot("discover-shadow-");
-    const shadowScripts = path.join(shadow, "scripts");
-    mkdirSync(shadowScripts, { recursive: true });
-    for (const name of readdirSync(path.join(projectRoot, "scripts"))) {
-      if (name === "contract-discover.sh") continue;
-      symlinkSync(
-        path.join(projectRoot, "scripts", name),
-        path.join(shadowScripts, name),
-      );
+    assert.deepEqual(problems, [], problems.join("\n"));
+    assert.equal(report.verdict, "conformant");
+    assert.equal(report.scopes.length, SCOPES.length);
+    for (const entry of report.scopes) {
+      assert.equal(entry.status, "recorded", summariseScope(entry));
     }
-    symlinkSync(
-      path.join(projectRoot, "node_modules"),
-      path.join(shadow, "node_modules"),
-    );
-    writeFileSync(
-      path.join(shadowScripts, "contract-discover.sh"),
-      readFileSync(discoverScript, "utf8").split(
-        "scripts/contracts/author-cli.mjs workerd-path",
-      ).join("scripts/contracts/cli.mjs workerd-path"),
-    );
+    assert.match(notes[0], /^lock sha256:/);
 
-    const result = runDiscover(shadow, ["--print-workerd"]);
-
-    assert.equal(result.code, 1, result.stdout);
-    assert.match(result.stderr, /unknown command "workerd-path"/);
+    const digest = await lockDigest(loadDocument(projectRoot));
+    assert.equal(report.lockDigest, digest);
   });
 });

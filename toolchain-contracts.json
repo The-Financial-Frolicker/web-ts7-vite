@@ -1,21 +1,135 @@
 {
   "contracts": {
-    "typescript-libraries@sha256:966ad9f0ab56ad8a5f4662f13ec4be9de2a17fc0c9407f87e75c7f513a936a6b": {
-      "approved": null,
-      "bootstrap": {
-        "at": "2026-11-04T16:20:00.111Z",
-        "reason": "Provisional baseline carried over from the S9.1 implementation. No human approval has been recorded for this fingerprint."
-      },
-      "fingerprint": "sha256:966ad9f0ab56ad8a5f4662f13ec4be9de2a17fc0c9407f87e75c7f513a936a6b",
+    "launcher-permissions@sha256:c81c999bbc5756aedee96fcdcc2d3b410b55445ef4e681e52513f92cdb807f12": {
+      "fingerprint": "sha256:c81c999bbc5756aedee96fcdcc2d3b410b55445ef4e681e52513f92cdb807f12",
       "fingerprintInputs": {
+        "launchers": {
+          "edge-verify": [
+            "--allow-read=<root>/acceptance",
+            "--allow-write=<root>/artifacts",
+            "--allow-net=127.0.0.1",
+            "--allow-run=<chrome>"
+          ],
+          "vite-build": [
+            "--allow-read",
+            "--allow-write",
+            "--allow-env",
+            "--allow-sys",
+            "--allow-ffi=<rolldown>",
+            "--allow-ffi=<lightningcss>"
+          ],
+          "vite-build-ci-runner": [
+            "--allow-all"
+          ],
+          "wrangler-dry-run": [
+            "--allow-read",
+            "--allow-env",
+            "--allow-sys",
+            "--allow-write=<root>/dist/worker",
+            "--allow-write=<path>/.wrangler",
+            "--allow-run=<esbuild>"
+          ],
+          "wrangler-types": [
+            "--allow-read",
+            "--allow-write",
+            "--allow-env",
+            "--allow-sys",
+            "--allow-net=127.0.0.1",
+            "--allow-run=<workerd>",
+            "--allow-run=<esbuild>"
+          ]
+        },
+        "platform": "linux-x86_64-gnu"
+      },
+      "scope": "launcher-permissions",
+      "values": {
+        "launcher.edge-verify": {
+          "evidence": "scripts/edge-verify.mjs buildEdgeVerifyArgs",
+          "kind": "permission-profile",
+          "provenance": "derived",
+          "value": [
+            "--allow-read=<root>/acceptance",
+            "--allow-write=<root>/artifacts",
+            "--allow-net=127.0.0.1",
+            "--allow-run=<chrome>"
+          ]
+        },
+        "launcher.vite-build": {
+          "evidence": "scripts/vite-build.mjs buildViteArgs (local profile)",
+          "kind": "permission-profile",
+          "provenance": "derived",
+          "value": [
+            "--allow-read",
+            "--allow-write",
+            "--allow-env",
+            "--allow-sys",
+            "--allow-ffi=<rolldown>",
+            "--allow-ffi=<lightningcss>"
+          ]
+        },
+        "launcher.vite-build-ci-runner": {
+          "evidence": "scripts/vite-build.mjs buildViteArgs (ci-runner profile)",
+          "kind": "permission-profile",
+          "provenance": "derived",
+          "value": [
+            "--allow-all"
+          ]
+        },
+        "launcher.wrangler-dry-run": {
+          "evidence": "scripts/wrangler-dry-run.mjs buildWranglerDryRunArgs",
+          "kind": "permission-profile",
+          "provenance": "derived",
+          "value": [
+            "--allow-read",
+            "--allow-env",
+            "--allow-sys",
+            "--allow-write=<root>/dist/worker",
+            "--allow-write=<path>/.wrangler",
+            "--allow-run=<esbuild>"
+          ]
+        },
+        "launcher.wrangler-types": {
+          "evidence": "scripts/wrangler-types.mjs buildWranglerTypesArgs",
+          "kind": "permission-profile",
+          "provenance": "derived",
+          "value": [
+            "--allow-read",
+            "--allow-write",
+            "--allow-env",
+            "--allow-sys",
+            "--allow-net=127.0.0.1",
+            "--allow-run=<workerd>",
+            "--allow-run=<esbuild>"
+          ]
+        }
+      }
+    },
+    "typescript-libraries@sha256:5ff18409fa23f5b430ef89eae404de081376862992444ae6be35f011d9d28774": {
+      "fingerprint": "sha256:5ff18409fa23f5b430ef89eae404de081376862992444ae6be35f011d9d28774",
+      "fingerprintInputs": {
+        "clientLib": [
+          "ES2023",
+          "DOM"
+        ],
         "platform": "linux-x86_64-gnu",
-        "typescript": "7.0.2"
+        "typescript": "7.0.2",
+        "workerLib": [
+          "ES2025"
+        ]
       },
       "scope": "typescript-libraries",
-      "state": "bootstrap",
       "values": {
+        "typescript.clientLib": {
+          "evidence": "tsconfig.json compilerOptions.lib",
+          "kind": "configuration",
+          "provenance": "authoritative",
+          "value": [
+            "ES2023",
+            "DOM"
+          ]
+        },
         "typescript.editions": {
-          "evidence": "lib.*.d.ts files in node_modules/.deno/@typescript+typescript-linux-x64@7.0.2/node_modules/@typescript/typescript-linux-x64/lib",
+          "evidence": "lib.*.d.ts files of the installed TypeScript 7.0.2",
           "kind": "observed",
           "provenance": "observed",
           "value": [
@@ -35,7 +149,7 @@
           ]
         },
         "typescript.libraries": {
-          "evidence": "lib.*.d.ts files in node_modules/.deno/@typescript+typescript-linux-x64@7.0.2/node_modules/@typescript/typescript-linux-x64/lib",
+          "evidence": "lib.*.d.ts files of the installed TypeScript 7.0.2",
           "kind": "observed",
           "provenance": "observed",
           "value": [
@@ -45,23 +159,32 @@
             "scripthost",
             "webworker"
           ]
+        },
+        "typescript.workerLib": {
+          "evidence": "worker/tsconfig.json compilerOptions.lib",
+          "kind": "configuration",
+          "provenance": "authoritative",
+          "value": [
+            "ES2025"
+          ]
         }
       }
     },
-    "vite-syntax-target@sha256:e11d5e6d27002cdac7e17e11d15f286c0d1a2d3c46e657f0b57d6751aec50958": {
-      "approved": null,
-      "bootstrap": {
-        "at": "2026-11-04T16:20:00.111Z",
-        "reason": "Provisional baseline carried over from the S9.1 implementation. No human approval has been recorded for this fingerprint."
-      },
-      "fingerprint": "sha256:e11d5e6d27002cdac7e17e11d15f286c0d1a2d3c46e657f0b57d6751aec50958",
+    "vite-syntax-target@sha256:ff235025577ca0b176f55e0ab8586ebe16167c85b405114c04ab35e1f7eba30e": {
+      "fingerprint": "sha256:ff235025577ca0b176f55e0ab8586ebe16167c85b405114c04ab35e1f7eba30e",
       "fingerprintInputs": {
+        "buildTarget": "baseline-widely-available",
         "platform": "linux-x86_64-gnu",
         "vite": "8.3.5"
       },
       "scope": "vite-syntax-target",
-      "state": "bootstrap",
       "values": {
+        "vite.build.target": {
+          "evidence": "vite.config.ts declares no build.target; Vite's symbolic default applies",
+          "kind": "configuration",
+          "provenance": "authoritative",
+          "value": "baseline-widely-available"
+        },
         "vite.build.targets": {
           "evidence": "Vite 8.3.5 resolveConfig({ configFile: false }, \"build\").build.target",
           "kind": "observed",
@@ -77,11 +200,6 @@
       }
     },
     "workerd-runtime@sha256:8aa9865cee2eb3e13dfd02ab1bea1a145a0ae1c4ae5bf441ea25888c43f13daa": {
-      "approved": null,
-      "bootstrap": {
-        "at": "2026-11-04T16:20:00.111Z",
-        "reason": "Provisional baseline carried over from the S9.1 implementation. No human approval has been recorded for this fingerprint."
-      },
       "fingerprint": "sha256:8aa9865cee2eb3e13dfd02ab1bea1a145a0ae1c4ae5bf441ea25888c43f13daa",
       "fingerprintInputs": {
         "compatibilityDate": "2026-10-30",
@@ -90,7 +208,6 @@
         "workerd": "1.20261023.1"
       },
       "scope": "workerd-runtime",
-      "state": "bootstrap",
       "values": {
         "runtime.capability.es2015.core": {
           "evidence": "evaluated true; workerd 1.20261023.1 executed the capability probe Worker over loopback with compatibility date 2026-10-30 and flags []",
@@ -233,64 +350,7 @@
       }
     }
   },
-  "policies": {
-    "clientApiEdition": {
-      "checkedAgainst": [
-        "tsconfig.json compilerOptions.lib"
-      ],
-      "decidedAt": "2026-11-04T16:02:18.700Z",
-      "decidedBy": "unrecorded (bootstrap)",
-      "provenance": "declared",
-      "rationale": "No installed tool carries a browser-API database, so the correspondence between an ES edition and Vite's resolved browser targets stays a reviewed human decision.",
-      "reviewedAgainst": [
-        "vite-syntax-target@sha256:e11d5e6d27002cdac7e17e11d15f286c0d1a2d3c46e657f0b57d6751aec50958",
-        "typescript-libraries@sha256:966ad9f0ab56ad8a5f4662f13ec4be9de2a17fc0c9407f87e75c7f513a936a6b"
-      ],
-      "value": "es2023"
-    },
-    "permissionProfiles": {
-      "checkedAgainst": [
-        "scripts/vite-build.mjs buildViteArgs",
-        "scripts/wrangler-types.mjs buildWranglerTypesArgs",
-        "scripts/wrangler-dry-run.mjs buildWranglerDryRunArgs"
-      ],
-      "decidedAt": "2026-11-04T16:02:18.700Z",
-      "decidedBy": "unrecorded (bootstrap)",
-      "provenance": "declared",
-      "rationale": "Each launcher grants only what its operation declares. Discovery never adds a grant: a tool's observed needs are not permission.",
-      "reviewedAgainst": [
-        "workerd-runtime@sha256:8aa9865cee2eb3e13dfd02ab1bea1a145a0ae1c4ae5bf441ea25888c43f13daa"
-      ],
-      "value": {
-        "vite-build": [
-          "--allow-read",
-          "--allow-write",
-          "--allow-env",
-          "--allow-sys",
-          "--allow-ffi=<rolldown>",
-          "--allow-ffi=<lightningcss>"
-        ],
-        "wrangler-dry-run": [
-          "--allow-read",
-          "--allow-env",
-          "--allow-sys",
-          "--allow-write=<root>/dist/worker",
-          "--allow-write=<path>/.wrangler",
-          "--allow-run=<esbuild>"
-        ],
-        "wrangler-types": [
-          "--allow-read",
-          "--allow-write",
-          "--allow-env",
-          "--allow-sys",
-          "--allow-net=127.0.0.1",
-          "--allow-run=<workerd>",
-          "--allow-run=<esbuild>"
-        ]
-      }
-    }
-  },
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "toolchain": {
     "browserCompatSources": {
       "available": [],
@@ -311,6 +371,47 @@
     "deno": {
       "evidence": "Deno.version.deno of the process that authored the contract",
       "version": "2.9.8"
+    },
+    "emscripten": {
+      "clangVersion": {
+        "available": false,
+        "reason": "requires executing the SDK's compiler; not inferred from the Emscripten version",
+        "value": null
+      },
+      "emscriptenVersion": {
+        "available": true,
+        "source": "upstream/emscripten/emscripten-version.txt",
+        "value": "\"6.0.13\""
+      },
+      "installation": {
+        "available": true,
+        "markers": {
+          "clang": true,
+          "emscripten": true,
+          "libcxx": false
+        },
+        "reason": "EMSDK is set; only layout markers are recorded"
+      },
+      "llvmRevision": {
+        "available": false,
+        "reason": "requires executing the SDK's compiler; never inferred from the clang version",
+        "value": null
+      },
+      "sdkVersion": {
+        "available": true,
+        "source": ".mise.toml [tools] emsdk",
+        "value": "6.0.13"
+      },
+      "standardLibrary": {
+        "available": false,
+        "reason": "the SDK has no upstream/emscripten/system/lib/libcxx marker; the C++ standard library is not identified from paths",
+        "value": null
+      },
+      "target": {
+        "available": false,
+        "reason": "requires running `emcc -dumpmachine`",
+        "value": null
+      }
     },
     "lockfile": {
       "evidence": "deno.lock specifiers",

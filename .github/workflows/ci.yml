@@ -55,6 +55,15 @@ jobs:
           mise exec -- ninja --version
           mise exec -- emcc --version | head -n 1
 
+      # Toolchain conformance, not preparation: every pin is resolved, the
+      # installed versions are compared with `toolchain.toml`, and `.mise.toml`
+      # is checked against its projection. Nothing is installed here — mise
+      # already installed the pins in the step above, and `--check` never
+      # modifies tools. Generator-only: a product does not manage its toolchain.
+      - name: Toolchain conformance (generator only)
+        if: hashFiles('scripts/toolchain-prepare.mjs') != ''
+        run: mise exec -- deno task toolchain:prepare -- --check
+
       - name: Resolve the Python interpreter for Emscripten
         # Same resolution the build uses: an explicit EMSDK_PYTHON, then the
         # runner's python3 when it satisfies Emscripten's minimum, and only

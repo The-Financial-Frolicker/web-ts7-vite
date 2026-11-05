@@ -1,24 +1,20 @@
 /**
- * Product-side contract CLI: verify, status, show and accept.
+ * Product-side contract CLI: verify, status and show.
  *
- * This module ships in the generated product. It deliberately contains no
- * discovery or approval code: a product can enforce its inherited contract and
- * accept a new *already approved* artefact, but it cannot investigate a
- * toolchain or manufacture an approval.
+ * This module ships in the generated product and has no refresh capability and
+ * no authoring code path: a product can establish whether the environment still
+ * conforms to the lock it inherited, and can display that lock.
+ *
+ * `verify` prints a machine-readable conformance report on stdout and human
+ * diagnostics on stderr. The report is produced even when verification fails.
  */
 
 import { canonicalJson } from "./canonical.mjs";
 import { ConfigError } from "./config.mjs";
-import {
-  ContractError,
-  unapprovedContracts,
-  validateDocument,
-} from "./schema.mjs";
-import { loadDocument, summarise, writeDocument } from "./store.mjs";
+import { ContractError } from "./schema.mjs";
+import { loadDocument, summarise } from "./store.mjs";
 import { ToolchainError } from "./toolchain.mjs";
-import { verifyContracts } from "./verify.mjs";
-import { readFileSync } from "../lib/fs.mjs";
-import path from "../lib/path.mjs";
+import { summariseScope, verifyContracts } from "./verify.mjs";
 
 const EXIT_OK = 0;
 const EXIT_FAILURE = 1;
@@ -26,21 +22,16 @@ const EXIT_FAILURE = 1;
 const USAGE = `Toolchain contract consumption.
 
   verify
-      Verify the installed toolchain and configuration against the contract.
+      Recompute the contract facts and compare them with the committed lock.
+      Prints the conformance report (JSON) on stdout and diagnostics on stderr.
       Performs no discovery and starts no external tool.
 
   status
-      Print each contract's lifecycle state; exits non-zero while any contract
-      still needs a human decision.
+      Print one line per scope: recorded, drifted or unrecorded. Exits non-zero
+      unless every scope is recorded.
 
   show
-      Print the committed artefact.
-
-  accept --from FILE
-      Install an already-approved contract artefact. Refuses candidates and
-      bootstrap baselines: acceptance is not approval.`;
-
-const FLAGS = new Map([["--from", "from"]]);
+      Print the committed lock.`;
 
 function parseArgs(argv) {
   const options = { command: argv[0] };
@@ -51,139 +42,68 @@ function parseArgs(argv) {
       options.help = true;
       continue;
     }
-
-    const name = FLAGS.get(argument);
-    if (name === undefined) {
-      throw new ContractError(
-        `unknown argument ${JSON.stringify(argument)}\n\n${USAGE}`,
-      );
-    }
-
-    const value = argv[index + 1];
-    if (value === undefined || value.startsWith("--")) {
-      throw new ContractError(`${argument} requires a value`);
-    }
-    options[name] = value;
-    index += 1;
+    throw new ContractError(
+      `unknown argument ${JSON.stringify(argument)}\n\n${USAGE}`,
+    );
   }
 
   return options;
 }
 
 async function runVerify(root, io) {
-  const { problems, notes } = await verifyContracts(root);
+  const { report, notes } = await verifyContracts(root);
 
-  for (const note of notes) io.log(`[verify] ${note}`);
-
-  if (problems.length > 0) {
-    io.error("Toolchain contracts are not satisfied:");
-    for (const problem of problems) io.error(`  - ${problem}`);
-    return EXIT_FAILURE;
+  for (const note of notes) io.error(`[verify] ${note}`);
+  for (const entry of report.scopes) {
+    io.error(`[verify] ${summariseScope(entry)}`);
   }
 
-  io.log(
-    "Toolchain contracts OK: the installed toolchain and configuration match " +
-      "the approved contract.",
-  );
-  return EXIT_OK;
+  // The report is emitted whether or not the verdict is conformant, so a failing
+  // run still leaves machine-readable evidence.
+  io.log(canonicalJson(report));
+
+  if (report.verdict === "conformant") {
+    io.error(
+      "Conformance OK: the environment matches the committed contract lock.",
+    );
+    return EXIT_OK;
+  }
+
+  io.error("Contract conformance failed:");
+  for (const problem of report.problems) io.error(`  - ${problem}`);
+  return EXIT_FAILURE;
 }
 
-function runStatus(root, io) {
-  const document = loadDocument(root);
+async function runStatus(root, io) {
+  const { report } = await verifyContracts(root);
 
-  for (const entry of summarise(document)) {
-    io.log(`${entry.scope} ${entry.key.split("@").at(-1)} ${entry.state}`);
-  }
+  for (const entry of report.scopes) io.log(summariseScope(entry));
 
-  const pending = unapprovedContracts(document);
-  if (pending.length > 0) {
-    io.error(
-      `${pending.length} contract(s) require an explicit human approval ` +
-        `decision before CI can accept them: ${pending.join(", ")}`,
-    );
-    return EXIT_FAILURE;
-  }
-
-  io.log("Every contract carries an approval bound to its fingerprint.");
-  return EXIT_OK;
+  return report.verdict === "conformant" ? EXIT_OK : EXIT_FAILURE;
 }
 
 function runShow(root, io) {
-  const document = loadDocument(root);
-  io.log(
-    canonicalJson({
-      toolchain: document.toolchain,
-      contracts: summarise(document),
-      policies: document.policies,
-    }),
-  );
+  io.log(canonicalJson(loadDocument(root)));
   return EXIT_OK;
 }
 
-/**
- * Install an approved artefact supplied from outside the product.
- *
- * This is the product's upgrade path for a *contract*: a new approved baseline
- * arrives as a file and is installed verbatim. It cannot promote a candidate or
- * a bootstrap baseline, so it can never manufacture an approval.
- */
-function runAccept(root, options, io) {
-  if (typeof options.from !== "string") {
-    throw new ContractError("accept requires --from FILE");
-  }
-
-  const source = path.isAbsolute(options.from)
-    ? options.from
-    : path.join(root, options.from);
-
-  let incoming;
-  try {
-    incoming = JSON.parse(readFileSync(source, "utf8"));
-  } catch (error) {
-    throw new ContractError(`cannot read ${source}: ${error.message}`);
-  }
-
-  validateDocument(incoming);
-
-  const notApproved = unapprovedContracts(incoming);
-  if (notApproved.length > 0) {
-    throw new ContractError(
-      `refusing to accept ${source}: ${notApproved.length} contract(s) are not ` +
-        `approved (${
-          notApproved.join(", ")
-        }). Acceptance installs an existing ` +
-        `human approval; it never creates one.`,
-    );
-  }
-
-  const target = writeDocument(root, incoming);
-  io.log(`Accepted approved contract from ${source}.`);
-  io.log(`Written to ${target}.`);
-  io.log("Run `deno task check:contracts` to verify this product against it.");
-  return EXIT_OK;
-}
-
-/** CLI entry point; returns an exit code instead of exiting directly. */
+/** CLI entry point; returns an exit code. */
 export async function main(argv = Deno.args, root = Deno.cwd(), io = console) {
   try {
     const options = parseArgs(argv);
 
-    if (options.help || options.command === undefined) {
+    if (options.help === true) {
       io.log(USAGE);
-      return options.command === undefined && !options.help
-        ? EXIT_FAILURE
-        : EXIT_OK;
+      return EXIT_OK;
     }
 
     switch (options.command) {
       case "verify":
         return await runVerify(root, io);
       case "status":
-        return runStatus(root, io);
+        return await runStatus(root, io);
       case "show":
         return runShow(root, io);
-      case "accept":
-        return runAccept(root, options, io);
       default:
         io.error(
           `unknown command ${JSON.stringify(options.command)}\n\n${USAGE}`,
@@ -192,10 +112,10 @@ export async function main(argv = Deno.args, root = Deno.cwd(), io = console) {
     }
   } catch (error) {
     if (
-      error instanceof ContractError || error instanceof ToolchainError ||
-      error instanceof ConfigError
+      error instanceof ContractError || error instanceof ConfigError ||
+      error instanceof ToolchainError
     ) {
-      io.error(`Error: ${error.message}`);
+      io.error(`Contract verification failed: ${error.message}`);
       return EXIT_FAILURE;
     }
     throw error;
@@ -205,3 +125,6 @@ export async function main(argv = Deno.args, root = Deno.cwd(), io = console) {
 if (import.meta.main) {
   Deno.exitCode = await main();
 }
+
+/** Re-exported for callers that only need the lock summary. */
+export { summarise };

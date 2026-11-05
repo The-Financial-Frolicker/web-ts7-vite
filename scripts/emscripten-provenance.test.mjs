@@ -17,6 +17,7 @@ import {
   COMPONENTS,
   componentsForScope,
   fingerprintInputs,
+  SCOPE_LAUNCHER_PERMISSIONS,
   SCOPE_TYPESCRIPT_LIBRARIES,
   SCOPE_VITE_TARGET,
   SCOPE_WORKERD_RUNTIME,
@@ -35,8 +36,16 @@ function identity(emscriptenVersion = "4.0.0") {
       compatibilityDate: "2026-10-30",
       compatibilityFlags: [],
     },
-    vite: { version: "8.3.5" },
-    typescript: { version: "7.0.2" },
+    vite: { version: "8.3.5", buildTarget: "baseline-widely-available" },
+    typescript: {
+      version: "7.0.2",
+      clientLib: ["ES2023", "DOM"],
+      workerLib: ["ES2025"],
+    },
+    launchers: {
+      "vite-build": ["--allow-read", "--allow-write"],
+      "edge-verify": ["--allow-read", "--allow-net=127.0.0.1"],
+    },
     emscripten: {
       sdkVersion: { value: "4.0.0", available: true },
       emscriptenVersion: { value: emscriptenVersion, available: true },
@@ -80,12 +89,30 @@ describe("canonical component model", () => {
       ["platform", "vite"],
     );
     assert.deepEqual(
+      Object.keys(fingerprintInputs(SCOPE_VITE_TARGET, identity())).sort(),
+      ["buildTarget", "platform", "vite"],
+    );
+    assert.deepEqual(
       componentsForScope(SCOPE_TYPESCRIPT_LIBRARIES).sort(),
       ["platform", "typescript"],
     );
+    assert.deepEqual(
+      Object.keys(fingerprintInputs(SCOPE_TYPESCRIPT_LIBRARIES, identity()))
+        .sort(),
+      ["clientLib", "platform", "typescript", "workerLib"],
+    );
+    assert.deepEqual(
+      componentsForScope(SCOPE_LAUNCHER_PERMISSIONS).sort(),
+      ["launchers", "platform"],
+    );
+    assert.deepEqual(
+      Object.keys(fingerprintInputs(SCOPE_LAUNCHER_PERMISSIONS, identity()))
+        .sort(),
+      ["launchers", "platform"],
+    );
   });
 
-  it("preserves the fingerprints recorded in the committed artefact", async () => {
+  it("preserves the fingerprints recorded in the committed lock", async () => {
     const document = JSON.parse(
       readFileSync(path.join(projectRoot, "toolchain-contracts.json"), "utf8"),
     );
@@ -99,6 +126,9 @@ describe("canonical component model", () => {
     const runtime = byScope[SCOPE_WORKERD_RUNTIME].fingerprintInputs;
     const vite = byScope[SCOPE_VITE_TARGET].fingerprintInputs;
     const typescript = byScope[SCOPE_TYPESCRIPT_LIBRARIES].fingerprintInputs;
+    const launchers =
+      byScope[SCOPE_LAUNCHER_PERMISSIONS].fingerprintInputs.launchers;
+
     const reconstructed = {
       platform: runtime.platform,
       workerd: {
@@ -106,15 +136,20 @@ describe("canonical component model", () => {
         compatibilityDate: runtime.compatibilityDate,
         compatibilityFlags: runtime.compatibilityFlags,
       },
-      vite: { version: vite.vite },
-      typescript: { version: typescript.typescript },
+      vite: { version: vite.vite, buildTarget: vite.buildTarget },
+      typescript: {
+        version: typescript.typescript,
+        clientLib: typescript.clientLib,
+        workerLib: typescript.workerLib,
+      },
+      launchers,
     };
 
     for (const scope of SCOPES) {
       assert.equal(
         await fingerprintOf(fingerprintInputs(scope, reconstructed)),
         byScope[scope].fingerprint,
-        `${scope} fingerprint changed meaning`,
+        `${scope} fingerprint does not reproduce from its recorded inputs`,
       );
     }
   });
