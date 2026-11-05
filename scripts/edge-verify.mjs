@@ -78,6 +78,56 @@ export function parseBuildIdentity(raw) {
   }
 }
 
+/**
+ * Decide whether the page is ready to be evaluated.
+ *
+ * Absence is *not* readiness: a selector that is not in the document yet (the
+ * document has not committed, or the module has not run) is a reason to keep
+ * waiting, not a completed observation. The original loop compared the
+ * WebAssembly text with the loading placeholder, so a *missing* `#wasm-result`
+ * (which reads as `null`) ended the wait immediately — the run reported empty
+ * values against a page that rendered moments later (run 42109653598).
+ *
+ * A terminal failure ("WebAssembly initialisation failed.") is deliberately
+ * *not* treated as "keep waiting": it is present, non-empty and not a loading
+ * placeholder, so the assertions reject it at once instead of waiting out the
+ * budget. Only the selectors and the placeholders in the criteria decide
+ * readiness; nothing here decides acceptance.
+ */
+export function readinessProblems(observed, criteria) {
+  const problems = [];
+  const text = (value) => (typeof value === "string" ? value.trim() : "");
+  const placeholders = criteria.loadingPlaceholders ?? [];
+
+  if (text(observed.marker) === "") {
+    problems.push(`${criteria.pageMarker.selector} is not rendered yet`);
+  }
+
+  const wasm = text(observed.wasm);
+  if (wasm === "") {
+    problems.push(`${criteria.wasmResult.selector} is not present yet`);
+  } else if (placeholders.includes(wasm)) {
+    problems.push(
+      `WebAssembly result is still the placeholder ${JSON.stringify(wasm)}`,
+    );
+  }
+
+  const worker = text(observed.worker);
+  if (worker === "") {
+    problems.push(`${criteria.workerHealth.selector} is not present yet`);
+  } else if (placeholders.includes(worker)) {
+    problems.push(
+      `Worker health is still the placeholder ${JSON.stringify(worker)}`,
+    );
+  }
+
+  if (text(observed.identity) === "") {
+    problems.push("the build-identity meta element is not present yet");
+  }
+
+  return problems;
+}
+
 /** Selector texts read from the rendered page. */
 const OBSERVED_FIELDS = Object.freeze(["marker", "wasm", "worker", "identity"]);
 
@@ -87,6 +137,13 @@ const OBSERVED_FIELDS = Object.freeze(["marker", "wasm", "worker", "identity"]);
  * Returns one entry per assertion with `status: "pass" | "fail"`. A missing
  * value is a failure, never an absence of evidence: an empty page must not
  * produce an empty assertion list that vacuously passes.
+ *
+ * Two of the entries are about whether the thing under test was reachable at
+ * all, not about the application's behaviour: `edge.readiness` (the published URL
+ * served the deployed application inside its budget) and `browser.navigation`
+ * (the browser received the document with HTTP 200). They are assertions rather
+ * than preconditions precisely so a timeout or a 404 is recorded as a rejection
+ * with its own evidence instead of ending the run early.
  */
 export function evaluateAcceptance({ criteria, observed, expectations = {} }) {
   const assertions = [];
@@ -95,11 +152,29 @@ export function evaluateAcceptance({ criteria, observed, expectations = {} }) {
     : "";
 
   assertions.push({
+    id: "edge.readiness",
+    description:
+      "the published URL served the deployed application inside the readiness budget",
+    expected: true,
+    observed: expectations.edgeReady ?? null,
+    status: expectations.edgeReady === true ? "pass" : "fail",
+  });
+
+  assertions.push({
     id: "http.page",
     description: "the deployed page answers with HTTP 200",
     expected: 200,
     observed: expectations.httpStatus ?? null,
     status: expectations.httpStatus === 200 ? "pass" : "fail",
+  });
+
+  assertions.push({
+    id: "browser.navigation",
+    description:
+      "the browser's document request for the deployed URL answered 200",
+    expected: 200,
+    observed: expectations.navigationStatus ?? null,
+    status: expectations.navigationStatus === 200 ? "pass" : "fail",
   });
 
   assertions.push({
@@ -397,22 +472,167 @@ async function readTexts(cdp, sessionId, criteria) {
 }
 
 /**
- * Wait until the page settles: the WebAssembly result is no longer the loading
- * placeholder, or the budget expires. A timeout is not an error here — the
- * assertions decide, and they reject a still-loading page.
+ * Wait until the page is ready to be evaluated, or the budget expires.
+ *
+ * The defect this replaces tested only `wasm === "Loading WebAssembly..."`:
+ * an *absent* `#wasm-result` produced `null`, which is not the placeholder, so
+ * the loop ended immediately and "the page settled" was satisfied by a document
+ * that had not rendered anything at all. Absence is now a reason to keep
+ * waiting, and only a page with every required value present and no loading
+ * placeholder left counts as settled.
+ *
+ * A timeout is not an exception: the caller records it as evidence and the
+ * assertions still decide. Returning the problems is what makes the difference
+ * between "ready" and "never rendered" inspectable instead of inferred.
  */
-export async function waitForRendered(cdp, sessionId, criteria, timeoutMs) {
-  const deadline = Date.now() + timeoutMs;
-  let observed = await readTexts(cdp, sessionId, criteria);
+export async function waitForRendered(
+  cdp,
+  sessionId,
+  criteria,
+  timeoutMs,
+  {
+    now = () => Date.now(),
+    sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    intervalMs = 250,
+  } = {},
+) {
+  const startedAt = now();
+  let attempts = 0;
 
-  while (
-    observed.wasm === "Loading WebAssembly..." && Date.now() < deadline
-  ) {
-    await new Promise((resolve) => setTimeout(resolve, 250));
-    observed = await readTexts(cdp, sessionId, criteria);
+  const read = async () => {
+    attempts += 1;
+    const observed = await readTexts(cdp, sessionId, criteria);
+    return { observed, problems: readinessProblems(observed, criteria) };
+  };
+
+  let { observed, problems } = await read();
+
+  // An absent element keeps the loop going instead of ending it.
+  while (problems.length > 0 && now() - startedAt < timeoutMs) {
+    await sleep(intervalMs);
+    ({ observed, problems } = await read());
   }
 
-  return observed;
+  const elapsedMs = now() - startedAt;
+  const ready = problems.length === 0;
+
+  return {
+    observed,
+    ready,
+    problems,
+    timedOut: !ready && elapsedMs >= timeoutMs,
+    elapsedMs,
+    attempts,
+    intervalMs,
+    timeoutMs,
+  };
+}
+
+/* ------------------------------------------------------------------------- *
+ * Navigation response
+ *
+ * `Page.navigate` resolves for any document the browser managed to load — a 404
+ * included. "The drive did not throw" is therefore not evidence that the page
+ * loaded, so the document response is recorded from the protocol and asserted.
+ * ------------------------------------------------------------------------- */
+
+/** Bounded wait for the navigation's own document response. */
+const NAVIGATION_TIMEOUT_MS = 10_000;
+
+/** A page that was never observed: absence, never a set of empty matches. */
+export function emptyObservation() {
+  return { documentText: "" };
+}
+
+/** Collect document responses, keyed by the loader that requested them. */
+export function createNavigationTracker() {
+  const documents = new Map();
+
+  return {
+    record(method, params) {
+      if (method !== "Network.responseReceived") return;
+      if (params?.type !== "Document") return;
+      if (typeof params.loaderId !== "string") return;
+
+      const response = params.response ?? {};
+      documents.set(params.loaderId, {
+        url: response.url ?? null,
+        status: typeof response.status === "number" ? response.status : null,
+        mimeType: response.mimeType ?? null,
+      });
+    },
+    get(loaderId) {
+      if (typeof loaderId !== "string") return null;
+      return documents.get(loaderId) ?? null;
+    },
+    get size() {
+      return documents.size;
+    },
+  };
+}
+
+/**
+ * The verdict for one navigation.
+ *
+ * `status: null` means the document response was not observed, and not observed
+ * is a failure: a page whose response could not be inspected was not shown to
+ * have loaded.
+ */
+export function navigationVerdict({ errorText = null, response = null } = {}) {
+  if (typeof errorText === "string" && errorText !== "") {
+    return { status: null, problem: `navigation failed: ${errorText}` };
+  }
+
+  if (response === null) {
+    return {
+      status: null,
+      problem: "the document response status was not observed",
+    };
+  }
+
+  const status = typeof response.status === "number" ? response.status : null;
+  if (status !== 200) {
+    return {
+      status,
+      problem: `the document response was HTTP ${status ?? "unknown"}`,
+    };
+  }
+
+  return { status: 200, problem: null };
+}
+
+/** Wait for the navigation's document response, then return its verdict. */
+export async function observeNavigation({
+  tracker,
+  navigation,
+  timeoutMs = NAVIGATION_TIMEOUT_MS,
+  now = () => Date.now(),
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  intervalMs = 50,
+}) {
+  const loaderId = navigation?.loaderId ?? null;
+  const errorText = navigation?.errorText ?? null;
+  const deadline = now() + timeoutMs;
+
+  let response = tracker.get(loaderId);
+
+  while (
+    response === null && errorText === null && now() < deadline
+  ) {
+    await sleep(intervalMs);
+    response = tracker.get(loaderId);
+  }
+
+  const verdict = navigationVerdict({ errorText, response });
+
+  return {
+    url: response?.url ?? null,
+    status: verdict.status,
+    mimeType: response?.mimeType ?? null,
+    loaderId,
+    problem: verdict.problem,
+    documents: tracker.size,
+  };
 }
 
 /** Drive one real browser to the deployed URL and report what it rendered. */
@@ -458,34 +678,74 @@ export async function verifyPage({
     await cdp.send("Page.enable", {}, sessionId);
     await cdp.send("Runtime.enable", {}, sessionId);
     await cdp.send("Network.enable", {}, sessionId);
-    cdp.onEvent((method, params) =>
-      collectDiagnostic(diagnostics, method, params)
-    );
-    const navigation = await cdp.send("Page.navigate", { url }, sessionId);
-    if (navigation?.errorText !== undefined && navigation.errorText !== "") {
-      throw new Error(`navigation failed: ${navigation.errorText}`);
+    const tracker = createNavigationTracker();
+    cdp.onEvent((method, params) => {
+      collectDiagnostic(diagnostics, method, params);
+      tracker.record(method, params);
+    });
+
+    const navigateResult = await cdp.send("Page.navigate", { url }, sessionId);
+    const navigation = await observeNavigation({
+      tracker,
+      navigation: navigateResult,
+    });
+
+    // A navigation that did not answer 200 is not a page to observe. Waiting for
+    // selectors would then report the absence of a page that was never served,
+    // and a 404 would be recorded as a rendered-but-incomplete application.
+    const settled = navigation.problem === null
+      ? await waitForRendered(cdp, sessionId, criteria, timeoutMs)
+      : {
+        observed: emptyObservation(),
+        ready: false,
+        problems: [navigation.problem],
+        timedOut: false,
+        elapsedMs: 0,
+        attempts: 0,
+        intervalMs: 0,
+        timeoutMs,
+      };
+
+    const { observed } = settled;
+
+    const readiness = {
+      ready: settled.ready,
+      timedOut: settled.timedOut,
+      problems: settled.problems,
+      attempts: settled.attempts,
+      elapsedMs: settled.elapsedMs,
+      timeoutMs: settled.timeoutMs,
+      intervalMs: settled.intervalMs,
+      skipped: navigation.problem !== null,
+      observed,
+    };
+
+    try {
+      const { data } = await cdp.send("Page.captureScreenshot", {
+        format: "png",
+      }, sessionId);
+      Deno.writeFileSync(
+        `${artifactsDir}/screenshot.png`,
+        Uint8Array.from(atob(data), (character) => character.charCodeAt(0)),
+      );
+    } catch {
+      // A screenshot is supplementary evidence; losing it changes no verdict.
     }
-
-    const observed = await waitForRendered(cdp, sessionId, criteria, timeoutMs);
-
-    const { data } = await cdp.send("Page.captureScreenshot", {
-      format: "png",
-    }, sessionId);
-    Deno.writeFileSync(
-      `${artifactsDir}/screenshot.png`,
-      Uint8Array.from(atob(data), (character) => character.charCodeAt(0)),
-    );
 
     const version = await cdp.send("Browser.getVersion");
 
     return {
       observed,
+      readiness,
+      navigation,
       browser: {
         product: version.product,
         userAgent: version.userAgent,
         exceptions: diagnostics.exceptions,
         consoleErrors: diagnostics.consoleErrors,
         wasmResponses: diagnostics.wasmResponses,
+        navigation,
+        readiness,
       },
     };
   } finally {
@@ -517,7 +777,8 @@ const USAGE = `Verify a deployed Cloudflare Worker in a real browser.
   --criteria FILE       authorised acceptance criteria (acceptance/criteria.json)
   --out DIR             artefact directory for evidence and the screenshot
   --chrome PATH         Chrome executable
-  --http-status CODE    status of the independent HTTP request (shell wrapper)
+  --http-status CODE    status of the edge readiness gate's final response
+  --edge-ready BOOL     whether the edge readiness gate succeeded (true/false)
   --run-id ID           workflow run id
   --run-attempt N       workflow run attempt
   --url-source TEXT     how the URL was obtained
@@ -525,7 +786,7 @@ const USAGE = `Verify a deployed Cloudflare Worker in a real browser.
   --deploy-exit CODE    exit code of the deployment command
   --expected-sha SHA    source revision the deployed build must report
   --expected-deployment ID   deployment instance the build must report
-  --timeout MS          browser settle budget (default 20000)`;
+  --timeout MS          browser readiness budget (default 20000)`;
 
 const FLAGS = new Map([
   ["--url", "url"],
@@ -535,6 +796,7 @@ const FLAGS = new Map([
   ["--out", "out"],
   ["--chrome", "chrome"],
   ["--http-status", "httpStatus"],
+  ["--edge-ready", "edgeReady"],
   ["--run-id", "runId"],
   ["--run-attempt", "runAttempt"],
   ["--url-source", "urlSource"],
@@ -574,6 +836,18 @@ export function parseVerifyArgs(argv) {
   }
 
   if (options.help === true) return options;
+
+  if (
+    options.edgeReady !== undefined &&
+    options.edgeReady !== "true" &&
+    options.edgeReady !== "false"
+  ) {
+    throw new Error(
+      `--edge-ready must be "true" or "false", received ${
+        JSON.stringify(options.edgeReady)
+      }`,
+    );
+  }
 
   for (
     const required of [
@@ -627,6 +901,9 @@ export async function main(
   const httpStatus = options.httpStatus === undefined
     ? null
     : Number(options.httpStatus);
+  const edgeReady = options.edgeReady === undefined
+    ? null
+    : options.edgeReady === "true";
   const context = {
     suiteVersion: criteria.suiteVersion,
     generatedAt: now(),
@@ -643,10 +920,12 @@ export async function main(
       ? null
       : Number(options.deployExit),
     httpStatus,
+    edgeReady,
   };
 
-  let observed = { documentText: "" };
+  let observed = emptyObservation();
   let browser = {};
+  let navigationStatus = null;
   let assertions;
 
   try {
@@ -661,17 +940,20 @@ export async function main(
     });
     observed = page.observed;
     browser = page.browser;
+    navigationStatus = page.navigation?.status ?? null;
     assertions = evaluateAcceptance({
       criteria,
       observed,
       expectations: {
+        edgeReady,
         httpStatus,
+        navigationStatus,
         expectedSha: options.expectedSha,
         expectedDeployment: options.expectedDeployment,
       },
     });
   } catch (error) {
-    // A page that cannot be reached is a failed acceptance, not a skipped run.
+    // A browser that cannot be driven is a failed acceptance, not a skipped run.
     assertions = [{
       id: "browser.navigation",
       description: "the deployed page loads in a real browser",
@@ -694,6 +976,29 @@ export async function main(
       `${mark} ${assertion.id} observed=${JSON.stringify(assertion.observed)}`,
     );
   }
+
+  // Readiness and navigation are reported separately from the assertions so a
+  // timeout explains itself in the log, not only inside the evidence file.
+  const readiness = browser.readiness;
+  if (readiness !== undefined) {
+    io.log(
+      `browser readiness: ready=${readiness.ready} timedOut=${readiness.timedOut} ` +
+        `attempts=${readiness.attempts} elapsedMs=${readiness.elapsedMs}` +
+        (readiness.problems?.length
+          ? ` problems=${JSON.stringify(readiness.problems)}`
+          : ""),
+    );
+  }
+  if (browser.navigation !== undefined || navigationStatus !== null) {
+    io.log(
+      `browser navigation: status=${navigationStatus} ` +
+        `url=${browser.navigation?.url ?? context.url}` +
+        (browser.navigation?.problem
+          ? ` problem=${JSON.stringify(browser.navigation.problem)}`
+          : ""),
+    );
+  }
+
   io.log(
     `edge acceptance: accepted=${evidence.accepted} worker=${context.workerName} ` +
       `sha=${context.sha} url=${context.url}`,

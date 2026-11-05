@@ -14,6 +14,10 @@
     "selector": "#worker-health",
     "contains": ["Worker: ok", "cloudflare-workers"]
   },
+  "loadingPlaceholders": [
+    "Loading WebAssembly...",
+    "Checking Cloudflare Worker..."
+  ],
   "failureMarkers": [
     "WebAssembly initialisation failed.",
     "Loading WebAssembly...",

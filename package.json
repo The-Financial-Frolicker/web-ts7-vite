@@ -35,7 +35,7 @@
     "test:wasm:published": "bash scripts/deno-no-node.sh deno test --allow-read wasm/published.test.ts",
     "preview": "vite preview",
     "edge:verify": "bash scripts/edge-accept.sh",
-    "test:edge": "bash scripts/deno-no-node.sh deno test --allow-read --allow-write --allow-env scripts/edge-verify.test.mjs"
+    "test:edge": "bash scripts/deno-no-node.sh deno test --allow-read --allow-write --allow-env --allow-run --allow-net=127.0.0.1 scripts/edge-verify.test.mjs scripts/edge-readiness.test.mjs scripts/edge-cleanup.test.mjs"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "1.66.0",

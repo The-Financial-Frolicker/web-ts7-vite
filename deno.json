@@ -47,6 +47,6 @@
     "deploy": "bash scripts/deploy.sh",
     "deploy:dry-run": "bash scripts/deno-no-node.sh bash scripts/deploy-dry-run.sh",
     "edge:verify": "bash scripts/edge-accept.sh",
-    "test:edge": "bash scripts/deno-no-node.sh deno test --allow-read --allow-write --allow-env scripts/edge-verify.test.mjs"
+    "test:edge": "bash scripts/deno-no-node.sh deno test --allow-read --allow-write --allow-env --allow-run --allow-net=127.0.0.1 scripts/edge-verify.test.mjs scripts/edge-readiness.test.mjs scripts/edge-cleanup.test.mjs"
   }
 }

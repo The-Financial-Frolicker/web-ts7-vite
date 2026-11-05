@@ -15,10 +15,14 @@ import {
   buildEdgeVerifyArgs,
   buildEvidence,
   collectDiagnostic,
+  createNavigationTracker,
   evaluateAcceptance,
   main,
+  navigationVerdict,
+  observeNavigation,
   parseBuildIdentity,
   parseVerifyArgs,
+  readinessProblems,
   waitForRendered,
 } from "./edge-verify.mjs";
 
@@ -58,12 +62,42 @@ function acceptance(observed, expectations = {}) {
     criteria,
     observed,
     expectations: {
+      edgeReady: true,
       httpStatus: 200,
+      navigationStatus: 200,
       expectedSha: "abc123",
       expectedDeployment: "edge-123",
       ...expectations,
     },
   });
+}
+
+/** A cdp stand-in that replays scripted observations, one per read. */
+function scriptedCdp(observations) {
+  const state = { reads: 0 };
+  return {
+    state,
+    send: () => {
+      const index = Math.min(state.reads, observations.length - 1);
+      state.reads += 1;
+      return Promise.resolve({
+        result: { value: JSON.stringify(observations[index]) },
+      });
+    },
+  };
+}
+
+/** A deterministic clock: `sleep` advances time instead of waiting for it. */
+function fakeClock() {
+  const state = { now: 0 };
+  return {
+    state,
+    now: () => state.now,
+    sleep: (ms) => {
+      state.now += ms;
+      return Promise.resolve();
+    },
+  };
 }
 
 function statusOf(assertions, id) {
@@ -99,7 +133,7 @@ describe("deployed-edge acceptance criteria", () => {
     );
     const evidence = buildEvidence({ context: context(), assertions });
     assert.equal(evidence.accepted, true);
-    assert.equal(evidence.assertions.length, 7);
+    assert.equal(evidence.assertions.length, 9);
   });
 
   it("rejects a missing or incorrect application marker", () => {
@@ -144,6 +178,37 @@ describe("deployed-edge acceptance criteria", () => {
   it("rejects a page that did not answer with HTTP 200", () => {
     const assertions = acceptance(healthyPage(), { httpStatus: 404 });
     assert.equal(statusOf(assertions, "http.page"), "fail");
+  });
+
+  it("cannot accept a navigation the browser received as 404", () => {
+    const assertions = acceptance(healthyPage(), { navigationStatus: 404 });
+    assert.equal(statusOf(assertions, "browser.navigation"), "fail");
+    assert.equal(
+      buildEvidence({ context: context(), assertions }).accepted,
+      false,
+    );
+  });
+
+  it("cannot accept a navigation whose status was never observed", () => {
+    // Not observed is not "probably fine": the page was not shown to load.
+    const assertions = acceptance(healthyPage(), { navigationStatus: null });
+    assert.equal(statusOf(assertions, "browser.navigation"), "fail");
+    assert.equal(
+      buildEvidence({ context: context(), assertions }).accepted,
+      false,
+    );
+  });
+
+  it("cannot accept a deployment that never became ready", () => {
+    const assertions = acceptance(healthyPage(), { edgeReady: false });
+    assert.equal(statusOf(assertions, "edge.readiness"), "fail");
+    assert.equal(
+      buildEvidence({ context: context(), assertions }).accepted,
+      false,
+    );
+
+    const unknown = acceptance(healthyPage(), { edgeReady: null });
+    assert.equal(statusOf(unknown, "edge.readiness"), "fail");
   });
 
   it("rejects a page built from another revision or deployment", () => {
@@ -267,6 +332,18 @@ describe("edge verifier invocation", () => {
     ];
 
     assert.equal(parseVerifyArgs(base).workerName, "edge-1");
+    assert.equal(
+      parseVerifyArgs([...base, "--edge-ready", "true"]).edgeReady,
+      "true",
+    );
+    assert.equal(
+      parseVerifyArgs([...base, "--edge-ready", "false"]).edgeReady,
+      "false",
+    );
+    assert.throws(
+      () => parseVerifyArgs([...base, "--edge-ready", "yes"]),
+      /--edge-ready must be "true" or "false"/,
+    );
     assert.throws(() => parseVerifyArgs(["--url"]), /requires a value/);
     assert.throws(() => parseVerifyArgs(["--nope", "x"]), /unknown argument/);
     assert.throws(
@@ -419,27 +496,246 @@ describe("diagnostics and settle behaviour", () => {
         }),
     };
 
-    const observed = await waitForRendered(cdp, "session", criteria, 5_000);
-    assert.equal(observed.wasm, "WebAssembly result: 19 + 23 = 42");
+    const clock = fakeClock();
+    const settled = await waitForRendered(
+      cdp,
+      "session",
+      criteria,
+      5_000,
+      clock,
+    );
+    assert.equal(settled.observed.wasm, "WebAssembly result: 19 + 23 = 42");
+    assert.equal(settled.ready, false, "the identity meta is still missing");
   });
 
   it("returns the last observation when the settle budget expires", async () => {
-    const cdp = {
-      send: () =>
-        Promise.resolve({
-          result: {
-            value: JSON.stringify({
-              marker: "Get started",
-              wasm: "Loading WebAssembly...",
-              worker: null,
-              identity: null,
-              documentText: "",
-            }),
-          },
-        }),
+    const cdp = scriptedCdp([{
+      marker: "Get started",
+      wasm: "Loading WebAssembly...",
+      worker: null,
+      identity: null,
+      documentText: "",
+    }]);
+
+    const clock = fakeClock();
+    const settled = await waitForRendered(cdp, "session", criteria, 50, {
+      ...clock,
+      intervalMs: 25,
+    });
+
+    assert.equal(settled.observed.wasm, "Loading WebAssembly...");
+    assert.equal(settled.ready, false);
+    assert.equal(settled.timedOut, true);
+    assert.equal(settled.attempts, 3);
+    assert.equal(settled.elapsedMs, 50);
+  });
+});
+
+describe("browser readiness", () => {
+  it("does not count an absent application marker as ready", async () => {
+    const page = { ...healthyPage(), marker: null, documentText: "" };
+
+    const problems = readinessProblems(page, criteria);
+    assert.match(problems.join("\n"), /#app h1/);
+
+    const clock = fakeClock();
+    const settled = await waitForRendered(
+      scriptedCdp([page, { ...page, marker: "Get started" }]),
+      "session",
+      criteria,
+      500,
+      { ...clock, intervalMs: 100 },
+    );
+
+    assert.equal(settled.attempts, 2);
+    assert.equal(settled.ready, true, "the marker appears on the second read");
+    assert.equal(settled.timedOut, false);
+  });
+
+  it("does not count an absent #wasm-result as ready", async () => {
+    // This is the defect: the old loop compared the text with the placeholder,
+    // so a missing element (null) satisfied "no longer loading" instantly.
+    const absent = { ...healthyPage(), wasm: null };
+    const problems = readinessProblems(absent, criteria);
+    assert.match(problems.join("\n"), /#wasm-result/);
+
+    const clock = fakeClock();
+    const settled = await waitForRendered(
+      scriptedCdp([absent]),
+      "session",
+      criteria,
+      300,
+      { ...clock, intervalMs: 100 },
+    );
+
+    assert.equal(settled.ready, false);
+    assert.equal(settled.timedOut, true);
+    assert.equal(settled.observed.wasm, null);
+    assert.ok(settled.attempts > 1, "absence must keep the wait going");
+  });
+
+  it("does not count the loading placeholder as ready", async () => {
+    const loading = {
+      ...healthyPage(),
+      wasm: "Loading WebAssembly...",
+      worker: "Checking Cloudflare Worker...",
+      documentText: "Get started Loading WebAssembly...",
     };
 
-    const observed = await waitForRendered(cdp, "session", criteria, 50);
-    assert.equal(observed.wasm, "Loading WebAssembly...");
+    const problems = readinessProblems(loading, criteria);
+    assert.match(problems.join("\n"), /still the placeholder/);
+
+    const clock = fakeClock();
+    const settled = await waitForRendered(
+      scriptedCdp([loading, healthyPage()]),
+      "session",
+      criteria,
+      2_000,
+      { ...clock, intervalMs: 100 },
+    );
+
+    assert.equal(settled.ready, true);
+    assert.equal(settled.attempts, 2);
+    assert.equal(settled.timedOut, false);
+    assert.deepEqual(settled.problems, []);
+    assert.equal(settled.observed.wasm, "WebAssembly result: 19 + 23 = 42");
+  });
+
+  it("counts a rendered marker with completed output as ready immediately", async () => {
+    const clock = fakeClock();
+    const settled = await waitForRendered(
+      scriptedCdp([healthyPage()]),
+      "session",
+      criteria,
+      5_000,
+      clock,
+    );
+
+    assert.equal(settled.ready, true);
+    assert.equal(settled.timedOut, false);
+    assert.equal(settled.attempts, 1);
+    assert.equal(settled.elapsedMs, 0);
+    assert.deepEqual(settled.problems, []);
+    assert.deepEqual(
+      acceptance(settled.observed).filter((entry) => entry.status === "fail"),
+      [],
+      "a ready page must satisfy every existing assertion",
+    );
+  });
+
+  it("requires the worker identity and the build identity as well", () => {
+    const noWorker = readinessProblems(
+      { ...healthyPage(), worker: null },
+      criteria,
+    );
+    assert.match(noWorker.join("\n"), /#worker-health/);
+
+    const checking = readinessProblems(
+      { ...healthyPage(), worker: "Checking Cloudflare Worker..." },
+      criteria,
+    );
+    assert.match(checking.join("\n"), /still the placeholder/);
+
+    const noIdentity = readinessProblems(
+      { ...healthyPage(), identity: null },
+      criteria,
+    );
+    assert.match(noIdentity.join("\n"), /build-identity/);
+  });
+});
+
+describe("browser navigation response", () => {
+  it("records the navigation's document response and ignores subresources", () => {
+    const tracker = createNavigationTracker();
+
+    tracker.record("Network.responseReceived", {
+      type: "Script",
+      loaderId: "L1",
+      response: { url: "https://x/assets/app.js", status: 200 },
+    });
+    tracker.record("Network.responseReceived", {
+      type: "Document",
+      loaderId: "L1",
+      response: { url: "https://x/", status: 404, mimeType: "text/html" },
+    });
+
+    assert.deepEqual(tracker.get("L1"), {
+      url: "https://x/",
+      status: 404,
+      mimeType: "text/html",
+    });
+    assert.equal(tracker.get("missing"), null);
+    assert.equal(tracker.get(null), null);
+    assert.equal(tracker.size, 1);
+  });
+
+  it("treats a 404 document response as a failed navigation", () => {
+    const response = { url: "https://x/", status: 404, mimeType: "text/html" };
+    const verdict = navigationVerdict({ response });
+
+    assert.equal(verdict.status, 404);
+    assert.match(verdict.problem, /HTTP 404/);
+    assert.deepEqual(navigationVerdict({ response: { status: 200 } }), {
+      status: 200,
+      problem: null,
+    });
+  });
+
+  it("does not treat an unobserved or failed navigation as a success", () => {
+    const unobserved = navigationVerdict({});
+    assert.equal(unobserved.status, null);
+    assert.match(unobserved.problem, /not observed/);
+
+    const failed = navigationVerdict({
+      errorText: "net::ERR_NAME_NOT_RESOLVED",
+    });
+    assert.equal(failed.status, null);
+    assert.match(failed.problem, /ERR_NAME_NOT_RESOLVED/);
+  });
+
+  it("waits for the document response instead of assuming it", async () => {
+    const tracker = createNavigationTracker();
+    const clock = fakeClock();
+
+    const result = await observeNavigation({
+      tracker,
+      navigation: { loaderId: "L1" },
+      timeoutMs: 1_000,
+      intervalMs: 100,
+      now: clock.now,
+      sleep: async (ms) => {
+        await clock.sleep(ms);
+        if (clock.state.now === 100) {
+          tracker.record("Network.responseReceived", {
+            type: "Document",
+            loaderId: "L1",
+            response: { url: "https://x/", status: 200, mimeType: "text/html" },
+          });
+        }
+      },
+    });
+
+    assert.equal(result.status, 200);
+    assert.equal(result.problem, null);
+    assert.equal(result.url, "https://x/");
+    assert.equal(result.documents, 1);
+  });
+
+  it("gives up on an unobserved document response inside the bound", async () => {
+    const tracker = createNavigationTracker();
+    const clock = fakeClock();
+
+    const result = await observeNavigation({
+      tracker,
+      navigation: { loaderId: "L1" },
+      timeoutMs: 300,
+      intervalMs: 100,
+      now: clock.now,
+      sleep: clock.sleep,
+    });
+
+    assert.equal(result.status, null);
+    assert.match(result.problem, /not observed/);
+    assert.equal(clock.state.now, 300, "the wait is bounded, not unbounded");
   });
 });

@@ -1342,16 +1342,33 @@ substitutes for a failed edge assertion.
 
 - **Criteria** live in [`acceptance/criteria.json`](acceptance/criteria.json):
   the page marker, the exact WebAssembly result string
-  (`WebAssembly result: 19 + 23 = 42`), the Worker health text, and the failure
-  markers that must not appear. Editing that file changes what "accepted" means.
-- **The browser is real**: the preinstalled Chrome on the runner, driven over the
-  loopback DevTools protocol by [`scripts/edge-verify.mjs`](scripts/edge-verify.mjs).
-  No Playwright, no container, no additional dependency.
+  (`WebAssembly result: 19 + 23 = 42`), the Worker health text, the loading
+  placeholders that mean "not finished yet", and the failure markers that must
+  not appear. Editing that file changes what "accepted" means.
 - **The URL comes from the deployment**, never from a template. Wrangler does not
   print a workers.dev URL, so the account's own subdomain is read from the
   Cloudflare API and paired with the deployed Worker name the deployment
   reported; a URL found in the deploy log wins, and the evidence records which
   source was used.
+- **Readiness is waited for, not assumed.** Wrangler reports success when the
+  version is uploaded, but the workers.dev route serves it slightly later: until
+  it does, Cloudflare answers with its own error page (error 1042) or a transient
+  5xx. [`scripts/edge-readiness.sh`](scripts/edge-readiness.sh) therefore polls
+  the published URL every two seconds for up to thirty, records every attempt
+  (number, elapsed time, HTTP status, Cloudflare error code, diagnostic), and
+  proceeds only on HTTP 200 **that is the application this run deployed** — the
+  body must contain the `#app` mount point from `index.html` and its `<title>`
+  must be the Worker name, so an arbitrary 200 (a Cloudflare welcome page,
+  another deployment's page) cannot be mistaken for readiness. On timeout the
+  final response and the full history are printed and the run fails.
+- **The browser is real**: the preinstalled Chrome on the runner, driven over the
+  loopback DevTools protocol by [`scripts/edge-verify.mjs`](scripts/edge-verify.mjs).
+  No Playwright, no container, no additional dependency. The observer waits —
+  bounded by `--timeout` — until the marker, `#wasm-result`, the Worker health
+  text and the build-identity meta element are all present *and* no longer show
+  a loading placeholder. An absent element keeps the wait going: absence is not
+  readiness. The navigation's own document response is inspected too, so a 404
+  the browser received is a rejection rather than an unremarkable success.
 - **Identity binding**: the page title is baked in at build time from the
   initialised project name, so `page.identity` proves the tested page belongs to
   *that* deployment rather than to another Worker.
@@ -1364,14 +1381,65 @@ gh workflow run edge-acceptance.yml -f confirm=accept
 
 The workflow is `workflow_dispatch`-only (it deploys), never production, and uses
 a throwaway Worker named `edge-<run_id>-<attempt>` that is deleted at the end.
-Evidence is uploaded as the `edge-acceptance-<run_id>-<attempt>` artefact:
+Evidence is uploaded as the `edge-acceptance-<run_id>-<attempt>` artefact, after
+cleanup, so it contains the cleanup outcome:
 
 | File | Contents |
 | --- | --- |
-| `acceptance.json` | source SHA, deployment URL and its source, deployment id, HTTP status, browser, per-assertion results, overall `accepted` |
+| `acceptance.json` | source SHA, deployment URL and its source, deployment id, HTTP status, browser, navigation status, browser readiness outcome, per-assertion results, overall `accepted`, the edge readiness history (`edgeReadiness`) and the cleanup record (`cleanup`) |
+| `edge-readiness.json` | the readiness attempt history on its own: every attempt's elapsed time, HTTP status, Cloudflare error code and diagnostic |
 | `screenshot.png` | supplementary evidence only — never the decision |
-| `page.html` | the HTTP response body that was tested |
+| `page.html` | the last response body the readiness gate tested |
+| `cleanup.json` | the teardown record: the Worker name, whether deletion and verification were attempted, their HTTP results, per-attempt diagnostics, the final classification and a timestamp |
 | `deploy.log` | the deployment command's output |
+
+### Teardown is verified, not assumed
+
+`scripts/edge-cleanup.sh` deletes the disposable Worker and then proves it is
+gone. It deliberately does **not** use `wrangler delete`: Wrangler 4.156 deletes
+the Worker and *then* runs a legacy Workers Sites post-check that lists KV
+namespaces. Under a Workers Scripts:Edit token that call returns Cloudflare error
+`10000` (401), and Wrangler tolerates only a `403` there, so it exits non-zero
+**after a deletion that already succeeded** — which is how two runs reported
+"cleanup could not delete … delete it manually" for Workers that were, in fact,
+already gone.
+
+The script uses the two documented, name-scoped endpoints and nothing else:
+
+| Step | Request | Meaning |
+| --- | --- | --- |
+| deletion | `DELETE /accounts/{account_id}/workers/scripts/{script_name}?force=true` (`worker-script-delete-worker`) | the request; its `200` is never the verdict |
+| verification | `GET /accounts/{account_id}/workers/scripts/{script_name}/settings` (`worker-script-get-settings`) | `404` (code `10007`) means absent; `200` means the Worker still exists |
+
+`/workers/services/{name}`, which Wrangler deletes through, is not part of
+Cloudflare's public API schema, so the two are not interchangeable and the
+documented `workers/scripts` resource is the one used here. No KV endpoint is
+called, so the token keeps its existing Workers Scripts:Edit scope.
+
+The verification is authoritative: confirmed absence is a success (including when
+the Worker was already absent), and a Worker that is still readable is a failure
+even when the deletion answered `200`. Transient failures (`5xx`, `429`, no
+response) are retried within a small bound; authentication and permission errors
+are never retried. The script rejects anything that is not a disposable
+`edge-<digits>-<digits>` identity *before* constructing a request, never lists or
+enumerates Workers, and reads the token from `CLOUDFLARE_API_TOKEN` only — passing
+it to `curl` through a private `--config` file so it never appears in the argument
+vector — and scrubs the credential from every string it writes.
+
+Its exit status (`0` verified absent, `1` cleanup failed, `2` refused) is the
+cleanup verdict. The workflow records it in the `cleanup` step outcome, in
+`cleanup_exit` / `cleanup_classification` step outputs, in the job summary and in
+`cleanup.json`; because cleanup runs with `continue-on-error`, a cleanup problem
+stays visible without changing the application's acceptance verdict.
+
+Concurrent runs are independent by construction rather than by luck: the Worker
+name is derived from the run id and attempt, each run works in its own
+`${{ github.workspace }}/.acceptance` tree, the artefact name is run-scoped and
+cleanup deletes `"$WORKER_NAME"` and nothing else. `scripts/edge-readiness.test.mjs`
+reads those identities out of the workflow and checks them. The `concurrency`
+group is per ref with `cancel-in-progress: false`, so a second dispatch on the
+same ref is queued rather than cancelled mid-teardown — a scheduling choice, not
+the isolation mechanism.
 
 Prerequisites (none of which are configured in this repository yet, so the job
 fails closed with this list rather than passing silently):

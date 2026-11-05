@@ -11,6 +11,23 @@ name: Edge acceptance
 #
 # Never production: the Worker name is `edge-<run_id>-<attempt>`, a throwaway
 # instance that is deleted at the end of the run.
+#
+# Run isolation. Two dispatches may overlap — a human testing deployment and
+# teardown races will do exactly that — and nothing here depends on a global
+# lock:
+#
+#   * the Worker name is derived from `github.run_id` and `github.run_attempt`,
+#     so no two runs (or re-runs) can address the same deployment;
+#   * each run works in its own `${{ github.workspace }}/.acceptance` tree, so the
+#     build, the evidence and the deployment metadata never cross runs;
+#   * the artefact name is equally run-scoped, so evidence cannot be overwritten;
+#   * cleanup deletes `"$WORKER_NAME"` and nothing else.
+#
+# The `concurrency` group below is per ref with `cancel-in-progress: false`, so a
+# second dispatch of *this* workflow on the same ref is queued rather than
+# cancelled mid-teardown. That scheduling choice is not what makes concurrent
+# runs safe; the run-scoped identities above are, and
+# `scripts/edge-readiness.test.mjs` asserts them.
 
 on:
   workflow_dispatch:
@@ -146,10 +163,82 @@ jobs:
         env:
           DEPLOY_LOG: ${{ github.workspace }}/.acceptance/deploy.log
           DEPLOY_EXIT_CODE: "0"
+          # Readiness budgets. The gate polls the published URL every two seconds
+          # for up to thirty: Wrangler reports success before the workers.dev
+          # route serves the version, and Cloudflare answers with its own error
+          # page (error 1042) or a transient 5xx until it does.
+          EDGE_READINESS_TIMEOUT_MS: "30000"
+          EDGE_READINESS_INTERVAL: "2"
         run: |
           cd "$WORK_DIR"
           mise exec -- bash scripts/edge-accept.sh
 
+      - name: Delete the disposable Worker and verify it is gone
+        id: cleanup
+        if: always()
+        # Cleanup deletes exactly the Worker this run deployed, then verifies its
+        # absence with an independent API read. It does not use `wrangler delete`:
+        # that command deletes the Worker and *then* runs a legacy KV-namespace
+        # post-check which, under a Workers Scripts:Edit token, fails with
+        # Cloudflare error 10000 (401). Wrangler tolerates only a 403 there, so it
+        # exits non-zero after a deletion that already succeeded, and the run
+        # reported a failure for cleanup that had worked.
+        #
+        # The script needs only the disposable name, the account id and the token.
+        # It never lists or enumerates Workers, never names another Worker, and
+        # never needs KV permissions, so the token does not have to be widened.
+        #
+        # Its exit status is the cleanup verdict: it is recorded in the `cleanup`
+        # step outcome, in the step outputs, in the job summary and in
+        # cleanup.json. `continue-on-error` keeps that verdict explicit without
+        # letting an operational cleanup problem change the application's
+        # acceptance verdict, which is decided by the evidence above and is not
+        # touched here.
+        continue-on-error: true
+        env:
+          # Exactly the two credentials cleanup needs, and nothing else.
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          mkdir -p "$WORK_DIR/artifacts"
+
+          set +e
+          bash scripts/edge-cleanup.sh \
+            --worker "$WORKER_NAME" \
+            --out "$WORK_DIR/artifacts" \
+            --evidence "$WORK_DIR/artifacts/acceptance.json"
+          status=$?
+          set -e
+
+          classification="unknown"
+          if [ -f "$WORK_DIR/artifacts/cleanup.json" ]; then
+            classification="$(python3 -c \
+              'import json, sys; print(json.load(open(sys.argv[1])).get("classification", "unknown"))' \
+              "$WORK_DIR/artifacts/cleanup.json" 2>/dev/null || echo unknown)"
+          fi
+          echo "cleanup_exit=$status" >> "$GITHUB_OUTPUT"
+          echo "cleanup_classification=$classification" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Disposable Worker cleanup"
+            echo ""
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| Worker | \`$WORKER_NAME\` |"
+            echo "| Result | \`$classification\` (exit $status) |"
+            echo "| Evidence | \`artifacts/cleanup.json\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$status" -ne 0 ]; then
+            echo "::warning::cleanup of $WORKER_NAME did not verify ($classification, exit $status); see cleanup.json. The acceptance verdict is unaffected."
+          fi
+          exit "$status"
+
+      # The evidence is uploaded *after* cleanup so the artefact contains the
+      # cleanup outcome too. Uploading earlier captured acceptance.json before
+      # the cleanup record had been merged into it, so a run could look cleaner
+      # than it was.
       - name: Keep the acceptance evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -157,63 +246,10 @@ jobs:
           name: edge-acceptance-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ github.workspace }}/.acceptance/artifacts/acceptance.json
+            ${{ github.workspace }}/.acceptance/artifacts/edge-readiness.json
             ${{ github.workspace }}/.acceptance/artifacts/screenshot.png
             ${{ github.workspace }}/.acceptance/artifacts/page.html
             ${{ github.workspace }}/.acceptance/artifacts/cleanup.json
             ${{ github.workspace }}/.acceptance/deploy.log
           if-no-files-found: warn
           retention-days: 30
-
-      - name: Delete the disposable Worker and record cleanup
-        if: always()
-        # Cleanup keeps the account from accumulating one Worker per run. Its
-        # outcome is recorded in the evidence but never changes the acceptance
-        # verdict: a leftover Worker is an operational warning, not a behavioural
-        # failure of the application.
-        run: |
-          set +e
-          cd "$WORK_DIR" || exit 0
-          mkdir -p artifacts
-          if [ ! -f dist/worker/wrangler.json ]; then
-            command="no Worker was deployed"
-            code=0
-          else
-            node "$GITHUB_WORKSPACE/node_modules/wrangler/bin/wrangler.js" delete \
-              "$WORKER_NAME" --force --config dist/worker/wrangler.json
-            code=$?
-            command="wrangler delete $WORKER_NAME"
-          fi
-
-          python3 - "$WORK_DIR/artifacts/cleanup.json" "$WORKER_NAME" "$code" "$command" <<'PY'
-          import json, sys
-          target, worker, code, command = sys.argv[1:5]
-          record = {
-              "worker": worker,
-              "command": command,
-              "exitCode": int(code),
-              "ok": int(code) == 0,
-          }
-          with open(target, "w") as handle:
-              json.dump(record, handle, indent=2)
-              handle.write("\n")
-          PY
-
-          # Attach the cleanup outcome to the acceptance evidence without
-          # recomputing (or weakening) the acceptance verdict.
-          python3 - "$WORK_DIR/artifacts/acceptance.json" "$WORK_DIR/artifacts/cleanup.json" <<'PY'
-          import json, os, sys
-          evidence_path, cleanup_path = sys.argv[1:3]
-          if os.path.exists(evidence_path):
-              with open(evidence_path) as handle:
-                  evidence = json.load(handle)
-              with open(cleanup_path) as handle:
-                  evidence["cleanup"] = json.load(handle)
-              with open(evidence_path, "w") as handle:
-                  json.dump(evidence, handle, indent=2)
-                  handle.write("\n")
-          PY
-
-          if [ "$code" -ne 0 ]; then
-            echo "::warning::cleanup could not delete $WORKER_NAME (exit $code); delete it manually"
-          fi
-          exit 0
