@@ -22,6 +22,7 @@ import {
 import os from "./lib/os.mjs";
 import path from "./lib/path.mjs";
 import { after, describe, it } from "./lib/test.mjs";
+import { runsInGeneratorCheckout } from "./lib/workflow-context.mjs";
 
 import {
   assertDestinationAvailable,
@@ -786,6 +787,10 @@ describe("shipped workflow coverage", () => {
         references += 1;
         if (productTasks.has(task)) continue;
 
+        // A generator-only task is authorised only by a declared execution
+        // context: the step must run *in* the generator checkout
+        // (`working-directory`), never because a `run:` block mentioned it.
+        if (runsInGeneratorCheckout(step.body)) continue;
         // A task the product does not define must be skipped by a guard on a
         // file the product genuinely does not receive.
         const guarded = guardFiles(step).some((guard) =>

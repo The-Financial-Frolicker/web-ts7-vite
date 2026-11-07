@@ -65,6 +65,14 @@ export const PRODUCT_MANIFEST = Object.freeze({
     "scripts/serve.sh",
     "scripts/tsc-check.mjs",
     "scripts/tsc-check.sh",
+    "scripts/toolchain-source.mjs",
+    "scripts/lib/toolchain/provenance.mjs",
+    "scripts/ci-workflow.test.mjs",
+    "scripts/github-output.test.mjs",
+    // The product's own provenance tests: they exercise the shipped reader and
+    // verifier against a stub digest fixture, so they depend on nothing the
+    // product does not receive.
+    "scripts/provenance-source.test.mjs",
     "scripts/wrangler-deploy.mjs",
     "scripts/wrangler-deploy.test.mjs",
     "scripts/wrangler-types.mjs",
@@ -120,6 +128,10 @@ export const GENERATOR_ONLY = Object.freeze([
   // verifier and its tests, but not the suite that records how the generator
   // measured and derived the contract's scope evidence.
   "scripts/emscripten-provenance.test.mjs",
+  // Release construction — clean tree, annotated tag, tag/commit equality and
+  // the generator's own initialisation — is generator-side behaviour. The
+  // product ships its own reader/verifier tests instead.
+  "scripts/provenance.test.mjs",
   "scripts/toolchain.test.mjs",
   "scripts/generate-product.test.mjs",
   "scripts/contract-refresh.sh",

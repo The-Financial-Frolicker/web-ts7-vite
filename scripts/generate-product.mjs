@@ -27,6 +27,14 @@ import {
   productPaths,
 } from "./product-manifest.mjs";
 import { initialiseProject, validateProjectName } from "./init-project.mjs";
+import {
+  createGitRunner,
+  releaseProvenance,
+  renderSource,
+  SOURCE_FILE,
+} from "./lib/toolchain/provenance.mjs";
+import { toolchainRoot } from "./lib/toolchain/runtime.mjs";
+import { treeDigest } from "./lib/toolchain/tree-digest.mjs";
 
 export const EXIT_OK = 0;
 export const EXIT_USAGE = 1;
@@ -48,11 +56,16 @@ export const GENERATOR_ONLY_TASKS = Object.freeze([
   // copied. Keeping these tasks in a product would point at absent files.
   // `toolchain:prepare` owns the whole lifecycle; `--check` is its verification
   // mode, so there is no separate `toolchain:check` task to keep in step.
+  "toolchain:install",
   "toolchain:prepare",
   "test:toolchain-config",
   // The generator's own regression suite generates product trees and has no
   // meaning inside one; it must never enter the product's validation chain.
   "test:generator",
+  // Release construction (clean tree, annotated tag, tag/commit equality) needs
+  // git and the generator's release state, and imports the generator-only digest
+  // implementation. The product's equivalent is `test:provenance-source`.
+  "test:provenance",
 ]);
 
 /**
@@ -74,6 +87,9 @@ export const PRODUCT_VALIDATE = Object.freeze([
   "test:deploy",
   "test:boundary",
   "test:contracts",
+  "test:provenance-source",
+  "test:github-output",
+  "test:ci-workflow",
   "test:vite",
   "test:wrangler-types",
   "test:wrangler-dry-run",
@@ -223,7 +239,7 @@ function usage() {
     "Generate a product tree from this generator.",
     "",
     "Usage:",
-    "  deno task product:generate <project-name> --into DIR [--dry-run]",
+    "  deno task product:generate <project-name> --into DIR [--dry-run] [--toolchain-ref TAG]",
     "",
     "The destination must be absent or empty. Only the artefacts listed in",
     "scripts/product-manifest.mjs are copied; the generator tree is unchanged.",
@@ -231,11 +247,12 @@ function usage() {
 }
 
 /** CLI entry point; returns an exit code. */
-export function main(argv = Deno.args, io = console) {
+export async function main(argv = Deno.args, io = console) {
   try {
     const positional = [];
     let destination;
     let dryRun = false;
+    let toolchainRef;
 
     for (let index = 0; index < argv.length; index += 1) {
       const argument = argv[index];
@@ -245,6 +262,19 @@ export function main(argv = Deno.args, io = console) {
       }
       if (argument === "--dry-run" || argument === "-n") {
         dryRun = true;
+        continue;
+      }
+      if (argument === "--toolchain-ref") {
+        const value = argv[index + 1];
+        if (value === undefined || value.startsWith("-")) {
+          fail("--toolchain-ref requires an annotated release tag");
+        }
+        toolchainRef = value;
+        index += 1;
+        continue;
+      }
+      if (argument.startsWith("--toolchain-ref=")) {
+        toolchainRef = argument.slice("--toolchain-ref=".length);
         continue;
       }
       if (argument === "--into") {
@@ -272,7 +302,30 @@ export function main(argv = Deno.args, io = console) {
     if (dryRun) {
       io.log(`Dry run: would generate "${positional[0]}" in ${destination}.`);
       io.log(`Would copy ${productPaths().length} manifest entries.`);
+      io.log(
+        toolchainRef === undefined
+          ? "Development provenance: no .toolchain-source.json would be written."
+          : `Release provenance: would record ${toolchainRef} after verifying its tag, SHA and toolchain digest.`,
+      );
       return EXIT_OK;
+    }
+
+    // Release provenance is resolved *before* anything is written: a dirty tree,
+    // a lightweight or missing tag, or a toolchain that does not match its own
+    // record must produce no half-generated product.
+    let provenance;
+    if (toolchainRef !== undefined) {
+      provenance = await releaseProvenance({
+        root: Deno.cwd(),
+        ref: toolchainRef,
+        toolchainRoot: toolchainRoot(),
+        run: createGitRunner(),
+        digest: treeDigest,
+      });
+      io.log(
+        `[provenance] ${provenance.ref} -> ${provenance.sha} ` +
+          `materialisation ${provenance.materialisation}`,
+      );
     }
 
     generateProduct({
@@ -280,6 +333,21 @@ export function main(argv = Deno.args, io = console) {
       name: positional[0],
       log: (message) => io.log(message),
     });
+
+    if (provenance !== undefined) {
+      writeFileSync(
+        path.join(destination, SOURCE_FILE),
+        renderSource(provenance),
+      );
+      io.log(`[provenance] wrote ${SOURCE_FILE} into the product`);
+    } else {
+      io.log(
+        "[provenance] development generation: no .toolchain-source.json written. " +
+          "This product cannot provision its toolchain in CI; use " +
+          "`--toolchain-ref <toolchain-YYYY.MM.N>` from a clean release checkout.",
+      );
+    }
+
     io.log("The generator tree was not modified.");
     return EXIT_OK;
   } catch (error) {
@@ -296,5 +364,5 @@ export function main(argv = Deno.args, io = console) {
 }
 
 if (import.meta.main) {
-  Deno.exitCode = main();
+  Deno.exitCode = await main();
 }

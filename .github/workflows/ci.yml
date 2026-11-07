@@ -153,6 +153,24 @@ jobs:
         if: hashFiles('scripts/generate-product.test.mjs') != ''
         run: mise exec -- deno task test:generator
 
+      # Release provenance is constructed by the generator: clean tree, annotated
+      # release tag, tag/commit equality. The suite needs git and the generator's
+      # own digest implementation, neither of which a product receives.
+      - name: Release provenance tests (generator only)
+        if: hashFiles('scripts/provenance.test.mjs') != ''
+        run: mise exec -- deno task test:provenance
+
+      # The shipped reader/verifier and the workflow it feeds. These run in the
+      # generator and, unchanged, in every product.
+      - name: Product provenance reader and verifier tests
+        run: mise exec -- deno task test:provenance-source
+
+      - name: Provenance output-boundary tests
+        run: mise exec -- deno task test:github-output
+
+      - name: CI workflow contract tests
+        run: mise exec -- deno task test:ci-workflow
+
       - name: Vite invocation tests
         run: mise exec -- deno task test:vite
 
@@ -256,3 +274,107 @@ jobs:
           mise exec -- deno task build
           mise exec -- deno task deploy:dry-run
           echo "generated product validated independently"
+
+  # ---------------------------------------------------------------------------
+  # Generated product path.
+  #
+  # A generated product ships no `toolchain/` directory, which is the role
+  # discriminator. It must therefore establish *which* generator release and
+  # *which* materialised dependency tree it is authorised to use before any
+  # product task runs. A product with missing or invalid provenance fails in
+  # Stage A; it can never fall through into the generator jobs.
+  # ---------------------------------------------------------------------------
+  product:
+    name: Product validation (release provenance required)
+    if: hashFiles('toolchain/deno.lock') == ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    env:
+      # External to the product checkout: the installation is CI infrastructure.
+      TOOLCHAIN_ROOT: ${{ runner.temp }}/toolchain
+
+    steps:
+      - name: Check out product
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install the pinned host tools with mise
+        uses: jdx/mise-action@v5
+        with:
+          # The product's own projection; binaries only. The npm-domain
+          # toolchain is provisioned separately and is never cached here.
+          cache: true
+          cache_save_post: true
+          install: true
+
+      # Stage A — provenance metadata. Nothing else may run before this passes.
+      # The reader validates the schema, the fixed repository identity, the
+      # toolchain-YYYY.MM.N ref and both digest formats *before* it writes
+      # anything, so a rejected record leaves no partial output for later steps.
+      - name: Read and validate provenance metadata
+        id: meta
+        run: |
+          set -euo pipefail
+          deno run --allow-read --allow-env scripts/toolchain-source.mjs \
+            read --format=github | tee -a "$GITHUB_OUTPUT"
+
+      # Stage B — the fixed generator release, nothing movable.
+      - name: Check out the recorded generator release
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ steps.meta.outputs.tc_repository }}
+          ref: ${{ steps.meta.outputs.tc_ref }}
+          path: ${{ runner.temp }}/generator
+          persist-credentials: false
+
+      - name: Verify the generator release identity
+        run: |
+          set -euo pipefail
+          generator="${{ runner.temp }}/generator"
+          expected="${{ steps.meta.outputs.tc_sha }}"
+          ref="${{ steps.meta.outputs.tc_ref }}"
+          actual="$(git -C "$generator" rev-parse HEAD)"
+          test "$actual" = "$expected" || {
+            echo "checked-out generator is $actual; the product expects $expected"; exit 1; }
+          kind="$(git -C "$generator" cat-file -t "refs/tags/$ref")"
+          test "$kind" = "tag" || {
+            echo "release ref is a $kind, not an annotated tag"; exit 1; }
+          resolved="$(git -C "$generator" rev-parse "$ref^{commit}")"
+          test "$resolved" = "$expected" || {
+            echo "release tag resolves to $resolved, not $expected"; exit 1; }
+          echo "generator release verified: $ref -> $expected"
+
+      # Stage C — provisioning, from the verified checkout, outside the product.
+      # The execution context is declared, not implied: this step runs *in* the
+      # generator checkout, which is what authorises a generator-only task.
+      - name: Provision the toolchain from the verified generator release
+        working-directory: ${{ runner.temp }}/generator
+        run: |
+          set -euo pipefail
+          mise exec -- deno task toolchain:install -- --allow-download
+
+      # Stage D — the three identities must agree, with the digest computed by
+      # the verified checkout's own implementation.
+      - name: Verify provenance and materialisation
+        run: |
+          set -euo pipefail
+          deno run --allow-read --allow-env \
+            "$GITHUB_WORKSPACE/scripts/toolchain-source.mjs" verify \
+            --generator "${{ runner.temp }}/generator" \
+            --toolchain-root "$TOOLCHAIN_ROOT"
+
+      # Stage E — product acceptance, only after every gate above.
+      - name: Client typecheck
+        run: mise exec -- deno task check:client
+
+      - name: Worker typecheck
+        run: mise exec -- deno task check:worker
+
+      - name: Build
+        run: mise exec -- deno task build
+
+      - name: Wrangler deploy dry run
+        run: mise exec -- deno task deploy:dry-run
