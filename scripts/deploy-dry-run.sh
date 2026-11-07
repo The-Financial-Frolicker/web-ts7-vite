@@ -26,15 +26,10 @@ if [[ -z "$DENO_BIN" || ! -x "$DENO_BIN" ]]; then
     exit 1
 fi
 
-if [[ ! -d "$PROJECT_ROOT/node_modules" ]]; then
-    echo "ERROR: npm dependencies are not installed." >&2
-    echo "       Install them with: mise exec -- deno install --frozen" >&2
-    exit 1
-fi
-
-NODE_MODULES_REAL="$(readlink -f "$PROJECT_ROOT/node_modules")"
-if [[ -z "$NODE_MODULES_REAL" ]]; then
-    echo "ERROR: could not resolve the real node_modules directory." >&2
+TOOLCHAIN_ROOT="$(readlink -f "${TOOLCHAIN_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/web-ts7-vite/toolchain}")"
+if [[ -z "$TOOLCHAIN_ROOT" || ! -f "$TOOLCHAIN_ROOT/toolchain.json" ]]; then
+    echo "ERROR: the toolchain is not installed." >&2
+    echo "       Provision it with: deno task toolchain:install" >&2
     exit 1
 fi
 
@@ -51,7 +46,7 @@ deno task check:deploy
 
 echo "Running Wrangler dry-run..."
 deno run \
-    --allow-read="$PROJECT_ROOT,$NODE_MODULES_REAL" \
-    --allow-env=HOME,XDG_CONFIG_HOME \
+    --allow-read="$PROJECT_ROOT,$TOOLCHAIN_ROOT" \
+    --allow-env=HOME,XDG_CONFIG_HOME,XDG_DATA_HOME,TOOLCHAIN_ROOT \
     --allow-run="$DENO_BIN" \
     scripts/wrangler-dry-run.mjs "$@"

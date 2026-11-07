@@ -3,17 +3,13 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
-  "engines": {
-    "node": ">=22.12.0"
-  },
   "scripts": {
-    "dev": "vite",
     "build": "bash scripts/deno-no-node.sh bash scripts/build.sh",
     "fmt": "bash scripts/deno-no-node.sh deno fmt",
     "fmt:check": "bash scripts/deno-no-node.sh deno fmt --check",
     "lint": "bash scripts/deno-no-node.sh deno lint",
-    "check:client": "bash scripts/deno-no-node.sh deno run --allow-read --allow-env --allow-run --cached-only --frozen npm:typescript@7.0.2 -p tsconfig.json",
-    "check:worker": "bash scripts/deno-no-node.sh deno run --allow-read --allow-env --allow-run --cached-only --frozen npm:typescript@7.0.2 -p worker/tsconfig.json",
+    "check:client": "bash scripts/deno-no-node.sh bash scripts/tsc-check.sh tsconfig.json",
+    "check:worker": "bash scripts/deno-no-node.sh bash scripts/tsc-check.sh worker/tsconfig.json",
     "check:node-boundary": "bash scripts/deno-no-node.sh deno run --allow-read --allow-env scripts/check-node-boundary.mjs",
     "check:deploy": "bash scripts/deno-no-node.sh deno run --allow-read --allow-env scripts/check-deploy-artifacts.mjs",
     "check:contracts": "bash scripts/deno-no-node.sh bash scripts/check-contracts.sh",
@@ -33,14 +29,7 @@
     "test:no-node": "bash scripts/deno-no-node.sh deno test --allow-read --allow-write --allow-run --allow-env scripts/deno-no-node.test.mjs",
     "test:wasm": "bash scripts/deno-no-node.sh deno test --allow-read wasm/harness.test.ts",
     "test:wasm:published": "bash scripts/deno-no-node.sh deno test --allow-read wasm/published.test.ts",
-    "preview": "vite preview",
     "edge:verify": "bash scripts/edge-accept.sh",
     "test:edge": "bash scripts/deno-no-node.sh deno test --allow-read --allow-write --allow-env --allow-run --allow-net=127.0.0.1 scripts/edge-verify.test.mjs scripts/edge-readiness.test.mjs scripts/edge-cleanup.test.mjs"
-  },
-  "devDependencies": {
-    "@cloudflare/vite-plugin": "1.66.0",
-    "typescript": "~7.0.2",
-    "vite": "^8.3.5",
-    "wrangler": "4.156.0"
   }
 }

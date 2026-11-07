@@ -23,8 +23,13 @@ env:
   DENO_NO_UPDATE_CHECK: "1"
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # Repository-role discriminator: the generator owns `toolchain/deno.lock`.
+  # A generated product never ships it, so exactly one of these jobs can run.
+  # ---------------------------------------------------------------------------
   validate:
-    name: Validate
+    name: Validate (generator)
+    if: hashFiles('toolchain/deno.lock') != ''
     runs-on: ubuntu-24.04
     timeout-minutes: 30
 
@@ -70,18 +75,29 @@ jobs:
         # then a mise-provisioned fallback.
         run: bash scripts/resolve-python.sh
 
-      - name: Cache Deno's npm download cache
-        uses: actions/cache@v6
-        with:
-          path: ~/.cache/deno
-          key: deno-npm-${{ runner.os }}-${{ hashFiles('deno.lock') }}
-          restore-keys: |
-            deno-npm-${{ runner.os }}-
+      # The toolchain is provisioned through the same generator-owned lifecycle a
+      # developer runs. `--frozen` keeps resolution locked (nothing is discovered,
+      # upgraded or re-pinned); `--allow-download` exists only because a clean
+      # runner has no Deno package cache. The materialisation is verified and its
+      # identity recorded before any application workflow runs.
+      - name: Provision the toolchain
+        if: hashFiles('scripts/toolchain-install.mjs') != ''
+        run: mise exec -- deno task toolchain:install -- --allow-download
 
-      - name: Install npm dependencies
-        run: mise exec -- deno install --frozen
-
-      - name: Formatting check
+      - name: Record and verify the toolchain identity
+        run: |
+          set -euo pipefail
+          tc="${XDG_DATA_HOME:-$HOME/.local/share}/web-ts7-vite/toolchain"
+          echo "::group::toolchain identity"
+          cat "$tc/toolchain.json"
+          sha256sum "$tc/package.json" "$tc/deno.json" "$tc/deno.lock"
+          echo "::endgroup::"
+          for pkg in vite wrangler typescript @cloudflare/vite-plugin; do
+            test -e "$tc/node_modules/$pkg" || { echo "missing package: $pkg"; exit 1; }
+          done
+          test -x "$tc"/node_modules/.deno/@cloudflare+workerd-linux-64@*/node_modules/@cloudflare/workerd-linux-64/bin/workerd
+          test -x "$tc"/node_modules/.deno/@rolldown+binding-linux-x64-gnu@*/node_modules/@rolldown/binding-linux-x64-gnu/*.node
+          echo "toolchain identity verified"
         run: mise exec -- deno task fmt:check
 
       - name: Lint check
@@ -175,11 +191,11 @@ jobs:
   # initialisation and runs the contract gate again as its final step, after the
   # build, so the generated configuration is compared with build output present.
   build:
-    name: Build validation
+    name: Build validation (generator)
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     needs: validate
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && hashFiles('toolchain/deno.lock') != '' }}
 
     steps:
       - name: Check out repository
@@ -197,16 +213,10 @@ jobs:
           cache_save_post: true
           install: true
 
-      - name: Cache Deno's npm download cache
-        uses: actions/cache@v6
-        with:
-          path: ~/.cache/deno
-          key: deno-npm-${{ runner.os }}-${{ hashFiles('deno.lock') }}
-          restore-keys: |
-            deno-npm-${{ runner.os }}-
-
-      - name: Install npm dependencies
-        run: mise exec -- deno install --frozen
+      # A second runner needs its own installation; there is no shared cache.
+      - name: Provision the toolchain
+        if: hashFiles('scripts/toolchain-install.mjs') != ''
+        run: mise exec -- deno task toolchain:install -- --allow-download
 
       # The template's identity placeholder is not a valid Cloudflare Worker
       # name, so this stage builds a throwaway initialised copy: worker types
@@ -216,3 +226,33 @@ jobs:
       # separate diagnostic step is duplicated here. It never deploys.
       - name: Generated types, WASM build, smoke tests, deployment dry run and contract gate
         run: mise exec -- bash scripts/ci.sh build
+
+      # The generated product must stand on its own: produced into the runner's
+      # temporary directory, then exercised with its own cwd and without any
+      # generator path in play. This is the CI form of the S6-E independence test.
+      - name: Generated product independence
+        if: hashFiles('scripts/product-manifest.mjs') != ''
+        run: |
+          set -euo pipefail
+          product="${RUNNER_TEMP}/ci-product"
+          rm -rf "$product"
+          mise exec -- deno task product:generate ci-product --into "$product"
+          # Ownership assertions on the product tree.
+          test ! -d "$product/toolchain"
+          test ! -e "$product/deno.lock"
+          test -f "$product/scripts/tsc-check.mjs"
+          test -f "$product/scripts/tsc-check.sh"
+          test ! -f "$product/scripts/vite-runner.mjs"
+          test ! -f "$product/scripts/toolchain-install.mjs"
+          if grep -q '"toolchain:install"' "$product/deno.json"; then
+            echo "generator-only task leaked into the product"; exit 1
+          fi
+          cd "$product"
+          echo "::group::product identity"
+          cat package.json
+          echo "::endgroup::"
+          mise exec -- deno task check:client
+          mise exec -- deno task check:worker
+          mise exec -- deno task build
+          mise exec -- deno task deploy:dry-run
+          echo "generated product validated independently"

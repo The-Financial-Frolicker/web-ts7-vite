@@ -15,6 +15,7 @@
  */
 
 import { join } from "./lib/path.mjs";
+import { runtimePolicy } from "./lib/toolchain/runtime.mjs";
 import { resolveEsbuild, resolveWranglerCli } from "./wrangler-types.mjs";
 
 function fail(message) {
@@ -59,13 +60,16 @@ export function buildWranglerDryRunArgs(invocation, root, extraArgs = []) {
   const writes = writablePaths(root);
   return [
     "run",
+    // The installation is provisioned by the toolchain lifecycle. Deno must use
+    // that tree as-is and never set up or modify node_modules at run time.
+    "--node-modules-dir=manual",
     "--allow-read",
     "--allow-env",
     "--allow-sys",
     ...writes.map((path) => `--allow-write=${path}`),
     `--allow-run=${invocation.esbuild}`,
     "--cached-only",
-    "--frozen",
+    "--no-lock",
     invocation.wranglerCli,
     "deploy",
     "--config",
@@ -89,7 +93,10 @@ export function runChild(args, root) {
 /** CLI entry point; returns a process exit code. */
 export function main(argv = Deno.args, root = Deno.cwd(), execute = runChild) {
   try {
-    const invocation = resolveWranglerDryRunInvocation(root);
+    // Deno pin and installed toolchain, before any resolution or execution.
+    const policy = runtimePolicy(root);
+
+    const invocation = resolveWranglerDryRunInvocation(policy.toolchainRoot);
     const extraArgs = argv[0] === "--print-profile" ? [] : argv;
     const args = buildWranglerDryRunArgs(invocation, root, extraArgs);
 

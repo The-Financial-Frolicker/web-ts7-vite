@@ -16,10 +16,13 @@ import {
 } from "./wrangler-dry-run.mjs";
 
 const projectRoot = Deno.cwd();
+// Toolchain packages live in the installed toolchain, outside the application.
+const toolchainRoot = Deno.env.get("TOOLCHAIN_ROOT") ??
+  `${Deno.env.get("HOME")}/.local/share/web-ts7-vite/toolchain`;
 
 describe("Deno-owned Wrangler dry-run", () => {
   it("resolves the direct Wrangler CLI and esbuild", () => {
-    const invocation = resolveWranglerDryRunInvocation(projectRoot);
+    const invocation = resolveWranglerDryRunInvocation(toolchainRoot);
 
     assert.ok(invocation.wranglerCli.endsWith("/wrangler-dist/cli.js"));
     assert.ok(
@@ -32,7 +35,7 @@ describe("Deno-owned Wrangler dry-run", () => {
   });
 
   it("builds the dry-run-specific profile and forwards arguments", () => {
-    const invocation = resolveWranglerDryRunInvocation(projectRoot);
+    const invocation = resolveWranglerDryRunInvocation(toolchainRoot);
     const writes = writablePaths(projectRoot);
     const args = buildWranglerDryRunArgs(invocation, projectRoot, [
       "--var",
@@ -46,7 +49,7 @@ describe("Deno-owned Wrangler dry-run", () => {
         "--allow-sys",
         `--allow-run=${invocation.esbuild}`,
         "--cached-only",
-        "--frozen",
+        "--no-lock",
         invocation.wranglerCli,
         "deploy",
         "--config",

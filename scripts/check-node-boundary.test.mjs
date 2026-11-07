@@ -1,16 +1,18 @@
 import assert from "./lib/assert.mjs";
 import { run } from "./lib/command.mjs";
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
-  symlinkSync,
   writeFileSync,
 } from "./lib/fs.mjs";
 import os from "./lib/os.mjs";
 import path from "./lib/path.mjs";
 import { after, describe, it } from "./lib/test.mjs";
+import { resolveTsc } from "./tsc-check.mjs";
+import { toolchainRoot } from "./lib/toolchain/runtime.mjs";
 
 import {
   checkCapabilityBoundary,
@@ -345,7 +347,23 @@ describe("checkCapabilityBoundary", () => {
   it("passes the repository and inspects every configuration file", () => {
     const result = checkCapabilityBoundary(projectRoot);
 
-    assert.deepEqual(result.configFiles, [...REQUIRED_CONFIG_FILES]);
+    // The application owns its own lock, and an application with no
+    // dependencies has none. Every configuration file that *does* exist must be
+    // inspected, and the manifest is always required.
+    const expected = REQUIRED_CONFIG_FILES.filter((file) => {
+      try {
+        Deno.statSync(path.join(projectRoot, file));
+        return true;
+      } catch {
+        return false;
+      }
+    });
+
+    assert.deepEqual(result.configFiles, expected);
+    assert.ok(
+      result.configFiles.includes(PACKAGE_JSON),
+      "the application manifest is always inspected",
+    );
     assert.equal(result.invariants, CONFIG_INVARIANTS.length);
   });
 
@@ -393,10 +411,32 @@ describe("main", () => {
     };
 
     assert.equal(main([], io), 0);
+
+    // The invariant count is fixed; the file count tracks the configuration
+    // files the application actually has. An application with no dependencies
+    // legitimately has no lock of its own, so the expected count is derived
+    // rather than hard-coded.
+    const inspected = REQUIRED_CONFIG_FILES.filter((file) => {
+      try {
+        Deno.statSync(path.join(projectRoot, file));
+        return true;
+      } catch {
+        return false;
+      }
+    }).length;
+    assert.ok(
+      inspected > 0,
+      "the repository must have configuration to inspect",
+    );
+
     assert.match(
       lines[0],
-      /^Capability boundary OK: 6 configuration invariant\(s\) hold across 5 configuration file\(s\)/,
+      new RegExp(
+        `^Capability boundary OK: ${CONFIG_INVARIANTS.length} configuration ` +
+          `invariant\\(s\\) hold across ${inspected} configuration file\\(s\\)`,
+      ),
     );
+    assert.match(lines[0], /no "@types\/node" dependency/);
   });
 
   it("returns 1 with usage for unexpected arguments", () => {
@@ -419,17 +459,27 @@ describe("Worker typecheck coverage", () => {
    * The same invocation the `check:worker` task uses. Running it in a copy lets
    * the test add a Worker module without touching the repository.
    */
-  const TYPECHECK = [
-    "run",
-    "--allow-read",
-    "--allow-env",
-    "--allow-run",
-    "--cached-only",
-    "--frozen",
-    "npm:typescript@7.0.2",
-    "-p",
-    "worker/tsconfig.json",
-  ];
+  // The typecheck now runs the toolchain-owned compiler through the launcher, so
+  // the copied project needs no `node_modules` of its own and shares nothing
+  // with the toolchain tree.
+  function typecheck(root) {
+    const result = run(Deno.execPath(), {
+      args: [
+        "run",
+        "--allow-read",
+        "--allow-env",
+        `--allow-write=${path.join(root, ".wrangler")}`,
+        `--allow-run=${resolveTsc(toolchainRoot())}`,
+        path.join(projectRoot, "scripts", "tsc-check.mjs"),
+        "worker/tsconfig.json",
+      ],
+      cwd: root,
+    });
+    return {
+      status: result.code,
+      output: `${result.stdout}${result.stderr}`,
+    };
+  }
 
   function makeWorkerProject() {
     const root = makeTempDir("boundary-worker-");
@@ -440,29 +490,20 @@ describe("Worker typecheck coverage", () => {
         "worker/tsconfig.json",
         "worker-configuration.d.ts",
         "package.json",
-        "deno.lock",
+        // A real application inherits the generator-managed pin projection.
+        ".mise.toml",
+        // The application owns its own lock, and a dependency-free application
+        // has none; copy it only when it exists so the fixture matches a real
+        // application instead of the old merged tree.
+        ...(existsSync(path.join(projectRoot, "deno.lock"))
+          ? ["deno.lock"]
+          : []),
       ]
     ) {
       writeFile(root, file, readFileSync(path.join(projectRoot, file), "utf8"));
     }
 
-    // The npm resolver expects an installed tree; share the repository's, as
-    // scripts/ci.sh does for its throwaway build copy.
-    symlinkSync(
-      path.join(projectRoot, "node_modules"),
-      path.join(root, "node_modules"),
-      "dir",
-    );
-
     return root;
-  }
-
-  function typecheck(root) {
-    const result = run(Deno.execPath(), { args: TYPECHECK, cwd: root });
-    return {
-      status: result.code,
-      output: `${result.stdout}${result.stderr}`,
-    };
   }
 
   it("typechecks every Worker module, not only index.ts", () => {

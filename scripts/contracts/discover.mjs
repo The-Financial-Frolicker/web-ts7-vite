@@ -36,6 +36,7 @@ import {
 } from "./scopes.mjs";
 import { SCHEMA_VERSION } from "./schema.mjs";
 import { describeToolchain } from "./toolchain.mjs";
+import { toolchainRoot } from "../lib/toolchain/runtime.mjs";
 import { runCapabilityProbe } from "./workerd-probe.mjs";
 import {
   discoverTypeScript,
@@ -107,13 +108,33 @@ export function requireEmscripten(
  * Conservative by construction: an edition is claimed only when every edition
  * up to and including it is fully supported. One failed probe stops the chain
  * as unverified rather than being read as a negative result.
+ *
+ * `editions` and `entriesFor` are injected with their production defaults so the
+ * empty-edition guard below can be exercised without editing the real catalogue;
+ * no caller passes them.
  */
-export function deriveWorkerLibEdition(results) {
+export function deriveWorkerLibEdition(
+  results,
+  editions = EDITIONS,
+  entriesFor = capabilitiesForEdition,
+) {
   let edition = null;
   const supported = [];
 
-  for (const candidate of EDITIONS) {
-    const entries = capabilitiesForEdition(candidate);
+  for (const candidate of editions) {
+    const entries = entriesFor(candidate);
+    // An edition with no probes is unproven, not proven: without this guard the
+    // empty outcome list satisfies both checks below and the loop would advance
+    // `edition` to `candidate`, claiming support for an edition nothing tested.
+    if (entries.length === 0) {
+      return {
+        edition,
+        provenance: "unverified",
+        evidence: `${candidate} has no probes; the edition chain stops at ` +
+          `${edition ?? "no edition"}`,
+      };
+    }
+
     const outcomes = entries.map((entry) => ({
       id: entry.id,
       outcome: results[entry.id]?.outcome ?? "probe-failed",
@@ -329,8 +350,8 @@ export async function deriveContracts({
   tempRoot,
   vitePermissionProfile = "local",
 } = {}) {
-  const identity = await currentIdentity(root);
-  const toolchain = describeToolchain(root);
+  const identity = await currentIdentity(root, toolchainRoot());
+  const toolchain = describeToolchain(root, toolchainRoot());
   const emsdkRoot = requireEmscripten();
 
   io.log(`[refresh] emscripten SDK ${emsdkRoot}`);
@@ -360,7 +381,7 @@ export async function deriveContracts({
     }`,
   );
 
-  const typescriptLibs = discoverTypeScript(root);
+  const typescriptLibs = discoverTypeScript(toolchainRoot());
   io.log(
     `[refresh] typescript editions ${typescriptLibs.editions.join(", ")}; ` +
       `libraries ${typescriptLibs.libraries.join(", ") || "none"}`,

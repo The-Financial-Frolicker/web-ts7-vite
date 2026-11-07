@@ -99,7 +99,12 @@ fi
 echo "==> tested deployment: worker=$WORKER_NAME url=$URL (source: $URL_SOURCE)"
 
 # --- 2. Deployment identifier (best effort) ---------------------------------
-DEPLOYMENT_ID="$(node "${PROJECT_ROOT}/node_modules/wrangler/bin/wrangler.js" \
+# Deno-only: the launcher and profile that performed the deployment also answer
+# read-only Wrangler queries, so no Node process takes part.
+DENO_BIN="$(readlink -f "$(command -v deno)")"
+DEPLOYMENT_ID="$(deno run \
+    --allow-read --allow-env --allow-run="$DENO_BIN" \
+    "$PROJECT_ROOT/scripts/wrangler-deploy.mjs" \
     deployments status --name "$WORKER_NAME" --json 2>/dev/null |
     python3 -c 'import json,sys
 d = json.load(sys.stdin)

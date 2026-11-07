@@ -32,7 +32,6 @@ export const PRODUCT_MANIFEST = Object.freeze({
   project: Object.freeze([
     "package.json",
     "deno.json",
-    "deno.lock",
     ".mise.toml",
     ".gitignore",
     "README.md",
@@ -61,6 +60,13 @@ export const PRODUCT_MANIFEST = Object.freeze({
     "scripts/check-node-boundary.test.mjs",
     "scripts/vite-build.mjs",
     "scripts/vite-build.test.mjs",
+    "scripts/vite-server.mjs",
+    "scripts/vite-server.test.mjs",
+    "scripts/serve.sh",
+    "scripts/tsc-check.mjs",
+    "scripts/tsc-check.sh",
+    "scripts/wrangler-deploy.mjs",
+    "scripts/wrangler-deploy.test.mjs",
     "scripts/wrangler-types.mjs",
     "scripts/wrangler-types.test.mjs",
     "scripts/wrangler-dry-run.mjs",
@@ -75,6 +81,8 @@ export const PRODUCT_MANIFEST = Object.freeze({
     "scripts/lib/path.mjs",
     "scripts/lib/test.mjs",
     "scripts/lib/toolchain/discovery.mjs",
+    "scripts/lib/toolchain/runtime.mjs",
+    "scripts/runtime-policy.test.mjs",
     "scripts/contracts/canonical.mjs",
     "scripts/contracts/schema.mjs",
     "scripts/contracts/config.mjs",
@@ -82,6 +90,10 @@ export const PRODUCT_MANIFEST = Object.freeze({
     "scripts/contracts/store.mjs",
     "scripts/contracts/toolchain.mjs",
     "scripts/contracts/identity.mjs",
+    // The verifier's identity module reads the declared probe catalogue to
+    // fingerprint the workerd-runtime obligations, so the catalogue module
+    // travels with it. It declares data and template helpers only.
+    "scripts/contracts/fixtures.mjs",
     "scripts/contracts/permissions.mjs",
     "scripts/contracts/verify.mjs",
     "scripts/contracts/cli.mjs",
@@ -112,9 +124,10 @@ export const GENERATOR_ONLY = Object.freeze([
   "scripts/generate-product.test.mjs",
   "scripts/contract-refresh.sh",
   "scripts/lib/toolchain/vite.mjs",
-  "scripts/lib/toolchain/vite-probe.mjs",
+  // Toolchain-owned integration, installed with the toolchain: never shipped.
+  "toolchain/scripts/vite-runner.mjs",
+  "toolchain/scripts/vite-probe.mjs",
   "scripts/contracts/discover.mjs",
-  "scripts/contracts/fixtures.mjs",
   "scripts/contracts/workerd-probe.mjs",
   "scripts/contracts/author-cli.mjs",
   // The generator itself: the product manifest and the generation operation.

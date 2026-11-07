@@ -87,16 +87,8 @@ jobs:
         with:
           node-version: "22"
 
-      - name: Cache Deno's npm download cache
-        uses: actions/cache@v6
-        with:
-          path: ~/.cache/deno
-          key: deno-npm-${{ runner.os }}-${{ hashFiles('deno.lock') }}
-          restore-keys: |
-            deno-npm-${{ runner.os }}-
-
       - name: Install npm dependencies
-        run: mise exec -- deno install --frozen
+        run: mise exec -- deno task toolchain:install -- --allow-download
 
       - name: Require Cloudflare credentials
         # Fail closed with the actual prerequisite: a skipped acceptance run is

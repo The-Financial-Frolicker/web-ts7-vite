@@ -557,10 +557,12 @@ describe("concurrent acceptance-run isolation", () => {
       "cleanup must not shell out to wrangler delete",
     );
 
-    // No enumeration and no pattern can appear anywhere in the workflow.
+    // No enumeration and no pattern can appear anywhere in the workflow. The
+    // match is a standalone argument: `--allow-download` (a Deno provisioning
+    // flag) must not be mistaken for a `--all` Worker-deletion flag.
     assert.doesNotMatch(
       workflow,
-      /--all/,
+      /(^|\s)--all(\s|$)/m,
       "cleanup must not delete every Worker",
     );
     assert.doesNotMatch(workflow, /edge-\*/, "cleanup must not use a pattern");

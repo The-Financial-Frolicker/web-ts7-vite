@@ -364,10 +364,10 @@ export function generatedConfigProblems(root, runtime) {
  * Returns the per-run report whether or not verification passes, so a failing
  * run still produces machine-readable evidence.
  */
-export async function verifyContracts(root = Deno.cwd()) {
+export async function verifyContracts(root = Deno.cwd(), toolchainRoot = root) {
   const document = loadDocument(root);
   const digest = await lockDigest(document);
-  const identity = await currentIdentity(root);
+  const identity = await currentIdentity(root, toolchainRoot);
   const report = await buildConformanceReport({
     document,
     identity,

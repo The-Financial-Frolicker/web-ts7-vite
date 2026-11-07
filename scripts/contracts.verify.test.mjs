@@ -67,6 +67,14 @@ function write(root, file, contents) {
   );
 }
 
+/**
+ * A fixture digest for the declared probe catalogue.
+ *
+ * Deliberately not the catalogue-derived value: these tests assert the shape of
+ * the fingerprint, not which probes the project happens to declare.
+ */
+const FIXTURE_CAPABILITIES = `sha256:${"f".repeat(64)}`;
+
 /** A synthetic identity in the shape derivation and reporting consume. */
 function identity(overrides = {}) {
   return {
@@ -90,6 +98,7 @@ function identity(overrides = {}) {
       "vite-build": ["--allow-read", "--allow-write"],
       "edge-verify": ["--allow-read", "--allow-net=127.0.0.1"],
     },
+    capabilities: FIXTURE_CAPABILITIES,
     ...overrides,
   };
 }

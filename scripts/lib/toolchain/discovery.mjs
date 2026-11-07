@@ -85,8 +85,10 @@ export function findPackage(root, name, options = {}) {
   if (matches.length === 0) {
     throw new DiscoveryError(
       wanted === undefined
-        ? `cannot find ${name} in ${store}. Run: mise exec -- deno install --frozen`
-        : `cannot find ${name}@${wanted} in ${store}. Run: mise exec -- deno install --frozen`,
+        ? `cannot find ${name} in ${store}. Provision it with: ` +
+          `mise exec -- deno task toolchain:install`
+        : `cannot find ${name}@${wanted} in ${store}. Provision it with: ` +
+          `mise exec -- deno task toolchain:install`,
     );
   }
   if (matches.length > 1) {

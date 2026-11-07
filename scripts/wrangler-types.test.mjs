@@ -17,29 +17,31 @@ import {
   resolveWranglerTypesInvocation,
 } from "./wrangler-types.mjs";
 
-const projectRoot = Deno.cwd();
+// Toolchain packages live in the installed toolchain, outside the application.
+const toolchainRoot = Deno.env.get("TOOLCHAIN_ROOT") ??
+  `${Deno.env.get("HOME")}/.local/share/web-ts7-vite/toolchain`;
 
 describe("Deno-owned Wrangler type generation", () => {
   it("resolves the installed Wrangler CLI main entry", () => {
-    const cli = resolveWranglerCli(projectRoot);
+    const cli = resolveWranglerCli(toolchainRoot);
 
     assert.ok(cli.endsWith("/wrangler-dist/cli.js"), cli);
     assert.ok(Deno.statSync(cli).isFile, `${cli} must be a file`);
   });
 
   it("resolves the installed workerd and esbuild executables", () => {
-    const invocation = resolveWranglerTypesInvocation(projectRoot);
+    const invocation = resolveWranglerTypesInvocation(toolchainRoot);
 
     assert.ok(invocation.workerd.endsWith("/bin/workerd"), invocation.workerd);
     assert.ok(invocation.esbuild.endsWith("/bin/esbuild"), invocation.esbuild);
     assert.ok(Deno.statSync(invocation.workerd).isFile);
     assert.ok(Deno.statSync(invocation.esbuild).isFile);
-    assert.equal(resolveWorkerd(projectRoot), invocation.workerd);
-    assert.equal(resolveEsbuild(projectRoot), invocation.esbuild);
+    assert.equal(resolveWorkerd(toolchainRoot), invocation.workerd);
+    assert.equal(resolveEsbuild(toolchainRoot), invocation.esbuild);
   });
 
   it("grants only the explicit Wrangler-types profile", () => {
-    const invocation = resolveWranglerTypesInvocation(projectRoot);
+    const invocation = resolveWranglerTypesInvocation(toolchainRoot);
     const args = buildWranglerTypesArgs(invocation, ["--check"]);
 
     for (
@@ -52,7 +54,7 @@ describe("Deno-owned Wrangler type generation", () => {
         `--allow-run=${invocation.workerd}`,
         `--allow-run=${invocation.esbuild}`,
         "--cached-only",
-        "--frozen",
+        "--no-lock",
         invocation.wranglerCli,
         "types",
         "worker-configuration.d.ts",

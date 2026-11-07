@@ -15,6 +15,7 @@ import { ContractError } from "./schema.mjs";
 import { loadDocument, summarise } from "./store.mjs";
 import { ToolchainError } from "./toolchain.mjs";
 import { summariseScope, verifyContracts } from "./verify.mjs";
+import { toolchainRoot } from "../lib/toolchain/runtime.mjs";
 
 const EXIT_OK = 0;
 const EXIT_FAILURE = 1;
@@ -51,7 +52,7 @@ function parseArgs(argv) {
 }
 
 async function runVerify(root, io) {
-  const { report, notes } = await verifyContracts(root);
+  const { report, notes } = await verifyContracts(root, toolchainRoot());
 
   for (const note of notes) io.error(`[verify] ${note}`);
   for (const entry of report.scopes) {
@@ -75,7 +76,7 @@ async function runVerify(root, io) {
 }
 
 async function runStatus(root, io) {
-  const { report } = await verifyContracts(root);
+  const { report } = await verifyContracts(root, toolchainRoot());
 
   for (const entry of report.scopes) io.log(summariseScope(entry));
 

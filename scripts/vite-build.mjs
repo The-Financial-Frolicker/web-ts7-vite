@@ -28,6 +28,7 @@
  */
 
 import { dirname, join } from "./lib/path.mjs";
+import { runtimePolicy } from "./lib/toolchain/runtime.mjs";
 
 /** Named permission profiles for the separate Vite process. */
 export const VITE_PERMISSION_PROFILES = Object.freeze(["local", "ci-runner"]);
@@ -203,6 +204,9 @@ export function resolveViteInvocation(root = Deno.cwd()) {
 
   return {
     viteBin: resolveViteBin(root),
+    // The toolchain-owned runner is what the build child executes: it owns the
+    // effective configuration, including the Cloudflare plugin policy.
+    runner: Deno.realPathSync(join(root, "scripts", "vite-runner.mjs")),
     rolldown,
     lightningcss,
   };
@@ -246,14 +250,21 @@ export function buildViteArgs(
   invocation,
   extraArgs = [],
   profile = DEFAULT_VITE_PERMISSION_PROFILE,
+  root = Deno.cwd(),
 ) {
   return [
     "run",
+    // The installation is provisioned by the toolchain lifecycle. Deno must use
+    // that tree as-is and never set up or modify node_modules at run time.
+    "--node-modules-dir=manual",
     ...permissionFlags(profile, invocation),
     "--cached-only",
-    "--frozen",
-    invocation.viteBin,
+    "--no-lock",
+    // The runner, not Vite's CLI: the CLI would load the application's
+    // plugin-free configuration and silently drop the toolchain's plugin policy.
+    invocation.runner,
     "build",
+    root,
     ...extraArgs,
   ];
 }
@@ -365,9 +376,12 @@ export function buildViteProbeArgs(
 ) {
   return [
     "run",
+    // The installation is provisioned by the toolchain lifecycle. Deno must use
+    // that tree as-is and never set up or modify node_modules at run time.
+    "--node-modules-dir=manual",
     ...probePermissionFlags(profile, invocation),
     "--cached-only",
-    "--frozen",
+    "--no-lock",
     script,
     root,
   ];
@@ -377,8 +391,12 @@ export function buildViteProbeArgs(
 export function main(argv = Deno.args, root = Deno.cwd()) {
   try {
     const { profile, extraArgs, printProfile } = parseViteLauncherArgs(argv);
-    const invocation = resolveViteInvocation(root);
-    const args = buildViteArgs(invocation, extraArgs, profile);
+
+    // Deno pin and installed toolchain, before anything is resolved.
+    const policy = runtimePolicy(root);
+
+    const invocation = resolveViteInvocation(policy.toolchainRoot);
+    const args = buildViteArgs(invocation, extraArgs, profile, root);
 
     if (printProfile) {
       console.log(JSON.stringify({ ...invocation, profile, args }, null, 2));

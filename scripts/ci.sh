@@ -21,7 +21,17 @@
 #     mise exec -- bash scripts/ci.sh static
 #     mise exec -- bash scripts/ci.sh build
 #
-# Dependencies must already be installed (`mise exec -- deno install --frozen`).
+# Dependencies are not installed by this script and must never be resolved here.
+#
+# Two separate lifecycles precede it, both generator-owned:
+#
+#   mise exec -- deno task toolchain:prepare   pinned tool binaries + `.mise.toml`
+#   mise exec -- deno task toolchain:install   the external npm dependency domain
+#
+# The first projects and verifies the mise-managed tools; the second materialises
+# the toolchain's own manifests and lock into an installation outside this
+# checkout. Ordinary build and development workflows only consume that
+# installation.
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -44,9 +54,10 @@ cleanup() {
 trap cleanup EXIT
 
 require_dependencies() {
-    if [[ ! -d "$PROJECT_ROOT/node_modules" ]]; then
-        echo "ERROR: node_modules is missing. Install dependencies first:" >&2
-        echo "    mise exec -- deno install --frozen" >&2
+    TOOLCHAIN_ROOT="$(readlink -f "${TOOLCHAIN_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/web-ts7-vite/toolchain}")"
+    if [[ ! -d "$TOOLCHAIN_ROOT" ]]; then
+        echo "ERROR: the toolchain is not installed. Provision it first:" >&2
+        echo "    deno task toolchain:install" >&2
         exit 1
     fi
 }
@@ -135,7 +146,8 @@ run_build_checks() {
         --exclude=./public/wasm \
         --exclude='./.aider*' \
         -cf - . | tar -C "$WORK_DIR" -xf -
-    ln -s "$PROJECT_ROOT/node_modules" "$WORK_DIR/node_modules"
+    # No application dependency tree to link: the template has no app packages.
+    # The toolchain is installed outside both trees.
 
     cd "$WORK_DIR"
 

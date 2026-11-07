@@ -49,12 +49,18 @@ import {
   SCOPES,
 } from "./contracts/discover.mjs";
 import {
+  allCapabilities,
   capabilitiesForEdition,
   EDITIONS,
   probeConfigSource,
   probeWorkerSource,
 } from "./contracts/fixtures.mjs";
-import { contractInputs } from "./contracts/identity.mjs";
+import {
+  catalogueInputs,
+  contractInputs,
+  probeCatalogue,
+  probeCatalogueDigest,
+} from "./contracts/identity.mjs";
 import { describePath } from "./contracts/toolchain.mjs";
 import {
   buildViteProbeArgs,
@@ -119,6 +125,14 @@ function value(provenance, entry = true) {
   return { kind: "test", value: entry, provenance, evidence: "fixture" };
 }
 
+/**
+ * A fixture digest for the declared probe catalogue.
+ *
+ * Deliberately not the catalogue-derived value: these tests assert the shape of
+ * the fingerprint, not which probes the project happens to declare.
+ */
+const FIXTURE_CAPABILITIES = `sha256:${"f".repeat(64)}`;
+
 /** A synthetic identity in the shape derivation consumes. */
 function identity(overrides = {}) {
   return {
@@ -142,6 +156,7 @@ function identity(overrides = {}) {
       "vite-build": ["--allow-read", "--allow-write"],
       "edge-verify": ["--allow-read", "--allow-net=127.0.0.1"],
     },
+    capabilities: FIXTURE_CAPABILITIES,
     ...overrides,
   };
 }
@@ -404,7 +419,13 @@ describe("fingerprint coverage", () => {
 
     assert.deepEqual(
       Object.keys(fingerprintInputs(SCOPE_WORKERD_RUNTIME, mirror)).sort(),
-      ["compatibilityDate", "compatibilityFlags", "platform", "workerd"],
+      [
+        "capabilities",
+        "compatibilityDate",
+        "compatibilityFlags",
+        "platform",
+        "workerd",
+      ],
     );
     assert.deepEqual(
       Object.keys(fingerprintInputs(SCOPE_VITE_TARGET, mirror)).sort(),
@@ -903,13 +924,14 @@ describe("Vite probe profile", () => {
     assert.equal(DEFAULT_VITE_PROBE_PROFILE, "local");
     assert.deepEqual(args, [
       "run",
+      "--node-modules-dir=manual",
       "--allow-read",
       "--allow-env",
       "--allow-sys",
       `--allow-ffi=${invocation.rolldown}`,
       `--allow-ffi=${invocation.lightningcss}`,
       "--cached-only",
-      "--frozen",
+      "--no-lock",
       script,
       root,
     ]);
@@ -921,7 +943,7 @@ describe("Vite probe profile", () => {
 
     assert.ok(args.includes("--allow-all"), `${args}`);
     assert.ok(args.includes("--cached-only"), `${args}`);
-    assert.ok(args.includes("--frozen"), `${args}`);
+    assert.ok(args.includes("--no-lock"), `${args}`);
     assert.deepEqual(
       args.filter((argument) =>
         argument.startsWith("--allow-") && argument !== "--allow-all"
@@ -1188,5 +1210,224 @@ describe("repository conformance", () => {
 
     const digest = await lockDigest(loadDocument(projectRoot));
     assert.equal(report.lockDigest, digest);
+  });
+});
+
+describe("probe catalogue obligations", () => {
+  /** Two edition probes and one runtime probe, in the projected shape. */
+  function catalogue(overrides = {}) {
+    return {
+      editions: ["es2015", "es2025"],
+      capabilities: [
+        { id: "es2015.core", edition: "es2015", expression: "1 === 1" },
+        { id: "es2025.set.union", edition: "es2025", expression: "2 === 2" },
+        { id: "runtime.webcrypto", expression: "3 === 3" },
+      ],
+      ...overrides,
+    };
+  }
+
+  /** Digest one synthetic catalogue. */
+  async function digestOf(entry) {
+    return await fingerprintOf(
+      catalogueInputs(entry.editions, entry.capabilities),
+    );
+  }
+
+  it("digests the declared catalogue deterministically", async () => {
+    const first = await probeCatalogueDigest();
+    const second = await probeCatalogueDigest();
+
+    assert.equal(first, second, "the catalogue digest must be stable");
+    assert.match(first, /^sha256:[0-9a-f]{64}$/);
+  });
+
+  it("changes when a probe expression changes by one character", async () => {
+    const before = catalogue();
+    const after = catalogue();
+    after.capabilities[1].expression = "2 === 3";
+
+    assert.ok(
+      (await digestOf(before)) !== (await digestOf(after)),
+      "a softened expression must change the digest",
+    );
+  });
+
+  it("changes when a capability is reassigned to another edition", async () => {
+    const before = catalogue();
+    const after = catalogue();
+    after.capabilities[1].edition = "es2015";
+
+    assert.ok(
+      (await digestOf(before)) !== (await digestOf(after)),
+      "edition membership must be part of the digest",
+    );
+  });
+
+  it("changes when the edition order changes", async () => {
+    const before = catalogue();
+    const after = catalogue({ editions: ["es2025", "es2015"] });
+
+    assert.ok(
+      (await digestOf(before)) !== (await digestOf(after)),
+      "edition order drives derivation, so it must be key",
+    );
+  });
+
+  it("is unchanged when capability entries are merely reordered", async () => {
+    const before = catalogue();
+    const after = catalogue({
+      capabilities: [...catalogue().capabilities].reverse(),
+    });
+
+    assert.equal(
+      await digestOf(before),
+      await digestOf(after),
+      "declaration order carries no meaning",
+    );
+
+    const ids = probeCatalogue().capabilities.map((entry) => entry.id);
+    assert.deepEqual(ids, [...ids].sort(), "the projection sorts by id");
+  });
+
+  it("fails closed when the identity carries no catalogue digest", () => {
+    const mirror = contractInputs(identity());
+    delete mirror.capabilities;
+
+    assert.throws(
+      () => fingerprintInputs(SCOPE_WORKERD_RUNTIME, mirror),
+      /probe catalogue digest is missing/,
+    );
+  });
+});
+
+describe("generated probe handler", () => {
+  const SYNTHETIC = [
+    { id: "synthetic.true", expression: "1 === 1" },
+    { id: "synthetic.false", expression: "1 === 2" },
+    {
+      id: "synthetic.throws",
+      expression: '(() => { throw new Error("synthetic"); })()',
+    },
+  ];
+
+  /** Write a probe module from synthetic capabilities and import it. */
+  async function loadProbeModule() {
+    const directory = mkdtempSync(path.join(os.tmpdir(), "probe-handler-"));
+    temporaryRoots.push(directory);
+    const file = path.join(directory, "probe-worker.mjs");
+    writeFileSync(file, probeWorkerSource(SYNTHETIC));
+    return await import(new URL(`file://${file}`).href);
+  }
+
+  /** Fetch /probe from the generated module and return its results. */
+  async function probeResults() {
+    const module = await loadProbeModule();
+    const response = await module.default.fetch(
+      new Request("http://probe.test/probe"),
+    );
+    assert.equal(response.status, 200, "the probe route answers 200");
+    const payload = await response.json();
+    return payload.results;
+  }
+
+  it("reports true, false and throwing expressions", async () => {
+    const results = await probeResults();
+
+    assert.deepEqual(results["synthetic.true"], { ok: true });
+    assert.deepEqual(results["synthetic.false"], { ok: false });
+    assert.equal(results["synthetic.throws"].ok, false);
+    assert.equal(typeof results["synthetic.throws"].error, "string");
+  });
+
+  it("maps those results to the three probe outcomes", async () => {
+    const results = await probeResults();
+
+    assert.equal(
+      mapProbeOutcome(results["synthetic.true"]).outcome,
+      "supported",
+    );
+    assert.equal(
+      mapProbeOutcome(results["synthetic.false"]).outcome,
+      "unsupported",
+    );
+    assert.equal(
+      mapProbeOutcome(results["synthetic.throws"]).outcome,
+      "probe-failed",
+    );
+  });
+
+  it("answers a non-probe route with 404", async () => {
+    const module = await loadProbeModule();
+    const response = await module.default.fetch(
+      new Request("http://probe.test/other"),
+    );
+
+    assert.equal(response.status, 404);
+  });
+
+  it("would fail if the handler reported success unconditionally", async () => {
+    // The guard is behavioural: only the true expression may report ok, so a
+    // handler that skipped evaluation would return all three and fail here.
+    const results = await probeResults();
+    const succeeded = Object.entries(results)
+      .filter(([, result]) => result.ok === true)
+      .map(([id]) => id);
+
+    assert.deepEqual(succeeded, ["synthetic.true"]);
+  });
+});
+
+describe("edition derivation without probes", () => {
+  it("is unverified when the only edition has no probes", () => {
+    const derived = deriveWorkerLibEdition({}, ["es2015"], () => []);
+
+    assert.equal(derived.provenance, "unverified");
+    assert.equal(derived.edition, null);
+  });
+
+  it("does not advance past an empty later edition", () => {
+    const probe = { id: "es2015.core", edition: "es2015", expression: "1" };
+    const derived = deriveWorkerLibEdition(
+      { [probe.id]: { outcome: "supported" } },
+      ["es2015", "es2016"],
+      (edition) => (edition === "es2015" ? [probe] : []),
+    );
+
+    assert.equal(derived.provenance, "unverified");
+    assert.equal(
+      derived.edition,
+      "es2015",
+      "an edition nothing probed must never be claimed",
+    );
+  });
+
+  it("declares at least one capability for every edition", () => {
+    for (const edition of EDITIONS) {
+      assert.ok(
+        capabilitiesForEdition(edition).length > 0,
+        `${edition} declares no probes`,
+      );
+    }
+  });
+
+  it("gives every capability a unique id", () => {
+    const ids = allCapabilities().map((entry) => entry.id);
+
+    assert.deepEqual(
+      [...new Set(ids)].sort(),
+      [...ids].sort(),
+      "capability ids must be unique",
+    );
+  });
+
+  it("refers only to declared editions", () => {
+    for (const entry of allCapabilities()) {
+      if (entry.edition === undefined) continue;
+      assert.ok(
+        EDITIONS.includes(entry.edition),
+        `${entry.id} names undeclared edition ${entry.edition}`,
+      );
+    }
   });
 });

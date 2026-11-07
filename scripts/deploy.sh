@@ -1,54 +1,44 @@
 #!/usr/bin/env bash
+# Build, validate and deploy the application through the Deno-owned launchers.
+#
+# Node is excluded: this script enters the same PATH tripwire as every other
+# project-owned task, and the deployment itself runs Wrangler under Deno with the
+# profile in scripts/wrangler-deploy.mjs:
+#
+#   read, env, sys, write=<app>/.wrangler, run=<real esbuild>, net=api.cloudflare.com
+#
+# Usage: scripts/deploy.sh [wrangler arguments...]
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
 
-WRANGLER_ENTRY="$PROJECT_ROOT/node_modules/wrangler/bin/wrangler.js"
-WRANGLER_CONFIG="$PROJECT_ROOT/dist/worker/wrangler.json"
-
-# --- Resolve Node (project requires Node >= 22.12.0) ---------------------
-if [[ -n "${NODE_BIN:-}" ]]; then
-    : # explicit override preserved
-else
-    NODE_BIN="$(command -v node 2>/dev/null || true)"
+# Direct invocation must use the same Node-exclusion contract as the Deno task.
+if [[ "${DENO_NO_NODE_ACTIVE:-}" != "1" ]]; then
+    exec "${BASH:-bash}" "$PROJECT_ROOT/scripts/deno-no-node.sh" \
+        "${BASH:-bash}" "$PROJECT_ROOT/scripts/deploy.sh" "$@"
 fi
 
-if [[ -z "${NODE_BIN:-}" ]]; then
-    echo "ERROR: no Node.js found. The project requires Node >= 22.12.0." >&2
-    echo "Install Node >= 22.12.0 (e.g. mise install), or set NODE_BIN to an explicit Node executable." >&2
+if ! command -v deno >/dev/null 2>&1; then
+    echo "ERROR: Deno is required for deployment, but it is not on PATH." >&2
+    echo "       Install the pinned toolchain with: mise install" >&2
     exit 1
 fi
 
-if [[ ! -x "$NODE_BIN" ]]; then
-    echo "ERROR: Node executable not found or not executable: $NODE_BIN" >&2
+DENO_BIN="$(readlink -f "$(command -v deno)")"
+if [[ -z "$DENO_BIN" || ! -x "$DENO_BIN" ]]; then
+    echo "ERROR: could not resolve an executable Deno binary." >&2
     exit 1
 fi
 
-NODE_VERSION="$("$NODE_BIN" --version 2>/dev/null || true)"
-NODE_VERSION="${NODE_VERSION#v}"
-if [[ ! "$NODE_VERSION" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)(\+[0-9A-Za-z.-]+)?$ ]]; then
-    echo "ERROR: could not parse a stable Node.js version from '$NODE_BIN --version' (got: '$NODE_VERSION'). The project requires a stable Node >= 22.12.0 (prereleases are rejected)." >&2
-    exit 1
-fi
-
-NODE_MAJOR="${BASH_REMATCH[1]}"
-NODE_MINOR="${BASH_REMATCH[2]}"
-if (( NODE_MAJOR < 22 || (NODE_MAJOR == 22 && NODE_MINOR < 12) )); then
-    echo "ERROR: the project requires Node >= 22.12.0, but $NODE_BIN is $NODE_VERSION." >&2
-    echo "Switch to a Node >= 22.12.0 (e.g. mise exec -- ...), or set NODE_BIN to one." >&2
-    exit 1
-fi
-
-if [[ ! -f "$WRANGLER_ENTRY" ]]; then
-    echo "Wrangler entry point not found: $WRANGLER_ENTRY" >&2
-    echo "Install dependencies with: mise exec -- deno install --frozen" >&2
-    exit 1
-fi
+mkdir -p "$PROJECT_ROOT/.wrangler/tmp" \
+    "$PROJECT_ROOT/.wrangler/xdg" \
+    "$PROJECT_ROOT/.wrangler/logs"
 
 echo "Building application..."
 deno task build
 
+WRANGLER_CONFIG="$PROJECT_ROOT/dist/worker/wrangler.json"
 if [[ ! -f "$WRANGLER_CONFIG" ]]; then
     echo "Generated Wrangler configuration not found: $WRANGLER_CONFIG" >&2
     exit 1
@@ -57,6 +47,9 @@ fi
 echo "Checking deployment artefacts..."
 deno task check:deploy
 
-echo "Running Wrangler..."
-"$NODE_BIN" "$WRANGLER_ENTRY" deploy \
-    --config "$WRANGLER_CONFIG" "$@"
+echo "Running Wrangler under Deno..."
+deno run \
+    --allow-read \
+    --allow-env \
+    --allow-run="$DENO_BIN" \
+    scripts/wrangler-deploy.mjs "$@"

@@ -154,19 +154,13 @@ if [[ -z "$DENO_BIN" || ! -x "$DENO_BIN" ]]; then
     exit 1
 fi
 
-# Fail before the WASM build when the dependency tree is absent. `tsc` is still
-# checked as evidence that the npm tree was installed, although the typechecks
-# themselves run through Deno.
-for tool in tsc vite wrangler; do
-    if [[ ! -x "./node_modules/.bin/$tool" ]]; then
-        echo "ERROR: npm dependencies are not installed (./node_modules/.bin/$tool is missing)." >&2
-        echo "       Install them with: mise exec -- deno install --frozen" >&2
-        exit 1
-    fi
-done
-NODE_MODULES_REAL="$(readlink -f "$PROJECT_ROOT/node_modules")"
-if [[ -z "$NODE_MODULES_REAL" ]]; then
-    echo "ERROR: could not resolve the real node_modules directory." >&2
+# Fail before the WASM build when the installed toolchain is missing. Ordinary
+# builds use the already-materialised installation; they never provision,
+# resolve or download anything.
+TOOLCHAIN_ROOT="$(readlink -f "${TOOLCHAIN_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/web-ts7-vite/toolchain}")"
+if [[ -z "$TOOLCHAIN_ROOT" || ! -f "$TOOLCHAIN_ROOT/toolchain.json" ]]; then
+    echo "ERROR: the toolchain is not installed." >&2
+    echo "       Provision it with: deno task toolchain:install" >&2
     exit 1
 fi
 
@@ -210,8 +204,10 @@ bash scripts/build-wasm.sh build-and-publish
 #                  unrestricted. See "External ecosystem tools" in README.md.
 # `--cached-only --frozen` keep the run offline and pinned to deno.lock.
 typecheck() {
-    deno run --allow-read --allow-env --allow-run --cached-only --frozen \
-        "npm:typescript@7.0.2" -p "$1"
+    # The toolchain-owned compiler, not Deno's npm cache: one implementation of
+    # "typecheck an application project", shared with `deno task check:client`
+    # and `deno task check:worker`.
+    bash "$PROJECT_ROOT/scripts/tsc-check.sh" "$1"
 }
 
 # --- Build identity ---------------------------------------------------------
@@ -283,7 +279,8 @@ rm -rf "$PROJECT_ROOT/dist"
 # name; the launcher rejects an unknown name instead of falling back.
 VITE_PERMISSION_PROFILE="${VITE_PERMISSION_PROFILE:-local}"
 deno run \
-    --allow-read="$PROJECT_ROOT,$NODE_MODULES_REAL" \
+    --allow-read="$PROJECT_ROOT,$TOOLCHAIN_ROOT" \
+    --allow-env \
     --allow-run="$DENO_BIN" \
     scripts/vite-build.mjs \
     "--permission-profile=$VITE_PERMISSION_PROFILE"

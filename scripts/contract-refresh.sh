@@ -41,10 +41,10 @@ if ! command -v deno >/dev/null 2>&1; then
 fi
 
 DENO_BIN="$(readlink -f "$(command -v deno)")"
-NODE_MODULES_REAL="$(readlink -f "$PROJECT_ROOT/node_modules")"
-if [[ -z "$NODE_MODULES_REAL" ]]; then
-    echo "ERROR: npm dependencies are not installed." >&2
-    echo "       Install them with: mise exec -- deno install --frozen" >&2
+TOOLCHAIN_ROOT="$(readlink -f "${TOOLCHAIN_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/web-ts7-vite/toolchain}")"
+if [[ -z "$TOOLCHAIN_ROOT" ]]; then
+    echo "ERROR: the toolchain installation is not present." >&2
+    echo "       Materialise it with: mise exec -- deno task toolchain:install" >&2
     exit 1
 fi
 
@@ -60,7 +60,8 @@ resolve_workerd() {
     local workerd
     workerd="$(
         deno run \
-            --allow-read="$PROJECT_ROOT,$NODE_MODULES_REAL" \
+            --allow-read="$PROJECT_ROOT,$TOOLCHAIN_ROOT" \
+            --allow-env \
             scripts/contracts/author-cli.mjs workerd-path
     )" || return 1
 
@@ -104,7 +105,7 @@ if [[ -z "${EMSDK:-}" || ! -d "${EMSDK:-/nonexistent}" ]]; then
 fi
 
 deno run \
-    --allow-read="$PROJECT_ROOT,$NODE_MODULES_REAL,$TEMP_ROOT,$EMSDK" \
+    --allow-read="$PROJECT_ROOT,$TOOLCHAIN_ROOT,$TEMP_ROOT,$EMSDK" \
     --allow-env \
     --allow-sys \
     --allow-write="$PROJECT_ROOT/toolchain-contracts.json,$TEMP_ROOT" \

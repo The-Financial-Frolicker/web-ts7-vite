@@ -1,7 +1,7 @@
 {
   "contracts": {
-    "launcher-permissions@sha256:b3cfa9ceca888d46c7ceb69031a73d8adb887842ec7e12e3fce4bbca46030e91": {
-      "fingerprint": "sha256:b3cfa9ceca888d46c7ceb69031a73d8adb887842ec7e12e3fce4bbca46030e91",
+    "launcher-permissions@sha256:03d7606763c8412dbdc16029e3a6a59d2c08fcd0f1a14e40ee92b750a65666a2": {
+      "fingerprint": "sha256:03d7606763c8412dbdc16029e3a6a59d2c08fcd0f1a14e40ee92b750a65666a2",
       "fingerprintInputs": {
         "launchers": {
           "edge-verify": [
@@ -21,6 +21,26 @@
           "vite-build-ci-runner": [
             "--allow-all"
           ],
+          "vite-dev": [
+            "--allow-read",
+            "--allow-write=<root>",
+            "--allow-env",
+            "--allow-sys",
+            "--allow-net=127.0.0.1,localhost,0.0.0.0:5173,[::]:5173",
+            "--allow-run=<workerd>",
+            "--allow-ffi=<rolldown>",
+            "--allow-ffi=<lightningcss>"
+          ],
+          "vite-preview": [
+            "--allow-read",
+            "--allow-write=<root>",
+            "--allow-env",
+            "--allow-sys",
+            "--allow-net=127.0.0.1,localhost,0.0.0.0:4173,[::]:4173",
+            "--allow-run=<workerd>",
+            "--allow-ffi=<rolldown>",
+            "--allow-ffi=<lightningcss>"
+          ],
           "vite-probe": [
             "--allow-read",
             "--allow-env",
@@ -30,6 +50,15 @@
           ],
           "vite-probe-ci-runner": [
             "--allow-all"
+          ],
+          "wrangler-deploy": [
+            "--allow-read",
+            "--allow-env",
+            "--allow-sys",
+            "--allow-write=<root>/.wrangler",
+            "--allow-write=<root>/dist/worker/.wrangler",
+            "--allow-run=<esbuild>",
+            "--allow-net=api.cloudflare.com"
           ],
           "wrangler-dry-run": [
             "--allow-read",
@@ -85,6 +114,36 @@
             "--allow-all"
           ]
         },
+        "launcher.vite-dev": {
+          "evidence": "scripts/*.mjs build*Args",
+          "kind": "permission-profile",
+          "provenance": "derived",
+          "value": [
+            "--allow-read",
+            "--allow-write=<root>",
+            "--allow-env",
+            "--allow-sys",
+            "--allow-net=127.0.0.1,localhost,0.0.0.0:5173,[::]:5173",
+            "--allow-run=<workerd>",
+            "--allow-ffi=<rolldown>",
+            "--allow-ffi=<lightningcss>"
+          ]
+        },
+        "launcher.vite-preview": {
+          "evidence": "scripts/*.mjs build*Args",
+          "kind": "permission-profile",
+          "provenance": "derived",
+          "value": [
+            "--allow-read",
+            "--allow-write=<root>",
+            "--allow-env",
+            "--allow-sys",
+            "--allow-net=127.0.0.1,localhost,0.0.0.0:4173,[::]:4173",
+            "--allow-run=<workerd>",
+            "--allow-ffi=<rolldown>",
+            "--allow-ffi=<lightningcss>"
+          ]
+        },
         "launcher.vite-probe": {
           "evidence": "scripts/vite-build.mjs buildViteProbeArgs (local profile)",
           "kind": "permission-profile",
@@ -103,6 +162,20 @@
           "provenance": "derived",
           "value": [
             "--allow-all"
+          ]
+        },
+        "launcher.wrangler-deploy": {
+          "evidence": "scripts/*.mjs build*Args",
+          "kind": "permission-profile",
+          "provenance": "derived",
+          "value": [
+            "--allow-read",
+            "--allow-env",
+            "--allow-sys",
+            "--allow-write=<root>/.wrangler",
+            "--allow-write=<root>/dist/worker/.wrangler",
+            "--allow-run=<esbuild>",
+            "--allow-net=api.cloudflare.com"
           ]
         },
         "launcher.wrangler-dry-run": {
@@ -229,9 +302,10 @@
         }
       }
     },
-    "workerd-runtime@sha256:8aa9865cee2eb3e13dfd02ab1bea1a145a0ae1c4ae5bf441ea25888c43f13daa": {
-      "fingerprint": "sha256:8aa9865cee2eb3e13dfd02ab1bea1a145a0ae1c4ae5bf441ea25888c43f13daa",
+    "workerd-runtime@sha256:28b579e5daa1e0ea3f831cef876060e7475981d8dee608066da95505e2e93634": {
+      "fingerprint": "sha256:28b579e5daa1e0ea3f831cef876060e7475981d8dee608066da95505e2e93634",
       "fingerprintInputs": {
+        "capabilities": "sha256:f8b6413b4b27de60f6ac58b9e8e57e631495ea4d7c7275f48cfffaf3d7f7f405",
         "compatibilityDate": "2026-10-30",
         "compatibilityFlags": [],
         "platform": "linux-x86_64-gnu",
@@ -478,12 +552,12 @@
       ],
       "typescript": {
         "evidence": "installed package manifest",
-        "path": "node_modules/typescript",
+        "path": "<external>/typescript",
         "version": "7.0.2"
       },
       "vite": {
         "evidence": "installed package manifest",
-        "path": "node_modules/vite",
+        "path": "<external>/vite",
         "version": "8.3.5"
       },
       "vitePlugin": {
@@ -491,7 +565,7 @@
         "version": "1.66.0"
       },
       "workerd": {
-        "binary": "node_modules/.deno/@cloudflare+workerd-linux-64@1.20261023.1/node_modules/@cloudflare/workerd-linux-64/bin/workerd",
+        "binary": "<external>/workerd",
         "consistent": true,
         "evidence": "Wrangler 4.156.0 and @cloudflare/vite-plugin 1.66.0 both resolve workerd 1.20261023.1",
         "platformPackage": "@cloudflare/workerd-linux-64@1.20261023.1",

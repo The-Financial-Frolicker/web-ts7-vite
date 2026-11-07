@@ -16,6 +16,7 @@
  */
 
 import { dirname, join } from "./lib/path.mjs";
+import { runtimePolicy } from "./lib/toolchain/runtime.mjs";
 
 function fail(message) {
   throw new Error(message);
@@ -218,6 +219,9 @@ export function resolveWranglerTypesInvocation(root = Deno.cwd()) {
 export function buildWranglerTypesArgs(invocation, extraArgs = []) {
   return [
     "run",
+    // The installation is provisioned by the toolchain lifecycle. Deno must use
+    // that tree as-is and never set up or modify node_modules at run time.
+    "--node-modules-dir=manual",
     "--allow-read",
     "--allow-write",
     "--allow-env",
@@ -226,7 +230,7 @@ export function buildWranglerTypesArgs(invocation, extraArgs = []) {
     `--allow-run=${invocation.workerd}`,
     `--allow-run=${invocation.esbuild}`,
     "--cached-only",
-    "--frozen",
+    "--no-lock",
     invocation.wranglerCli,
     "types",
     "worker-configuration.d.ts",
@@ -239,7 +243,10 @@ export function buildWranglerTypesArgs(invocation, extraArgs = []) {
 /** CLI entry point; returns a process exit code. */
 export function main(argv = Deno.args, root = Deno.cwd()) {
   try {
-    const invocation = resolveWranglerTypesInvocation(root);
+    // Deno pin and installed toolchain, before any resolution or execution.
+    const policy = runtimePolicy(root);
+
+    const invocation = resolveWranglerTypesInvocation(policy.toolchainRoot);
     const extraArgs = argv[0] === "--print-profile" ? [] : argv;
     const args = buildWranglerTypesArgs(invocation, extraArgs);
 

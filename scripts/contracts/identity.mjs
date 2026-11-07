@@ -11,6 +11,7 @@
  * and are never recomputed by CI.
  */
 
+import { fingerprintOf } from "./canonical.mjs";
 import {
   CLIENT_TSCONFIG,
   readLibs,
@@ -18,13 +19,57 @@ import {
   readWranglerConfig,
   WORKER_TSCONFIG,
 } from "./config.mjs";
+import { allCapabilities, EDITIONS } from "./fixtures.mjs";
 import { describePermissionProfiles } from "./permissions.mjs";
 import { platformIdentity, resolvePackageIdentity } from "./toolchain.mjs";
 
-export function currentIdentity(root = Deno.cwd()) {
+/**
+ * Pure projection of a probe catalogue into the form that is fingerprinted.
+ *
+ * `editions` keeps its declared order because `deriveWorkerLibEdition` walks it
+ * and assigns a candidate on each pass, so order changes the derived edition.
+ * Capability entries are sorted by id: results are keyed by id, so declaration
+ * order carries no meaning and sorting keeps a reordering from churning the
+ * fingerprint.
+ */
+export function catalogueInputs(editions, capabilities) {
+  const projected = capabilities
+    .map((entry) =>
+      entry.edition === undefined
+        ? { id: entry.id, expression: entry.expression }
+        : { id: entry.id, edition: entry.edition, expression: entry.expression }
+    )
+    .sort((
+      left,
+      right,
+    ) => (left.id < right.id ? -1 : left.id > right.id ? 1 : 0));
+
+  return { editions: [...editions], capabilities: projected };
+}
+
+/** The catalogue this project declares: the obligations the runtime must meet. */
+export function probeCatalogue() {
+  return catalogueInputs(EDITIONS, allCapabilities());
+}
+
+/**
+ * Digest of the declared catalogue.
+ *
+ * This is what makes an obligation edit visible at the conformance gate: the
+ * catalogue is an input to the workerd-runtime claim, not merely a description
+ * of it, so changing which capabilities are probed changes the fingerprint.
+ */
+export async function probeCatalogueDigest() {
+  return await fingerprintOf(probeCatalogue());
+}
+
+export async function currentIdentity(
+  root = Deno.cwd(),
+  toolchainRoot = root,
+) {
   const platform = platformIdentity();
   const wrangler = readWranglerConfig(root);
-  const { typescript, vite, graph } = resolvePackageIdentity(root);
+  const { typescript, vite, graph } = resolvePackageIdentity(toolchainRoot);
 
   return {
     platform,
@@ -39,7 +84,8 @@ export function currentIdentity(root = Deno.cwd()) {
       manifest: vite.manifest,
       buildTarget: readViteBuildTarget(root),
     },
-    launchers: describePermissionProfiles(root),
+    launchers: describePermissionProfiles(root, toolchainRoot),
+    capabilities: await probeCatalogueDigest(),
   };
 }
 
@@ -67,5 +113,6 @@ export function contractInputs(identity) {
       workerLib: identity.typescript.workerLib,
     },
     launchers: identity.launchers,
+    capabilities: identity.capabilities,
   };
 }

@@ -18,6 +18,7 @@ import {
   writeDocument,
 } from "./store.mjs";
 import { resolveWorkerdGraph, ToolchainError } from "./toolchain.mjs";
+import { toolchainRoot } from "../lib/toolchain/runtime.mjs";
 import { DiscoveryError } from "../lib/toolchain/discovery.mjs";
 import { DEFAULT_VITE_PROBE_PROFILE } from "../vite-build.mjs";
 import { readFileSync } from "../lib/fs.mjs";
@@ -189,7 +190,7 @@ export async function main(argv = Deno.args, root = Deno.cwd(), io = console) {
 
   try {
     if (command === "workerd-path") {
-      io.log(resolveWorkerdGraph(root).binary);
+      io.log(resolveWorkerdGraph(toolchainRoot()).binary);
       return EXIT_OK;
     }
 

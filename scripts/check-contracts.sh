@@ -20,13 +20,13 @@ if ! command -v deno >/dev/null 2>&1; then
     exit 1
 fi
 
-NODE_MODULES_REAL="$(readlink -f "$PROJECT_ROOT/node_modules")"
-if [[ -z "$NODE_MODULES_REAL" ]]; then
-    echo "ERROR: could not resolve the real node_modules directory." >&2
+TOOLCHAIN_ROOT="$(readlink -f "${TOOLCHAIN_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/web-ts7-vite/toolchain}")"
+if [[ -z "$TOOLCHAIN_ROOT" || ! -d "$TOOLCHAIN_ROOT" ]]; then
+    echo "ERROR: no installed toolchain. Provision it with: deno task toolchain:install" >&2
     exit 1
 fi
 
 deno run \
-    --allow-read="$PROJECT_ROOT,$NODE_MODULES_REAL" \
+    --allow-read="$PROJECT_ROOT,$TOOLCHAIN_ROOT" \
     --allow-env \
     scripts/contracts/cli.mjs verify "$@"

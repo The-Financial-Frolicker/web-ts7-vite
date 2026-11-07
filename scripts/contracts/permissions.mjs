@@ -22,6 +22,12 @@ import {
   VITE_PERMISSION_PROFILES,
   VITE_PROBE_PROFILES,
 } from "../vite-build.mjs";
+import {
+  buildViteServerArgs,
+  SERVER_PORTS,
+  VITE_SERVER_MODES,
+} from "../vite-server.mjs";
+import { buildWranglerDeployArgs } from "../wrangler-deploy.mjs";
 import { buildWranglerDryRunArgs } from "../wrangler-dry-run.mjs";
 import { buildWranglerTypesArgs } from "../wrangler-types.mjs";
 import { join } from "../lib/path.mjs";
@@ -69,9 +75,13 @@ function profileKey(base, profile, defaultProfile) {
  * Synthetic invocation values are used for the Vite profile: only the declared
  * permission flags are compared, so no resolution or execution is involved.
  */
-export function describePermissionProfiles(root = Deno.cwd()) {
+export function describePermissionProfiles(
+  root = Deno.cwd(),
+  toolchainRoot = root,
+) {
   const viteInvocation = {
     viteBin: "<vite>",
+    runner: join(toolchainRoot, "scripts", "vite-runner.mjs"),
     rolldown: "<rolldown>",
     lightningcss: "<lightningcss>",
   };
@@ -116,11 +126,43 @@ export function describePermissionProfiles(root = Deno.cwd()) {
     ]),
   );
 
+  // Development and preview servers: one recorded profile per mode, so the
+  // requirement names the port whose wildcard probe Vite performs.
+  const viteServerProfiles = Object.fromEntries(
+    VITE_SERVER_MODES.map((mode) => [
+      `vite-${mode}`,
+      normalisePermissionFlags(
+        buildViteServerArgs(
+          {
+            runner: join(toolchainRoot, "scripts", "vite-runner.mjs"),
+            appRoot: root,
+            rolldown: "<rolldown>",
+            lightningcss: "<lightningcss>",
+            workerd: "<workerd>",
+          },
+          mode,
+          SERVER_PORTS[mode],
+        ),
+        root,
+      ),
+    ]),
+  );
+
+  // Deployment: Wrangler under Deno, one API host, esbuild to bundle.
+  const deployArgs = buildWranglerDeployArgs({
+    wranglerCli: "<wrangler>",
+    esbuild: "<esbuild>",
+    appRoot: root,
+    config: join(root, "dist", "worker", "wrangler.json"),
+  });
+
   return {
     ...viteProfiles,
     ...viteProbeProfiles,
+    ...viteServerProfiles,
     "wrangler-types": normalisePermissionFlags(wranglerTypesArgs, root),
     "wrangler-dry-run": normalisePermissionFlags(dryRunArgs, root),
+    "wrangler-deploy": normalisePermissionFlags(deployArgs, root),
     "edge-verify": normalisePermissionFlags(edgeVerifyArgs, root),
   };
 }

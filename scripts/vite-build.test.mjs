@@ -19,20 +19,23 @@ import {
 } from "./vite-build.mjs";
 
 const projectRoot = Deno.cwd();
+// The toolchain is installed outside the application tree; resolution uses it.
+const toolchainRoot = Deno.env.get("TOOLCHAIN_ROOT") ??
+  `${Deno.env.get("HOME")}/.local/share/web-ts7-vite/toolchain`;
 const buildScript = path.join(projectRoot, "scripts", "build.sh");
 const ciScript = path.join(projectRoot, "scripts", "ci.sh");
 const dryRunScript = path.join(projectRoot, "scripts", "deploy-dry-run.sh");
 
 describe("Deno-owned Vite invocation", () => {
   it("resolves the installed Vite CLI entry", () => {
-    const viteBin = resolveViteBin(projectRoot);
+    const viteBin = resolveViteBin(toolchainRoot);
 
     assert.ok(viteBin.endsWith("/vite/bin/vite.js"), viteBin);
     assert.ok(Deno.statSync(viteBin).isFile, `${viteBin} must be a file`);
   });
 
   it("resolves both required native bindings", () => {
-    const invocation = resolveViteInvocation(projectRoot);
+    const invocation = resolveViteInvocation(toolchainRoot);
 
     assert.ok(
       invocation.rolldown.endsWith(".node") &&
@@ -55,7 +58,7 @@ describe("Deno-owned Vite invocation", () => {
   });
 
   it("keeps the restricted local profile as the default", () => {
-    const invocation = resolveViteInvocation(projectRoot);
+    const invocation = resolveViteInvocation(toolchainRoot);
     const args = buildViteArgs(invocation);
 
     for (
@@ -67,7 +70,7 @@ describe("Deno-owned Vite invocation", () => {
         `--allow-ffi=${invocation.rolldown}`,
         `--allow-ffi=${invocation.lightningcss}`,
         "--cached-only",
-        "--frozen",
+        "--no-lock",
       ]
     ) {
       assert.ok(args.includes(required), `missing ${required}: ${args}`);
@@ -85,14 +88,24 @@ describe("Deno-owned Vite invocation", () => {
       !args.includes("--allow-all"),
       "Vite build must not have all access",
     );
-    assert.equal(args.at(-1), "build");
+    // The child runs the toolchain-owned runner, then the mode, then the root.
+    assert.equal(args.at(-2), "build");
+    assert.equal(args.at(-1), projectRoot);
+    assert.ok(
+      args.includes(invocation.runner),
+      `build must run the toolchain-owned runner: ${args}`,
+    );
+    assert.ok(
+      !args.includes(invocation.viteBin),
+      "build must not invoke Vite's CLI, which would drop the plugin policy",
+    );
 
     // Naming the default explicitly must produce the same command line.
-    assert.deepEqual(args, buildViteArgs(invocation, [], "local"));
+    assert.deepEqual(args, buildViteArgs(invocation, [], "local", projectRoot));
   });
 
   it("gives the ci-runner profile --allow-all and keeps the pinned flags", () => {
-    const invocation = resolveViteInvocation(projectRoot);
+    const invocation = resolveViteInvocation(toolchainRoot);
     const args = buildViteArgs(
       invocation,
       ["--mode", "production"],
@@ -104,7 +117,7 @@ describe("Deno-owned Vite invocation", () => {
       args.includes("--cached-only"),
       `missing --cached-only: ${args}`,
     );
-    assert.ok(args.includes("--frozen"), `missing --frozen: ${args}`);
+    assert.ok(args.includes("--no-lock"), `missing --frozen: ${args}`);
 
     // --allow-all already implies every individual grant; repeating one would
     // describe a narrower profile than the one that runs.
@@ -113,16 +126,17 @@ describe("Deno-owned Vite invocation", () => {
     );
     assert.deepEqual(individual, []);
 
-    assert.deepEqual(args.slice(-4), [
-      invocation.viteBin,
+    assert.deepEqual(args.slice(-5), [
+      invocation.runner,
       "build",
+      projectRoot,
       "--mode",
       "production",
     ]);
   });
 
   it("fails clearly for an unknown permission profile", () => {
-    const invocation = resolveViteInvocation(projectRoot);
+    const invocation = resolveViteInvocation(toolchainRoot);
 
     assert.throws(
       () => buildViteArgs(invocation, [], "root"),
@@ -168,9 +182,9 @@ describe("Deno-owned Vite invocation", () => {
     assert.doesNotMatch(block, /--allow-all/);
     assert.doesNotMatch(
       block,
-      /--allow-net|--allow-env|--allow-sys|--allow-ffi/,
+      /--allow-net|--allow-sys|--allow-ffi|--allow-write/,
     );
-    assert.match(block, /--allow-read="\$PROJECT_ROOT,\$NODE_MODULES_REAL"/);
+    assert.match(block, /--allow-read="\$PROJECT_ROOT,\$TOOLCHAIN_ROOT"/);
     assert.equal(
       block.match(/--allow-run/g)?.length,
       1,

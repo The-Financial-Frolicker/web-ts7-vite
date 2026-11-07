@@ -48,6 +48,32 @@ export const COMPONENTS = Object.freeze({
       compatibilityFlags: identity.workerd.compatibilityFlags,
     }),
   },
+  /**
+   * The declared probe catalogue — the obligations, not the measurements.
+   *
+   * Without this input the catalogue could be weakened (a probe removed, or an
+   * expression softened) in the same commit as a runtime change, and no
+   * fingerprint would move. With it, any edit to what must be tested forces a
+   * reviewed `contract:refresh`.
+   *
+   * A missing digest is an error rather than an omission: `canonicalJson` drops
+   * `undefined`, so silently projecting nothing would yield a fingerprint over
+   * four inputs instead of five.
+   */
+  capabilities: {
+    keyFor: [SCOPE_WORKERD_RUNTIME],
+    inputs: (identity) => {
+      if (
+        typeof identity.capabilities !== "string" ||
+        identity.capabilities.length === 0
+      ) {
+        throw new Error(
+          "the probe catalogue digest is missing from the identity",
+        );
+      }
+      return { capabilities: identity.capabilities };
+    },
+  },
   vite: {
     keyFor: [SCOPE_VITE_TARGET],
     inputs: (identity) => ({

@@ -304,7 +304,17 @@ export function findConfigInvariantViolations(root) {
     }
   }
 
-  const lock = loadJson(projectRoot, DENO_LOCK, false, report);
+  // The application owns its own lock. An application with no dependencies has
+  // no lock to read, and that is not a violation: there is nothing that could
+  // pin @types/node. Toolchain packages live in the toolchain domain, whose own
+  // lock is not an application manifest.
+  let lock = null;
+  try {
+    Deno.statSync(path.join(projectRoot, DENO_LOCK));
+    lock = loadJson(projectRoot, DENO_LOCK, false, report);
+  } catch {
+    // No application lock: nothing pinned to verify.
+  }
   if (lock !== null) {
     for (const reference of findLockedNodeTypes(lock)) {
       report(

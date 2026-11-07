@@ -63,16 +63,11 @@ jobs:
           mise exec -- bash -c 'printf "EMSDK=%s\n" "${EMSDK:-<unset>}"; test -d "${EMSDK:-/nonexistent}"'
           mise exec -- emcc --version | head -n 1
 
-      - name: Cache Deno's npm download cache
-        uses: actions/cache@v6
-        with:
-          path: ~/.cache/deno
-          key: deno-npm-${{ runner.os }}-${{ hashFiles('deno.lock') }}
-          restore-keys: |
-            deno-npm-${{ runner.os }}-
-
-      - name: Install npm dependencies
-        run: mise exec -- deno install --frozen
+      # The toolchain dependency tree is provisioned through the same lifecycle a
+      # developer runs; a clean runner has no Deno package cache, hence the
+      # explicit, frozen download of the locked artefacts.
+      - name: Provision the toolchain
+        run: mise exec -- deno task toolchain:install -- --allow-download
 
       - name: Toolchain conformance
         # Resolves every declaration, compares the installed versions with

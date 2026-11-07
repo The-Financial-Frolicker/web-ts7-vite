@@ -27,6 +27,14 @@ import { describeEmscripten } from "./contracts/toolchain.mjs";
 
 const projectRoot = path.resolve(import.meta.dirname, "..");
 
+/**
+ * A fixture digest for the declared probe catalogue.
+ *
+ * Deliberately not the catalogue-derived value: these tests assert the shape of
+ * the fingerprint, not which probes the project happens to declare.
+ */
+const FIXTURE_CAPABILITIES = `sha256:${"f".repeat(64)}`;
+
 /** A synthetic identity carrying Emscripten provenance. */
 function identity(emscriptenVersion = "4.0.0") {
   return {
@@ -46,6 +54,7 @@ function identity(emscriptenVersion = "4.0.0") {
       "vite-build": ["--allow-read", "--allow-write"],
       "edge-verify": ["--allow-read", "--allow-net=127.0.0.1"],
     },
+    capabilities: FIXTURE_CAPABILITIES,
     emscripten: {
       sdkVersion: { value: "4.0.0", available: true },
       emscriptenVersion: { value: emscriptenVersion, available: true },
@@ -78,11 +87,17 @@ describe("canonical component model", () => {
   it("derives fingerprint inputs instead of declaring them twice", () => {
     assert.deepEqual(
       Object.keys(fingerprintInputs(SCOPE_WORKERD_RUNTIME, identity())).sort(),
-      ["compatibilityDate", "compatibilityFlags", "platform", "workerd"],
+      [
+        "capabilities",
+        "compatibilityDate",
+        "compatibilityFlags",
+        "platform",
+        "workerd",
+      ],
     );
     assert.deepEqual(
       componentsForScope(SCOPE_WORKERD_RUNTIME).sort(),
-      ["platform", "workerd"],
+      ["capabilities", "platform", "workerd"],
     );
     assert.deepEqual(
       componentsForScope(SCOPE_VITE_TARGET).sort(),
@@ -143,6 +158,9 @@ describe("canonical component model", () => {
         workerLib: typescript.workerLib,
       },
       launchers,
+      // Reconstructed from the lock's own recorded inputs, so any new
+      // fingerprint input must appear here or the reproduction check fails.
+      capabilities: runtime.capabilities,
     };
 
     for (const scope of SCOPES) {
