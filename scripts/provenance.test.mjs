@@ -8,7 +8,13 @@
  */
 
 import assert from "./lib/assert.mjs";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "./lib/fs.mjs";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from "./lib/fs.mjs";
 import os from "./lib/os.mjs";
 import path from "./lib/path.mjs";
 import { after, describe, it } from "./lib/test.mjs";
@@ -374,5 +380,167 @@ describe("product CI gate", () => {
       1,
     );
     assert.match(empty.lines.join("\n"), /no toolchain identity/);
+  });
+
+  describe("tree digest diagnostics", () => {
+    // A tree with one plain file and one executable, so a mode change and a name
+    // change can each be made without disturbing the other column.
+    function fixture() {
+      const root = makeDir("digest-");
+      mkdirSync(path.join(root, "bin"), { recursive: true });
+      writeFileSync(path.join(root, "a.txt"), "alpha");
+      writeFileSync(path.join(root, "bin", "tool"), "beta");
+      chmodSync(path.join(root, "bin", "tool"), 0o755);
+      return root;
+    }
+
+    it("is deterministic for identical trees", async () => {
+      const first = await treeDigest(fixture());
+      const second = await treeDigest(fixture());
+
+      assert.equal(first.digest, second.digest);
+      assert.equal(first.modeDigest, second.modeDigest);
+      assert.equal(first.pathDigest, second.pathDigest);
+      assert.equal(first.files, second.files);
+      assert.equal(first.dirs, second.dirs);
+    });
+
+    it("changes the mode column when only a mode changes", async () => {
+      const root = fixture();
+      const before = await treeDigest(root);
+
+      chmodSync(path.join(root, "bin", "tool"), 0o644);
+      const after = await treeDigest(root);
+
+      assert.ok(
+        before.modeDigest !== after.modeDigest,
+        "mode column must move",
+      );
+      assert.equal(before.pathDigest, after.pathDigest, "paths are unchanged");
+      assert.ok(before.digest !== after.digest, "the identity must move");
+    });
+
+    it("changes the path column when only a name changes", async () => {
+      const root = fixture();
+      const before = await treeDigest(root);
+
+      writeFileSync(path.join(root, "renamed.txt"), "alpha");
+      rmSync(path.join(root, "a.txt"));
+      const after = await treeDigest(root);
+
+      assert.ok(
+        before.pathDigest !== after.pathDigest,
+        "path column must move",
+      );
+      assert.equal(before.modeDigest, after.modeDigest, "modes are unchanged");
+      assert.ok(before.digest !== after.digest, "the identity must move");
+    });
+
+    it("leaves both diagnostic columns alone when only content changes", async () => {
+      const root = fixture();
+      const before = await treeDigest(root);
+
+      writeFileSync(path.join(root, "a.txt"), "epsilon");
+      const after = await treeDigest(root);
+
+      assert.equal(before.modeDigest, after.modeDigest);
+      assert.equal(before.pathDigest, after.pathDigest);
+      assert.ok(
+        before.digest !== after.digest,
+        "content must still change the identity",
+      );
+    });
+
+    it("does not disturb repeated measurement", async () => {
+      const root = fixture();
+      const first = await treeDigest(root);
+      const second = await treeDigest(root);
+
+      assert.deepEqual(first, second);
+      assert.equal(first.pathModeDigest, second.pathModeDigest);
+    });
+
+    it("sees a mode swap that leaves both other diagnostic columns identical", async () => {
+      // The case the first two diagnostics cannot resolve: the *distribution* of
+      // modes is untouched, so only the path-to-mode binding (and the identity)
+      // can tell that the tree changed. Both files are the same size, so the
+      // byte counter is unaffected too.
+      const root = makeDir("swap-");
+      writeFileSync(path.join(root, "a.mjs"), "alpha");
+      writeFileSync(path.join(root, "b.mjs"), "bravo");
+      chmodSync(path.join(root, "a.mjs"), 0o644);
+      chmodSync(path.join(root, "b.mjs"), 0o755);
+
+      const before = await treeDigest(root);
+
+      chmodSync(path.join(root, "a.mjs"), 0o755);
+      chmodSync(path.join(root, "b.mjs"), 0o644);
+      const after = await treeDigest(root);
+
+      assert.equal(before.files, after.files, "file count is unchanged");
+      assert.equal(before.dirs, after.dirs, "directory count is unchanged");
+      assert.equal(before.symlinks, after.symlinks, "no symlinks change");
+      assert.equal(before.bytes, after.bytes, "sizes are unchanged");
+      assert.equal(
+        before.modeDigest,
+        after.modeDigest,
+        "the mode distribution is identical",
+      );
+      assert.equal(
+        before.pathDigest,
+        after.pathDigest,
+        "the path set is identical",
+      );
+      assert.ok(
+        before.pathModeDigest !== after.pathModeDigest,
+        "the path-to-mode binding must move",
+      );
+      assert.ok(
+        before.digest !== after.digest,
+        "the materialisation identity must move",
+      );
+    });
+
+    it("is stable across identical trees", async () => {
+      const first = await treeDigest(fixture());
+      const second = await treeDigest(fixture());
+
+      assert.equal(first.pathModeDigest, second.pathModeDigest);
+    });
+
+    it("moves when a single file's mode changes", async () => {
+      const root = fixture();
+      const before = await treeDigest(root);
+
+      chmodSync(path.join(root, "a.txt"), 0o755);
+      const after = await treeDigest(root);
+
+      assert.ok(before.pathModeDigest !== after.pathModeDigest);
+    });
+
+    it("moves when a file is renamed", async () => {
+      const root = fixture();
+      const before = await treeDigest(root);
+
+      writeFileSync(path.join(root, "renamed.txt"), "alpha");
+      rmSync(path.join(root, "a.txt"));
+      const after = await treeDigest(root);
+
+      assert.ok(before.pathModeDigest !== after.pathModeDigest);
+    });
+
+    it("stays put when only file contents change", async () => {
+      const root = fixture();
+      const before = await treeDigest(root);
+
+      writeFileSync(path.join(root, "a.txt"), "epsilon");
+      const after = await treeDigest(root);
+
+      assert.equal(before.pathModeDigest, after.pathModeDigest);
+      assert.ok(
+        before.digest !== after.digest,
+        "the identity must still notice the content",
+      );
+    });
   });
 });

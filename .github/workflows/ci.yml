@@ -130,7 +130,28 @@ jobs:
             test -e "$tc/node_modules/$pkg" || { echo "missing package: $pkg"; exit 1; }
           done
           test -x "$tc"/node_modules/.deno/@cloudflare+workerd-linux-64@*/node_modules/@cloudflare/workerd-linux-64/bin/workerd
-          test -x "$tc"/node_modules/.deno/@rolldown+binding-linux-x64-gnu@*/node_modules/@rolldown/binding-linux-x64-gnu/*.node
+          # A native shared library is loaded, not executed: it needs to be a
+          # readable regular file. `test -x` would fail on a legitimate 0644
+          # binding, and did.
+          test -f "$tc"/node_modules/.deno/@rolldown+binding-linux-x64-gnu@*/node_modules/@rolldown/binding-linux-x64-gnu/*.node
+          test -r "$tc"/node_modules/.deno/@rolldown+binding-linux-x64-gnu@*/node_modules/@rolldown/binding-linux-x64-gnu/*.node
+          # Compact materialisation diagnostics, so a hosted run that disagrees
+          # with a laptop can be narrowed down without printing thousands of
+          # paths: counters, plus hashes of the mode and path columns alone.
+          deno eval --allow-read="$tc","$GITHUB_WORKSPACE" '
+            const { treeDigest } = await import(
+              `${Deno.cwd()}/scripts/lib/toolchain/tree-digest.mjs`
+            );
+            const tree = await treeDigest(Deno.args[0]);
+            console.log(
+              `diagnostics: entries=${tree.entries} files=${tree.files} dirs=${tree.dirs} symlinks=${tree.symlinks} bytes=${tree.bytes}`,
+            );
+            console.log(`diagnostics: mode-column sha256=${tree.modeDigest}`);
+            console.log(`diagnostics: path-column sha256=${tree.pathDigest}`);
+            console.log(
+              `diagnostics: path-mode-column sha256=${tree.pathModeDigest}`,
+            );
+          ' "$tc/node_modules"
           echo "toolchain identity verified"
 
       - name: Formatting check
@@ -286,6 +307,13 @@ jobs:
       # generator path in play. This is the CI form of the S6-E independence test.
       - name: Generated product independence
         if: hashFiles('scripts/product-manifest.mjs') != ''
+        # The product's Vite build runs on this ephemeral runner, so it needs the
+        # same profile `scripts/ci.sh` uses: Deno's sandbox refuses Vite's Linux
+        # platform-detection probe on a hosted runner. This grants nothing to the
+        # `local` profile — it selects the documented CI profile for this step
+        # only, and applies to every task below.
+        env:
+          VITE_PERMISSION_PROFILE: ci-runner
         run: |
           set -euo pipefail
           product="${RUNNER_TEMP}/ci-product"

@@ -545,4 +545,95 @@ describe("product job sequencing", () => {
       );
     });
   });
+
+  describe("generated product acceptance profile", () => {
+    const anchor = workflow.indexOf("- name: Generated product independence");
+    assert.ok(anchor !== -1, "the product independence step must exist");
+
+    const remainder = workflow.slice(anchor);
+    const nextStep = remainder.slice(1).search(/\n {6}- (name|uses):/);
+    const step = nextStep === -1 ? remainder : remainder.slice(0, nextStep + 1);
+
+    it("selects the documented CI profile for the whole step", () => {
+      assert.ok(
+        step.includes("VITE_PERMISSION_PROFILE: ci-runner"),
+        "the step must select the ci-runner profile at step level",
+      );
+    });
+
+    it("covers every product task the step runs", () => {
+      for (
+        const task of [
+          "check:client",
+          "check:worker",
+          "build",
+          "deploy:dry-run",
+        ]
+      ) {
+        assert.ok(
+          step.includes(`deno task ${task}`),
+          `the step must still run ${task}`,
+        );
+      }
+    });
+
+    it("carries the grant in the profile, never on the command line", () => {
+      assert.ok(
+        !step.includes("--allow-all"),
+        "the ci-runner profile owns the grant; the step must not widen it inline",
+      );
+    });
+  });
+
+  describe("toolchain identity probes and diagnostics", () => {
+    const anchor = workflow.indexOf(
+      "- name: Record and verify the toolchain identity",
+    );
+    assert.ok(anchor !== -1, "the identity step must exist");
+
+    const remainder = workflow.slice(anchor);
+    const nextStep = remainder.slice(1).search(/\n {6}- (name|uses):/);
+    const step = nextStep === -1 ? remainder : remainder.slice(0, nextStep + 1);
+    const probes = step.split("\n").filter((line) =>
+      /^\s*test -[a-z]/.test(line)
+    );
+
+    it("requires the workerd runtime to be executable", () => {
+      const workerd = probes.find((line) => line.includes("workerd"));
+      assert.ok(workerd !== undefined, "the workerd probe must exist");
+      assert.ok(workerd.includes("test -x"), workerd);
+    });
+
+    it("requires the rolldown binding to be a readable regular file", () => {
+      const binding = probes.filter((line) => line.includes(".node"));
+      assert.ok(binding.length > 0, "the rolldown probe must exist");
+
+      const text = binding.join("\n");
+      assert.ok(text.includes("test -f"), text);
+      assert.ok(text.includes("test -r"), text);
+      assert.ok(
+        !text.includes("test -x"),
+        "a native shared library must not be required to be executable",
+      );
+    });
+
+    it("reports compact materialisation diagnostics", () => {
+      assert.ok(
+        step.includes("files=${tree.files}"),
+        "the entry counters must be reported",
+      );
+      assert.ok(
+        step.includes("mode-column sha256="),
+        "the mode column must be reported",
+      );
+      assert.ok(
+        step.includes("path-column sha256="),
+        "the path column must be reported",
+      );
+      assert.ok(
+        step.includes("path-mode-column sha256="),
+        "the path-to-mode binding must be reported",
+      );
+    });
+  });
 });

@@ -34,9 +34,45 @@ function childNames(dir) {
  *
  * Returns `{ digest, files, dirs, symlinks, bytes, entries }`; `digest` is the
  * SHA-256 of the canonical listing.
+ *
+ * Also returns three *diagnostic* views of the same canonical entry data, so two
+ * installations that agree on specification and resolution but disagree on the
+ * materialisation digest can be compared without dumping thousands of paths:
+ *
+ *   `modeDigest` — SHA-256 over the sorted mode column. Only entries that carry
+ *     a mode in the canonical model contribute (regular files `F` and
+ *     directories `D`); symlinks and other entries have no mode and add nothing.
+ *     Modes are the four octal digits exactly as written in the listing, sorted
+ *     by code unit and joined with a newline.
+ *   `pathDigest` — SHA-256 over every entry's relative path (`F`, `D`, `L`, `O`),
+ *     sorted by code unit and joined with NUL. NUL cannot occur in a path, so
+ *     the encoding is unambiguous even for names containing newlines.
+ *   `pathModeDigest` — SHA-256 over the *path-to-mode binding*, so modes that are
+ *     merely redistributed between paths are visible. It covers the same entries
+ *     as `modeDigest` (regular files and directories), sorted by relative path in
+ *     code-unit order, one record per entry encoded as `path NUL mode NUL`.
+ *     Because NUL cannot occur in a path and a mode is always four octal digits,
+ *     a NUL-terminated triple is unambiguous even for paths containing newlines;
+ *     no separator can collide with data. Symlinks and other entries carry no
+ *     mode and contribute nothing.
+ *
+ * Reading the three together (counters remain useful corroboration):
+ *
+ *   path column differs                             -> entry paths differ
+ *   path equal, mode column differs                 -> overall mode distribution differs
+ *   path and mode equal, path-mode column differs   -> modes moved between paths
+ *   all three equal, `digest` differs               -> contents, symlink targets or
+ *                                                      another canonical-entry difference
+ *   all equal                                       -> the materialisation identity matches
+ *
+ * These are diagnostics: they are not part of the materialisation identity and
+ * never feed `digest`.
  */
 export async function treeDigest(root) {
   const lines = [];
+  const paths = [];
+  const modes = [];
+  const pathModes = [];
   let files = 0;
   let dirs = 0;
   let symlinks = 0;
@@ -49,17 +85,22 @@ export async function treeDigest(root) {
       const path = relative.length === 0 ? name : `${relative}/${name}`;
       const stat = Deno.lstatSync(absolute);
       const mode = ((stat.mode ?? 0) & 0o7777).toString(8).padStart(4, "0");
+      paths.push(path);
 
       if (stat.isSymlink) {
         symlinks += 1;
         lines.push(`L ${path} -> ${Deno.readLinkSync(absolute)}`);
       } else if (stat.isDirectory) {
         dirs += 1;
+        modes.push(mode);
+        pathModes.push([path, mode]);
         lines.push(`D ${mode} ${path}`);
         await walk(absolute, path);
       } else if (stat.isFile) {
         files += 1;
         bytes += stat.size;
+        modes.push(mode);
+        pathModes.push([path, mode]);
         lines.push(
           `F ${mode} ${stat.size} ${await hashFile(absolute)} ${path}`,
         );
@@ -72,16 +113,32 @@ export async function treeDigest(root) {
 
   await walk(root, "");
 
+  const digestOf = async (text) =>
+    hex(await crypto.subtle.digest("SHA-256", encoder.encode(text)));
+
+  // Sort by relative path in code-unit order, then emit `path NUL mode NUL` per
+  // record. NUL cannot occur in a path and a mode is always four octal digits,
+  // so the triple is unambiguous even for paths containing newlines.
+  const pathModeColumn = pathModes
+    .slice()
+    .sort((
+      left,
+      right,
+    ) => (left[0] < right[0] ? -1 : left[0] > right[0] ? 1 : 0))
+    .map(([path, mode]) => `${path}\0${mode}\0`)
+    .join("");
+
   return {
-    digest: hex(
-      await crypto.subtle.digest("SHA-256", encoder.encode(lines.join("\n"))),
-    ),
+    digest: await digestOf(lines.join("\n")),
     files,
     dirs,
     symlinks,
     other,
     bytes,
     entries: lines.length,
+    modeDigest: await digestOf([...modes].sort().join("\n")),
+    pathDigest: await digestOf([...paths].sort().join("\0")),
+    pathModeDigest: await digestOf(pathModeColumn),
   };
 }
 
