@@ -27,6 +27,7 @@ dist-ssr
 /artifacts/
 /build-wasm/
 /.wrangler/
+/.vite/
 /public/wasm/
 .aider*
 
