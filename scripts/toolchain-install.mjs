@@ -245,6 +245,13 @@ export async function main(
       ]),
       resolution: await fileDigest(join(staging, "deno.lock")),
       materialisation: materialisation.digest,
+      // Cross-machine: the installed implementation without installer state.
+      implementation: materialisation.implementationDigest,
+      // Installer state, reported so a machine difference stays visible.
+      metadata: {
+        files: materialisation.metadataFiles,
+        digest: materialisation.metadataDigest,
+      },
       packages,
     };
     Deno.writeTextFileSync(

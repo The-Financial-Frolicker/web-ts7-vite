@@ -22,6 +22,8 @@ import { main } from "./toolchain-source.mjs";
 const REPOSITORY = "The-Financial-Frolicker/web-ts7-vite";
 const MATERIALISATION =
   "cfb528d9fd237b6684b36246e5dec663cc630eeab4b1d94fd3227620ba853be2";
+const IMPLEMENTATION =
+  "27548aeeb69555a1a35f9830e69758757bde914fe0efd22cbcd6883907ad0a7b";
 
 const temporary = [];
 function makeDir(prefix) {
@@ -48,6 +50,7 @@ function product(overrides = {}) {
     ref: "toolchain-2026.11.1",
     sha: "8836f76adf636e33af14bf5bd7b761afb53a30bd",
     materialisation: MATERIALISATION,
+    implementation: IMPLEMENTATION,
     ...overrides,
   };
   writeFileSync(
@@ -61,17 +64,24 @@ function product(overrides = {}) {
  * A stand-in for the verified generator checkout: the only thing `verify`
  * imports from it is the digest implementation, so that is the only thing this
  * fixture provides.
+ *
+ * It reports two values, because `verify` checks two layers: the whole-tree
+ * `digest` against the installation's own record, and `implementationDigest`
+ * against the product's recorded identity. They are equal on a real machine
+ * only when the trees are identical, so the fixture must be able to make them
+ * differ.
  */
-function generatorCheckout(digest, entries = 3328) {
+function generatorCheckout(digest, entries = 3328, implementation = digest) {
   const dir = makeDir("s9-generator-");
   const module = path.join(dir, "scripts", "lib", "toolchain");
   mkdirSync(module, { recursive: true });
   writeFileSync(
     path.join(module, "tree-digest.mjs"),
     `export async function treeDigest(root) {\n` +
-      `  return { digest: ${
-        JSON.stringify(digest)
-      }, entries: ${entries}, root };\n` +
+      `  return { digest: ${JSON.stringify(digest)}, entries: ${entries},\n` +
+      `    implementationDigest: ${
+        JSON.stringify(implementation)
+      }, metadataFiles: 0, metadataDigest: "0".repeat(64), root };\n` +
       `}\n`,
   );
   return dir;
@@ -95,6 +105,7 @@ const IDENTITY = Object.freeze({
   resolution:
     "2acd5901681996673c660c44c51c0c5a148757b5f07b3113486d091b0e8b3068",
   materialisation: MATERIALISATION,
+  implementation: IMPLEMENTATION,
 });
 
 describe("provenance reader (product)", () => {
@@ -152,13 +163,13 @@ describe("provenance reader (product)", () => {
         "--root",
         product(),
         "--generator",
-        generatorCheckout(MATERIALISATION),
+        generatorCheckout(MATERIALISATION, 3328, IMPLEMENTATION),
         "--toolchain-root",
         installation(IDENTITY),
       ], io);
       assert.equal(code, 0, io.err.join("; "));
       assert.deepEqual(io.out.slice(-1), [
-        "provenance and materialisation verified",
+        "provenance and implementation verified",
       ]);
     });
 
@@ -169,12 +180,15 @@ describe("provenance reader (product)", () => {
         "--root",
         product(),
         "--generator",
-        generatorCheckout(MATERIALISATION),
+        generatorCheckout(MATERIALISATION, 3328, IMPLEMENTATION),
         "--toolchain-root",
-        installation({ ...IDENTITY, materialisation: "d".repeat(64) }),
+        installation({ ...IDENTITY, implementation: "d".repeat(64) }),
       ], io);
       assert.equal(code, 1);
-      assert.match(io.err.join(" "), /records d{64}, the product expects/);
+      assert.match(
+        io.err.join(" "),
+        /records implementation d{64}, the product expects/,
+      );
     });
 
     it("rejects a tree that does not hash to the recorded digest", async () => {
@@ -189,7 +203,7 @@ describe("provenance reader (product)", () => {
         installation(IDENTITY),
       ], io);
       assert.equal(code, 1);
-      assert.match(io.err.join(" "), /hashes to e{64}/);
+      assert.match(io.err.join(" "), /implementation hashes to e{64}/);
     });
 
     it("rejects an installation with no identity record", async () => {

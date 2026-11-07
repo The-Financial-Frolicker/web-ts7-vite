@@ -40,7 +40,7 @@
     "test:contracts": "bash scripts/deno-no-node.sh deno test --allow-read --allow-write --allow-run --allow-env scripts/contracts.test.mjs scripts/contracts.verify.test.mjs scripts/emscripten-provenance.test.mjs",
     "test:ci-workflow": "bash scripts/deno-no-node.sh deno test --allow-read --allow-write scripts/ci-workflow.test.mjs",
     "test:github-output": "bash scripts/deno-no-node.sh deno test --allow-read --allow-write --allow-env scripts/github-output.test.mjs",
-    "test:provenance": "bash scripts/deno-no-node.sh deno test --allow-read --allow-write --allow-run=git --allow-env scripts/provenance.test.mjs",
+    "test:provenance": "bash scripts/deno-no-node.sh deno test --allow-read --allow-write --allow-run=git,mkfifo --allow-env scripts/provenance.test.mjs",
     "test:provenance-source": "bash scripts/deno-no-node.sh deno test --allow-read --allow-write --allow-env scripts/provenance-source.test.mjs",
     "test:toolchain-config": "bash scripts/deno-no-node.sh deno test --allow-read --allow-write --allow-env scripts/toolchain-config.test.mjs",
     "test:generator": "bash scripts/deno-no-node.sh deno test --allow-read --allow-write --allow-run --allow-env scripts/generate-product.test.mjs",

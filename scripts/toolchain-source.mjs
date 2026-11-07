@@ -87,25 +87,42 @@ async function verify(productRoot, generatorRoot, toolchainRoot, io) {
   const observed = await treeDigest(join(toolchainRoot, "node_modules"));
 
   io.log(`provenance: ref=${expected.ref} sha=${expected.sha}`);
+  io.log(`provenance: expected implementation ${expected.implementation}`);
   io.log(`provenance: expected materialisation ${expected.materialisation}`);
-  io.log(`installation: recorded ${identity.materialisation}`);
+  io.log(`installation: recorded implementation ${identity.implementation}`);
+  io.log(`installation: recorded materialisation ${identity.materialisation}`);
   io.log(
-    `installation: observed ${observed.digest} (${observed.entries} entries)`,
+    `installation: observed implementation ${observed.implementationDigest} ` +
+      `(${observed.implementationEntries} entries, ${observed.metadataFiles} metadata files)`,
   );
+  io.log(`installation: observed materialisation ${observed.digest}`);
 
   const problems = [];
-  if (identity.materialisation !== expected.materialisation) {
+
+  // Cross-machine gate: the installed implementation, without installer state.
+  if (identity.implementation !== expected.implementation) {
     problems.push(
-      `the installed toolchain records ${identity.materialisation}, the product ` +
-        `expects ${expected.materialisation}`,
+      `the installed toolchain records implementation ${identity.implementation}, ` +
+        `the product expects ${expected.implementation}`,
     );
   }
-  if (observed.digest !== expected.materialisation) {
+  if (observed.implementationDigest !== expected.implementation) {
     problems.push(
-      `the installed dependency tree hashes to ${observed.digest}, the product ` +
-        `expects ${expected.materialisation}`,
+      `the installed dependency implementation hashes to ` +
+        `${observed.implementationDigest}, the product expects ${expected.implementation}`,
     );
   }
+
+  // Same-machine consistency: the installation must agree with its own record.
+  // The whole-tree fingerprint is deliberately NOT compared with the product's
+  // value — it includes installer state that legitimately differs per machine.
+  if (observed.digest !== identity.materialisation) {
+    problems.push(
+      `the installation does not match its own record: recorded ` +
+        `${identity.materialisation}, observed ${observed.digest}`,
+    );
+  }
+
   for (const field of ["spec", "resolution"]) {
     if (typeof identity[field] !== "string" || identity[field].length === 0) {
       problems.push(`the installation record has no ${field} identity`);
@@ -116,7 +133,7 @@ async function verify(productRoot, generatorRoot, toolchainRoot, io) {
     fail(problems.join("; "));
   }
 
-  io.log("provenance and materialisation verified");
+  io.log("provenance and implementation verified");
 }
 
 export async function main(argv = Deno.args, io = console) {

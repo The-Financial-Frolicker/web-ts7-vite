@@ -28,7 +28,7 @@ import {
   resolveReleaseTag,
   validateSource,
 } from "./lib/toolchain/provenance.mjs";
-import { treeDigest } from "./lib/toolchain/tree-digest.mjs";
+import { metadataRule, treeDigest } from "./lib/toolchain/tree-digest.mjs";
 import { main as sourceMain } from "./toolchain-source.mjs";
 
 const temporary = [];
@@ -102,7 +102,9 @@ async function makeToolchain({ corrupt = false } = {}) {
     path.join(nodeModules, "vite", "package.json"),
     '{"name":"vite"}\n',
   );
-  const digest = (await treeDigest(nodeModules)).digest;
+  const tree = await treeDigest(nodeModules);
+  const digest = tree.digest;
+  const implementation = tree.implementationDigest;
   writeFileSync(
     path.join(root, "toolchain.json"),
     JSON.stringify(
@@ -112,13 +114,14 @@ async function makeToolchain({ corrupt = false } = {}) {
         spec: "a".repeat(64),
         resolution: "b".repeat(64),
         materialisation: corrupt ? "c".repeat(64) : digest,
+        implementation: corrupt ? "d".repeat(64) : implementation,
         packages: { vite: "8.3.5" },
       },
       null,
       2,
     ),
   );
-  return { root, digest };
+  return { root, digest, implementation };
 }
 
 const VALID = {
@@ -126,6 +129,7 @@ const VALID = {
   ref: "toolchain-2026.11.1",
   sha: "a".repeat(40),
   materialisation: "b".repeat(64),
+  implementation: "c".repeat(64),
 };
 
 describe("provenance metadata schema", () => {
@@ -287,10 +291,14 @@ describe("product CI gate", () => {
     };
   }
 
-  const recordFor = (digest) => ({ ...VALID, materialisation: digest });
+  const recordFor = (digest, implementation) => ({
+    ...VALID,
+    materialisation: digest,
+    implementation,
+  });
 
   it("reads a valid record as shell-evaluable assignments", async () => {
-    const product = makeProduct(recordFor("b".repeat(64)));
+    const product = makeProduct(recordFor("b".repeat(64), "c".repeat(64)));
     const { io, lines } = capture();
     assert.equal(await sourceMain(["read", "--root", product], io), 0);
     assert.ok(lines.includes(`TC_SHA=${VALID.sha}`), lines.join("\n"));
@@ -307,7 +315,10 @@ describe("product CI gate", () => {
         ["malformed", "{ nope", /not valid JSON/],
         [
           "foreign",
-          { ...recordFor("b".repeat(64)), repository: "evil/fork" },
+          {
+            ...recordFor("b".repeat(64), "c".repeat(64)),
+            repository: "evil/fork",
+          },
           /approved generator/,
         ],
       ]
@@ -321,7 +332,7 @@ describe("product CI gate", () => {
 
   it("verifies an installation that matches the record, and fails otherwise", async () => {
     const generator = generatorCheckout();
-    const { root: toolchain, digest } = await makeToolchain();
+    const { root: toolchain, digest, implementation } = await makeToolchain();
 
     const ok = capture();
     assert.equal(
@@ -329,7 +340,7 @@ describe("product CI gate", () => {
         [
           "verify",
           "--root",
-          makeProduct(recordFor(digest)),
+          makeProduct(recordFor(digest, implementation)),
           "--generator",
           generator,
           "--toolchain-root",
@@ -342,7 +353,7 @@ describe("product CI gate", () => {
     );
     assert.match(
       ok.lines.join("\n"),
-      /provenance and materialisation verified/,
+      /provenance and implementation verified/,
     );
 
     const mismatched = capture();
@@ -351,7 +362,7 @@ describe("product CI gate", () => {
         [
           "verify",
           "--root",
-          makeProduct(recordFor("d".repeat(64))),
+          makeProduct(recordFor(digest, "d".repeat(64))),
           "--generator",
           generator,
           "--toolchain-root",
@@ -369,7 +380,7 @@ describe("product CI gate", () => {
         [
           "verify",
           "--root",
-          makeProduct(recordFor(digest)),
+          makeProduct(recordFor(digest, implementation)),
           "--generator",
           generator,
           "--toolchain-root",
@@ -542,5 +553,350 @@ describe("product CI gate", () => {
         "the identity must still notice the content",
       );
     });
+  });
+
+  describe("dependency implementation identity", () => {
+    // A miniature Deno store, so every rule is exercised at its real anchor:
+    //   .deno/<pkg>@<ver>/node_modules/<pkg>/…
+    function store() {
+      const root = makeDir("impl-");
+      const entry = path.join(root, ".deno", "vite@8.3.5");
+      const pkg = path.join(entry, "node_modules", "vite");
+      mkdirSync(pkg, { recursive: true });
+      writeFileSync(path.join(pkg, "package.json"), '{"name":"vite"}\n');
+      writeFileSync(path.join(pkg, "index.js"), "export default 1;\n");
+      writeFileSync(path.join(entry, ".initialized"), "");
+      return { root, entry, pkg };
+    }
+
+    const identity = async (root) =>
+      (await treeDigest(root)).implementationDigest;
+
+    it("is identical for the same content under different roots", async () => {
+      const first = await treeDigest(store().root);
+      const second = await treeDigest(store().root);
+
+      assert.equal(first.implementationDigest, second.implementationDigest);
+      assert.equal(first.metadataDigest, second.metadataDigest);
+      assert.equal(first.digest, second.digest);
+    });
+
+    it("moves for content, addition, removal and rename", async () => {
+      const { root, pkg } = store();
+      const base = await identity(root);
+
+      writeFileSync(path.join(pkg, "index.js"), "export default 2;\n");
+      const content = await identity(root);
+      assert.ok(content !== base, "content");
+
+      writeFileSync(path.join(pkg, "extra.js"), "x\n");
+      const added = await identity(root);
+      assert.ok(added !== content, "addition");
+
+      rmSync(path.join(pkg, "extra.js"));
+      writeFileSync(path.join(pkg, "renamed.js"), "export default 1;\n");
+      const renamed = await identity(root);
+      assert.ok(renamed !== added, "rename");
+
+      rmSync(path.join(pkg, "renamed.js"));
+      writeFileSync(path.join(pkg, "index.js"), "export default 1;\n");
+      assert.ok((await identity(root)) !== renamed, "removal");
+    });
+
+    it("uses the owner triad, and only the owner triad", async () => {
+      const { root, pkg } = store();
+      const file = path.join(pkg, "index.js");
+      const base = await treeDigest(root);
+
+      for (const mode of [0o400, 0o700, 0o500]) {
+        chmodSync(file, mode);
+        assert.ok(
+          (await identity(root)) !== base.implementationDigest,
+          `owner mode ${mode.toString(8)} must move the identity`,
+        );
+      }
+
+      chmodSync(file, 0o644);
+      const owner = (await treeDigest(root)).implementationDigest;
+      for (const mode of [0o664, 0o604, 0o666, 0o4644, 0o2644]) {
+        chmodSync(file, mode);
+        assert.equal(
+          (await treeDigest(root)).implementationDigest,
+          owner,
+          `non-owner bits in ${mode.toString(8)} must not move the identity`,
+        );
+      }
+    });
+
+    it("covers directories by path and owner mode", async () => {
+      const { root, pkg } = store();
+      const base = await identity(root);
+
+      // Create the full subtree first: a directory without the owner write bit
+      // cannot later gain a child, so ordering is part of the fixture.
+      mkdirSync(path.join(pkg, "sub", "deeper"), { recursive: true });
+      const withDir = await identity(root);
+      assert.ok(withDir !== base, "directory addition");
+
+      chmodSync(path.join(pkg, "sub"), 0o500);
+      const tightened = await identity(root);
+      assert.ok(tightened !== withDir, "directory owner mode");
+
+      chmodSync(path.join(pkg, "sub"), 0o755);
+      assert.equal(
+        await identity(root),
+        withDir,
+        "restoring the owner triad must restore the identity",
+      );
+
+      rmSync(path.join(pkg, "sub"), { recursive: true });
+      assert.ok((await identity(root)) !== withDir, "directory removal");
+    });
+
+    it("records symlinks literally and never follows them", async () => {
+      const { root, pkg } = store();
+      const outside = makeDir("impl-outside-");
+      writeFileSync(path.join(outside, "data.txt"), "one\n");
+
+      Deno.symlinkSync(path.join(outside, "data.txt"), path.join(pkg, "link"));
+      const linked = await identity(root);
+
+      writeFileSync(path.join(outside, "data.txt"), "two\n");
+      assert.equal(await identity(root), linked, "must not follow the symlink");
+
+      Deno.removeSync(path.join(pkg, "link"));
+      Deno.symlinkSync(path.join(outside, "other.txt"), path.join(pkg, "link"));
+      assert.ok((await identity(root)) !== linked, "literal target change");
+    });
+
+    it("includes unknown files and keeps executable changes detectable", async () => {
+      const { root, pkg } = store();
+      const base = await identity(root);
+
+      writeFileSync(path.join(pkg, ".mystery"), "");
+      assert.ok((await identity(root)) !== base, "unknown zero-byte file");
+
+      writeFileSync(path.join(pkg, "binding.node"), "binary\n");
+      const plain = await identity(root);
+      chmodSync(path.join(pkg, "binding.node"), 0o755);
+      assert.ok((await identity(root)) !== plain, "native binding exec bit");
+    });
+  });
+});
+
+describe("installer metadata recognition", () => {
+  function store() {
+    const root = makeDir("meta-");
+    const entry = path.join(root, ".deno", "vite@8.3.5");
+    const pkg = path.join(entry, "node_modules", "vite");
+    mkdirSync(pkg, { recursive: true });
+    writeFileSync(path.join(pkg, "index.js"), "export default 1;\n");
+    return { root, entry, pkg };
+  }
+
+  const snapshot = async (root) => await treeDigest(root);
+
+  it("excludes each rule at its approved anchor", async () => {
+    for (
+      const [rule, target] of [
+        ["M1", (s) => path.join(s.root, ".deno", ".deno.lock")],
+        ["M2", (s) => path.join(s.root, ".deno", ".setup-cache.bin")],
+        ["M3", (s) => path.join(s.entry, ".initialized")],
+        ["M4", (s) => path.join(s.entry, ".scripts-warned")],
+        ["M5", (s) => path.join(s.pkg, ".scripts-warned-123")],
+      ]
+    ) {
+      const fixture = store();
+      const before = await snapshot(fixture.root);
+      writeFileSync(target(fixture), "");
+      const after = await snapshot(fixture.root);
+
+      assert.equal(
+        after.implementationDigest,
+        before.implementationDigest,
+        `${rule} must not enter the implementation identity`,
+      );
+      assert.equal(after.metadataFiles, before.metadataFiles + 1, rule);
+      assert.ok(after.metadataDigest !== before.metadataDigest, rule);
+    }
+  });
+
+  it("rejects M3/M4 names outside a store entry", async () => {
+    const { root, pkg } = store();
+    const base = (await snapshot(root)).implementationDigest;
+    writeFileSync(path.join(pkg, ".initialized"), "");
+    writeFileSync(path.join(pkg, ".scripts-warned"), "");
+    assert.ok(
+      (await snapshot(root)).implementationDigest !== base,
+      "same names inside a package payload stay in the implementation",
+    );
+  });
+
+  it("requires M5's numeric suffix, zero length, file type and payload", async () => {
+    const { root, entry, pkg } = store();
+
+    writeFileSync(path.join(pkg, ".scripts-warned"), "");
+    assert.equal(
+      metadataRule(
+        "node_modules/.deno/x@1/node_modules/p/.scripts-warned",
+        "file",
+        0,
+      ),
+      null,
+      "no numeric suffix is not M5",
+    );
+
+    writeFileSync(path.join(pkg, ".scripts-warned-1"), "not empty\n");
+    assert.equal(
+      metadataRule(
+        "node_modules/.deno/x@1/node_modules/p/.scripts-warned-1",
+        "file",
+        9,
+      ),
+      null,
+      "a non-empty file is not M5",
+    );
+
+    // A directory and a symlink of the same name are not M5.
+    mkdirSync(path.join(pkg, ".scripts-warned-2"));
+    Deno.symlinkSync("index.js", path.join(pkg, ".scripts-warned-3"));
+    assert.equal(
+      metadataRule(
+        "node_modules/.deno/x@1/node_modules/p/.scripts-warned-2",
+        "directory",
+        0,
+      ),
+      null,
+      "a directory is not M5",
+    );
+
+    // Outside the package payload, and outside the store entirely.
+    assert.equal(
+      metadataRule("node_modules/.deno/x@1/.scripts-warned-4", "file", 0),
+      null,
+      "outside the payload is not M5",
+    );
+    assert.equal(
+      metadataRule("node_modules/vite/.scripts-warned-5", "file", 0),
+      null,
+      "an application package is not a Deno store",
+    );
+    // Zero-byte and correctly named, but outside the payload in both cases:
+    // directly in the store entry, and in an application directory.
+    const nearMiss = (await snapshot(root)).implementationDigest;
+    writeFileSync(path.join(entry, ".scripts-warned-6"), "");
+    mkdirSync(path.join(root, "app"), { recursive: true });
+    writeFileSync(path.join(root, "app", ".scripts-warned-7"), "");
+    assert.ok(
+      (await snapshot(root)).implementationDigest !== nearMiss,
+      "near-miss placements must remain part of the implementation",
+    );
+  });
+
+  it("does not require any particular mode for M5", async () => {
+    for (const mode of [0o644, 0o600, 0o755]) {
+      const { root, pkg } = store();
+      const before = await snapshot(root);
+      const marker = path.join(pkg, ".scripts-warned-42");
+      writeFileSync(marker, "");
+      chmodSync(marker, mode);
+      const after = await snapshot(root);
+
+      assert.equal(
+        after.implementationDigest,
+        before.implementationDigest,
+        `mode ${mode.toString(8)} must not change the classification`,
+      );
+      assert.equal(after.metadataFiles, before.metadataFiles + 1);
+    }
+  });
+});
+
+describe("metadata diagnostic sensitivity and fail-closed traversal", () => {
+  function store() {
+    const root = makeDir("diag-");
+    const entry = path.join(root, ".deno", "vite@8.3.5");
+    const pkg = path.join(entry, "node_modules", "vite");
+    mkdirSync(pkg, { recursive: true });
+    writeFileSync(path.join(pkg, "index.js"), "export default 1;\n");
+    return { root, entry, pkg };
+  }
+
+  it("tracks addition, removal, path, content and mode without touching identity", async () => {
+    const { root, entry } = store();
+    const base = await treeDigest(root);
+
+    writeFileSync(path.join(root, ".deno", ".setup-cache.bin"), "one\n");
+    const added = await treeDigest(root);
+    assert.equal(added.implementationDigest, base.implementationDigest);
+    assert.ok(added.metadataDigest !== base.metadataDigest, "addition");
+    assert.equal(added.metadataFiles, base.metadataFiles + 1);
+
+    writeFileSync(path.join(root, ".deno", ".setup-cache.bin"), "two\n");
+    const content = await treeDigest(root);
+    assert.equal(content.implementationDigest, base.implementationDigest);
+    assert.ok(content.metadataDigest !== added.metadataDigest, "content");
+
+    chmodSync(
+      path.join(root, ".deno", ".setup-cache.bin"),
+      0o600,
+    );
+    const mode = await treeDigest(root);
+    assert.ok(mode.metadataDigest !== content.metadataDigest, "mode");
+
+    // Path change: the same content at a different anchored location.
+    rmSync(path.join(root, ".deno", ".setup-cache.bin"));
+    writeFileSync(path.join(entry, ".initialized"), "");
+    const moved = await treeDigest(root);
+    assert.equal(moved.implementationDigest, base.implementationDigest);
+    assert.ok(moved.metadataDigest !== mode.metadataDigest, "path");
+
+    rmSync(path.join(entry, ".initialized"));
+    const removed = await treeDigest(root);
+    assert.equal(removed.metadataDigest, base.metadataDigest, "removal");
+    assert.equal(removed.metadataFiles, base.metadataFiles);
+  });
+
+  it("classifies deterministically across different roots", async () => {
+    const first = store();
+    const second = store();
+    for (const fixture of [first, second]) {
+      writeFileSync(path.join(fixture.root, ".deno", ".deno.lock"), "");
+      writeFileSync(path.join(fixture.pkg, ".scripts-warned-9"), "");
+    }
+    const a = await treeDigest(first.root);
+    const b = await treeDigest(second.root);
+
+    assert.equal(a.implementationDigest, b.implementationDigest);
+    assert.equal(a.metadataDigest, b.metadataDigest);
+    assert.equal(a.metadataFiles, b.metadataFiles);
+  });
+
+  it("fails closed on an unsupported filesystem entry", async () => {
+    const { root } = store();
+    const fifo = path.join(root, "pipe");
+    let created = false;
+    try {
+      new Deno.Command("mkfifo", { args: [fifo] }).outputSync();
+      created = Deno.lstatSync(fifo).isFifo;
+    } catch {
+      created = false;
+    }
+
+    if (!created) {
+      // Environmental limitation, reported rather than silently skipped.
+      console.warn("mkfifo unavailable; fail-closed path not exercised");
+      return;
+    }
+
+    let message = "";
+    try {
+      await treeDigest(root);
+      assert.ok(false, "a FIFO must not be silently encoded");
+    } catch (error) {
+      message = error.message;
+    }
+    assert.match(message, /unsupported filesystem entry fifo/);
+    assert.match(message, /"pipe"/);
   });
 });

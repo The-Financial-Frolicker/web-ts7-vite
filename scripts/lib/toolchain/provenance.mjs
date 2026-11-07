@@ -33,6 +33,10 @@ export const SOURCE_FIELDS = Object.freeze([
   "ref",
   "sha",
   "materialisation",
+  // Cross-machine identity: the installed dependency implementation, excluding
+  // installer state (G8/G8a). `materialisation` is the whole-tree fingerprint,
+  // which legitimately differs between machines.
+  "implementation",
 ]);
 
 export class ProvenanceError extends Error {
@@ -58,7 +62,7 @@ export function validateSource(value) {
     }
   }
 
-  const { repository, ref, sha, materialisation } = value;
+  const { repository, ref, sha, materialisation, implementation } = value;
 
   if (repository !== GENERATOR_REPOSITORY) {
     fail(
@@ -80,6 +84,12 @@ export function validateSource(value) {
     !/^[0-9a-f]{64}$/.test(materialisation)
   ) {
     fail(`${SOURCE_FILE} materialisation must be a 64-character sha256 digest`);
+  }
+  if (
+    typeof implementation !== "string" ||
+    !/^[0-9a-f]{64}$/.test(implementation)
+  ) {
+    fail(`${SOURCE_FILE} implementation must be a 64-character sha256 digest`);
   }
 
   return value;
@@ -256,6 +266,23 @@ export async function requireInstalledIdentity(toolchainRoot, digest) {
     );
   }
 
+  // The cross-machine identity must also agree with the same observation. The
+  // whole-tree fingerprint above is a same-machine check; this one is the value
+  // a product records and another machine reproduces.
+  if (
+    typeof identity.implementation !== "string" ||
+    !/^[0-9a-f]{64}$/.test(identity.implementation)
+  ) {
+    fail(`${file} records no implementation identity`);
+  }
+  if (observed.implementationDigest !== identity.implementation) {
+    fail(
+      `the installed toolchain does not match its recorded implementation: ` +
+        `recorded ${identity.implementation}, observed ` +
+        `${observed.implementationDigest}. Re-provision before emitting release provenance.`,
+    );
+  }
+
   return { identity, observed };
 }
 
@@ -278,5 +305,6 @@ export async function releaseProvenance(
     ref,
     sha,
     materialisation: identity.materialisation,
+    implementation: identity.implementation,
   });
 }

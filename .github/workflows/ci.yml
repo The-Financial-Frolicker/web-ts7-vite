@@ -151,6 +151,12 @@ jobs:
             console.log(
               `diagnostics: path-mode-column sha256=${tree.pathModeDigest}`,
             );
+            console.log(
+              `identity: implementation sha256=${tree.implementationDigest} entries=${tree.implementationEntries}`,
+            );
+            console.log(
+              `identity: metadata files=${tree.metadataFiles} sha256=${tree.metadataDigest}`,
+            );
           ' "$tc/node_modules"
           echo "toolchain identity verified"
 

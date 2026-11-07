@@ -25,6 +25,7 @@ const VALID = Object.freeze({
   ref: "toolchain-2026.11.1",
   sha: "a".repeat(40),
   materialisation: "b".repeat(64),
+  implementation: "c".repeat(64),
 });
 
 const EXPECTED = [
