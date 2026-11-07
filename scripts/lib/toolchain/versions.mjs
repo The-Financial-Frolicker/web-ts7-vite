@@ -192,8 +192,9 @@ export const PROJECTION_NOTES = Object.freeze([
   "# Python is NOT project-managed. Emscripten needs the host's python3 (>= 3.10);",
   "# scripts/resolve-python.sh uses it when present and only provisions a fallback",
   "# at the requirement the installed SDK reports when the host cannot satisfy it.",
-  "# Node.js is intentionally not project-managed. Emscripten ships its own Node;",
-  "# real deployment and Vite dev/preview may use a host-provided Node.",
+  "# Node.js is not used to execute any project workflow. Deno runs every task,",
+  "# check, the Vite build, the development and preview servers and deployment.",
+  "# Emscripten's bundled Node stays private to the SDK and never runs project code.",
 ]);
 
 /**

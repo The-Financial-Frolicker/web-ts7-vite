@@ -457,7 +457,8 @@ describe("projection", () => {
 
     // The policy text lives in the projection, so a `--write` cannot lose it.
     assert.match(toml, /Python is NOT project-managed/);
-    assert.match(toml, /Node\.js is intentionally not project-managed/);
+    assert.match(toml, /Node\.js is not used to execute any project workflow/);
+    assert.match(toml, /Deno runs every task/);
     assert.match(toml, /scripts\/resolve-python\.sh/);
     assert.equal(toml.includes("python = "), false);
     assert.equal(toml.includes("node = "), false);
