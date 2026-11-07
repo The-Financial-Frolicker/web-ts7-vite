@@ -17,7 +17,11 @@ const workflow = readFileSync(
   "utf8",
 );
 
-const MARKER = "hashFiles('toolchain/deno.lock')";
+// The role discriminator is a classifier step output. The marker file is still
+// the source of truth, but it is tested in a shell step: GitHub rejects
+// `hashFiles()` inside a job-level `if:`, so the decision cannot live there.
+const ROLE = "needs.classify.outputs.generator";
+const MARKER_FILE = "toolchain/deno.lock";
 
 /**
  * Reject duplicate mapping keys in block-style YAML.
@@ -120,11 +124,11 @@ function jobBody(name) {
 }
 
 describe("repository role discrimination", () => {
-  it("gates every job on the generator-owned toolchain lock", () => {
+  it("gates every job on the classifier's role output", () => {
     for (const name of ["validate", "build", "product"]) {
       assert.ok(
-        jobCondition(name).includes(MARKER),
-        `job ${name} does not discriminate on ${MARKER}`,
+        jobCondition(name).includes(ROLE),
+        `job ${name} does not discriminate on ${ROLE}`,
       );
     }
   });
@@ -134,11 +138,11 @@ describe("repository role discrimination", () => {
     const product = jobCondition("product");
 
     for (const condition of generator) {
-      assert.ok(condition.includes("!= ''"), condition);
-      assert.ok(!condition.includes("== ''"), condition);
+      assert.ok(condition.includes("== 'true'"), condition);
+      assert.ok(!condition.includes("== 'false'"), condition);
     }
-    assert.ok(product.includes("== ''"), product);
-    assert.ok(!product.includes("!= ''"), product);
+    assert.ok(product.includes("== 'false'"), product);
+    assert.ok(!product.includes("== 'true'"), product);
   });
 
   it("does not use product provenance to distinguish roles", () => {
@@ -319,6 +323,225 @@ describe("product job sequencing", () => {
         findDuplicateMappingKey(fine, "fixture"),
         null,
         "repeated keys in sibling mappings are legitimate",
+      );
+    });
+  });
+
+  /** The lines belonging to one job, bounded by the next top-level job key. */
+  function jobLines(name, source = workflow) {
+    const lines = source.split("\n");
+    const start = lines.findIndex((line) => line === `  ${name}:`);
+    assert.ok(start !== -1, `job ${name} is missing`);
+
+    let end = lines.length;
+    for (let index = start + 1; index < lines.length; index += 1) {
+      if (/^ {2}[a-z0-9_-]+:$/.test(lines[index])) {
+        end = index;
+        break;
+      }
+    }
+
+    return { lines, start, end };
+  }
+
+  /**
+   * Declarations made by the job itself (indent 4), never by one of its steps.
+   *
+   * GitHub checks expression contexts per location: `hashFiles()` is legal in a
+   * step `if:` but rejected in a job `if:`, and the `runner` context is legal in a
+   * step `env:` but rejected in a job `env:`. Step declarations sit at indent 8 or
+   * deeper, so that indentation boundary is what separates the two.
+   *
+   * Limitation: an indentation reader for the block style this repository uses. It
+   * is not a YAML parser and not a general GitHub Actions schema validator.
+   */
+  function jobDeclarations(name, source = workflow) {
+    const { lines, start, end } = jobLines(name, source);
+    const declarations = [];
+
+    for (let index = start + 1; index < end; index += 1) {
+      const line = lines[index];
+      const indent = line.length - line.trimStart().length;
+      if (indent !== 4) continue;
+
+      const text = line.trim();
+      const colon = text.indexOf(":");
+      if (colon <= 0) continue;
+      const key = text.slice(0, colon);
+      if (!/^[a-z0-9_-]+$/.test(key)) continue;
+
+      const block = [];
+      for (let next = index + 1; next < end; next += 1) {
+        const candidate = lines[next];
+        const candidateIndent = candidate.length - candidate.trimStart().length;
+        if (candidate.trim() !== "" && candidateIndent <= 4) break;
+        block.push(candidate);
+      }
+
+      declarations.push({
+        key,
+        value: text.slice(colon + 1).trim(),
+        block,
+        line: index + 1,
+      });
+    }
+
+    return declarations;
+  }
+
+  const JOB_NAMES = ["classify", "validate", "build", "product"];
+
+  function jobNeeds(name) {
+    const entry = jobDeclarations(name).find((item) => item.key === "needs");
+    if (entry === undefined) return [];
+    return entry.value.replace(/[[\]]/g, "").split(",")
+      .map((item) => item.trim())
+      .filter((item) => item !== "");
+  }
+
+  describe("role classification", () => {
+    it("publishes the role from a step output, not a workflow expression", () => {
+      const outputs = jobDeclarations("classify").find((item) =>
+        item.key === "outputs"
+      );
+      assert.ok(outputs !== undefined, "the classifier must declare outputs");
+      assert.ok(
+        outputs.block.join("\n").includes(
+          "generator: ${{ steps.marker.outputs.generator }}",
+        ),
+        outputs.block.join("\n"),
+      );
+
+      const body = jobBody("classify");
+      assert.ok(body.includes("id: marker"), "the deciding step must be named");
+      assert.ok(
+        body.includes(`[ -f ${MARKER_FILE} ]`),
+        `the classifier must test the marker file ${MARKER_FILE}`,
+      );
+      assert.ok(
+        body.includes("persist-credentials: false"),
+        "the classifier checkout must not persist credentials",
+      );
+    });
+
+    it("makes the generator jobs depend on it and select the generator role", () => {
+      for (const name of ["validate", "build"]) {
+        assert.ok(
+          jobNeeds(name).includes("classify"),
+          `job ${name} must declare needs: classify`,
+        );
+        assert.ok(jobCondition(name).includes(`${ROLE} == 'true'`), name);
+      }
+    });
+
+    it("makes the product job depend on it and select the product role", () => {
+      assert.ok(jobNeeds("product").includes("classify"));
+      assert.ok(jobCondition("product").includes(`${ROLE} == 'false'`));
+    });
+
+    it("keeps the classifier a discriminator, not an installer or validator", () => {
+      const body = jobBody("classify");
+      for (const forbidden of ["toolchain:install", "mise exec", "deno task"]) {
+        assert.ok(
+          !body.includes(forbidden),
+          `the classifier must not run ${forbidden}`,
+        );
+      }
+    });
+  });
+
+  describe("job-level expression contexts", () => {
+    it("never uses hashFiles() in a job-level if", () => {
+      for (const name of JOB_NAMES) {
+        for (const entry of jobDeclarations(name)) {
+          if (entry.key !== "if") continue;
+          assert.ok(
+            !entry.value.includes("hashFiles("),
+            `job ${name} uses hashFiles() in a job-level if (line ${entry.line})`,
+          );
+        }
+      }
+    });
+
+    it("never uses the runner context in a job-level env", () => {
+      for (const name of JOB_NAMES) {
+        for (const entry of jobDeclarations(name)) {
+          if (entry.key !== "env") continue;
+          const text = [entry.value, ...entry.block].join("\n");
+          assert.ok(
+            !/\brunner\b/.test(text),
+            `job ${name} uses the runner context in a job-level env (line ${entry.line})`,
+          );
+        }
+      }
+    });
+
+    it("still permits those contexts where GitHub allows them", () => {
+      // A step-level `runner` reference is exactly what the product job relies on.
+      assert.ok(
+        jobBody("product").includes(
+          "TOOLCHAIN_ROOT: ${{ runner.temp }}/toolchain",
+        ),
+        "product steps must declare the installation path at step level",
+      );
+
+      // And the classifier decides with a file test in a shell step.
+      const classifier = jobBody("classify");
+      assert.ok(classifier.includes(`[ -f ${MARKER_FILE} ]`));
+      assert.ok(!classifier.includes("hashFiles("));
+    });
+  });
+
+  describe("job-level context detection", () => {
+    // The same expression is legal one level down: GitHub only rejects it where
+    // the context is unavailable. A detector that flagged the step-level uses too
+    // would be useless, so this fixture carries both and proves the boundary.
+    const mixed = [
+      "jobs:",
+      "  validate:",
+      "    if: hashFiles('toolchain/deno.lock') != ''",
+      "    env:",
+      "      TOOLCHAIN_ROOT: ${{ runner.temp }}/toolchain",
+      "    steps:",
+      "      - name: legitimate step",
+      "        if: hashFiles('toolchain/deno.lock') != ''",
+      "        env:",
+      "          TOOLCHAIN_ROOT: ${{ runner.temp }}/toolchain",
+      "        run: echo ok",
+      "  build:",
+      "    steps:",
+      "      - name: another step",
+      "        run: echo ok",
+      "",
+    ].join("\n");
+
+    it("reads job-level declarations and nothing deeper", () => {
+      const declarations = jobDeclarations("validate", mixed);
+      assert.equal(
+        declarations.filter((item) => item.key === "if").length,
+        1,
+        "only the job-level if must be collected",
+      );
+      assert.equal(
+        declarations.filter((item) => item.key === "env").length,
+        1,
+        "only the job-level env must be collected",
+      );
+      assert.equal(
+        declarations.filter((item) => item.key === "steps").length,
+        1,
+      );
+    });
+
+    it("detects hashFiles() and the runner context at job level", () => {
+      const declarations = jobDeclarations("validate", mixed);
+      const condition = declarations.find((item) => item.key === "if");
+      const environment = declarations.find((item) => item.key === "env");
+
+      assert.ok(condition.value.includes("hashFiles("), condition.value);
+      assert.ok(
+        [environment.value, ...environment.block].join("\n").includes("runner"),
+        environment.block.join("\n"),
       );
     });
   });

@@ -25,11 +25,45 @@ env:
 jobs:
   # ---------------------------------------------------------------------------
   # Repository-role discriminator: the generator owns `toolchain/deno.lock`.
-  # A generated product never ships it, so exactly one of these jobs can run.
+  # A generated product never ships it, so exactly one role path can run.
+  #
+  # The role is decided here, in a step, because `hashFiles()` is only available
+  # to step-level expressions — GitHub rejects it in a job-level `if:`. The
+  # output is a plain string (`true`/`false`) consumed through the `needs`
+  # context, which is legal at job level.
   # ---------------------------------------------------------------------------
+  classify:
+    name: Classify repository role
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      generator: ${{ steps.marker.outputs.generator }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # A file test, not a workflow expression: the marker is the toolchain
+      # source domain, which only the generator owns.
+      - name: Detect the generator-owned toolchain lock
+        id: marker
+        run: |
+          set -euo pipefail
+          if [ -f toolchain/deno.lock ]; then
+            echo "generator=true" >> "$GITHUB_OUTPUT"
+            echo "role: generator (toolchain/deno.lock present)"
+          else
+            echo "generator=false" >> "$GITHUB_OUTPUT"
+            echo "role: product (toolchain/deno.lock absent)"
+          fi
+
   validate:
     name: Validate (generator)
-    if: hashFiles('toolchain/deno.lock') != ''
+    needs: classify
+    if: needs.classify.outputs.generator == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
 
@@ -214,8 +248,8 @@ jobs:
     name: Build validation (generator)
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    needs: validate
-    if: ${{ !cancelled() && hashFiles('toolchain/deno.lock') != '' }}
+    needs: [classify, validate]
+    if: ${{ !cancelled() && needs.classify.outputs.generator == 'true' }}
 
     steps:
       - name: Check out repository
@@ -288,15 +322,15 @@ jobs:
   # ---------------------------------------------------------------------------
   product:
     name: Product validation (release provenance required)
-    if: hashFiles('toolchain/deno.lock') == ''
+    needs: classify
+    if: needs.classify.outputs.generator == 'false'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions:
       contents: read
-    env:
-      # External to the product checkout: the installation is CI infrastructure.
-      TOOLCHAIN_ROOT: ${{ runner.temp }}/toolchain
-
+    # `runner` is not an available context in a job-level `env:`, so the
+    # installation path is declared on each step that consumes it. It stays the
+    # same single location, outside the product checkout.
     steps:
       - name: Check out product
         uses: actions/checkout@v7
@@ -354,6 +388,8 @@ jobs:
       # generator checkout, which is what authorises a generator-only task.
       - name: Provision the toolchain from the verified generator release
         working-directory: ${{ runner.temp }}/generator
+        env:
+          TOOLCHAIN_ROOT: ${{ runner.temp }}/toolchain
         run: |
           set -euo pipefail
           mise exec -- deno task toolchain:install -- --allow-download
@@ -361,6 +397,8 @@ jobs:
       # Stage D — the three identities must agree, with the digest computed by
       # the verified checkout's own implementation.
       - name: Verify provenance and materialisation
+        env:
+          TOOLCHAIN_ROOT: ${{ runner.temp }}/toolchain
         run: |
           set -euo pipefail
           deno run --allow-read --allow-env \
@@ -370,13 +408,21 @@ jobs:
 
       # Stage E — product acceptance, only after every gate above.
       - name: Client typecheck
+        env:
+          TOOLCHAIN_ROOT: ${{ runner.temp }}/toolchain
         run: mise exec -- deno task check:client
 
       - name: Worker typecheck
+        env:
+          TOOLCHAIN_ROOT: ${{ runner.temp }}/toolchain
         run: mise exec -- deno task check:worker
 
       - name: Build
+        env:
+          TOOLCHAIN_ROOT: ${{ runner.temp }}/toolchain
         run: mise exec -- deno task build
 
       - name: Wrangler deploy dry run
+        env:
+          TOOLCHAIN_ROOT: ${{ runner.temp }}/toolchain
         run: mise exec -- deno task deploy:dry-run
