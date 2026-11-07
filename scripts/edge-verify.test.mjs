@@ -23,6 +23,7 @@ import {
   parseBuildIdentity,
   parseVerifyArgs,
   readinessProblems,
+  sha256OfBytes,
   waitForRendered,
 } from "./edge-verify.mjs";
 
@@ -737,5 +738,46 @@ describe("browser navigation response", () => {
     assert.equal(result.status, null);
     assert.match(result.problem, /not observed/);
     assert.equal(clock.state.now, 300, "the wait is bounded, not unbounded");
+  });
+});
+
+describe("acceptance criteria digest", () => {
+  const encoder = new TextEncoder();
+
+  it("is stable for unchanged bytes", async () => {
+    const bytes = encoder.encode('{"wasmResult":{"equals":"42"}}\n');
+    const first = await sha256OfBytes(bytes);
+    const second = await sha256OfBytes(bytes);
+
+    assert.equal(first, second, "the digest must be deterministic");
+    assert.match(first, /^sha256:[0-9a-f]{64}$/);
+  });
+
+  it("changes when a criterion changes", async () => {
+    const before = await sha256OfBytes(
+      encoder.encode('{"wasmResult":{"equals":"42"}}'),
+    );
+    const after = await sha256OfBytes(
+      encoder.encode('{"wasmResult":{"contains":"42"}}'),
+    );
+
+    assert.ok(before !== after, "a softened criterion must change the digest");
+  });
+
+  it("is recorded in the generated evidence", async () => {
+    const digest = await sha256OfBytes(encoder.encode("criteria"));
+    const evidence = buildEvidence({
+      context: {
+        suiteVersion: "edge-acceptance/1",
+        criteriaDigest: digest,
+        generatedAt: "2026-01-01T00:00:00.000Z",
+        sha: "0".repeat(40),
+        workerName: "edge-1-1",
+        url: "https://example.test",
+      },
+      assertions: [{ id: "page.marker", status: "pass" }],
+    });
+
+    assert.equal(evidence.criteriaDigest, digest);
   });
 });

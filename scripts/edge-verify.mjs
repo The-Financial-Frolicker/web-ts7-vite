@@ -260,6 +260,22 @@ export function evaluateAcceptance({ criteria, observed, expectations = {} }) {
 }
 
 /**
+ * SHA-256 over raw bytes.
+ *
+ * The acceptance criteria are hashed as stored, not as a canonicalised value:
+ * the claim is "this file's bytes", so any edit — including whitespace — must
+ * change the digest.
+ */
+export async function sha256OfBytes(bytes) {
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return `sha256:${
+    [...new Uint8Array(digest)]
+      .map((byte) => byte.toString(16).padStart(2, "0"))
+      .join("")
+  }`;
+}
+
+/**
  * Build the machine-readable acceptance result.
  *
  * `accepted` is the conjunction of the assertions and nothing else: a failed
@@ -276,6 +292,10 @@ export function buildEvidence({
     schemaVersion: 1,
     suite: "edge-acceptance",
     suiteVersion: context.suiteVersion,
+    // The exact criteria bytes this run applied. `suiteVersion` is a
+    // hand-maintained label, so without this a softened criterion produced
+    // evidence indistinguishable from a correct run.
+    criteriaDigest: context.criteriaDigest ?? null,
     generatedAt: context.generatedAt,
     source: {
       sha: context.sha,
@@ -889,8 +909,13 @@ export async function main(
   }
 
   let criteria;
+  let criteriaDigest;
   try {
-    criteria = JSON.parse(Deno.readTextFileSync(options.criteria));
+    // Read once and hash the same bytes that are parsed, so the recorded digest
+    // cannot describe a different revision of the file than the run applied.
+    const bytes = Deno.readFileSync(options.criteria);
+    criteriaDigest = await sha256OfBytes(bytes);
+    criteria = JSON.parse(new TextDecoder().decode(bytes));
   } catch (error) {
     io.error(
       `Edge acceptance failed: cannot read ${options.criteria}: ${error.message}`,
@@ -906,6 +931,7 @@ export async function main(
     : options.edgeReady === "true";
   const context = {
     suiteVersion: criteria.suiteVersion,
+    criteriaDigest,
     generatedAt: now(),
     sha: options.sha,
     runId: options.runId ?? null,
