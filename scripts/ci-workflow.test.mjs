@@ -19,6 +19,91 @@ const workflow = readFileSync(
 
 const MARKER = "hashFiles('toolchain/deno.lock')";
 
+/**
+ * Reject duplicate mapping keys in block-style YAML.
+ *
+ * GitHub refuses a workflow that repeats a key in the same mapping — the G2 push
+ * failed with zero jobs because one step carried two `run:` keys — but permissive
+ * parsers silently keep the last one. This checker walks the block structure
+ * (indentation scopes, sequence items, block scalars) rather than matching text,
+ * so a key is only ever compared with keys belonging to the same mapping.
+ *
+ * Returns `null` when the document is unambiguous, or
+ * `{ key, line, firstLine, label }` for the first duplicate found.
+ */
+export function findDuplicateMappingKey(source, label = "workflow") {
+  const lines = source.split("\n");
+  const frames = [];
+
+  const top = () => (frames.length === 0 ? null : frames[frames.length - 1]);
+
+  const isBlockScalar = (value) => value !== "" && "|>".includes(value[0]);
+
+  const keyOf = (text) => {
+    const colon = text.indexOf(":");
+    if (colon <= 0) return null;
+    const key = text.slice(0, colon);
+    // A block-mapping key never contains whitespace; a bare scalar might.
+    if (key.trim() !== key || /\s/.test(key)) return null;
+    return { key, value: text.slice(colon + 1).trim() };
+  };
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const raw = lines[index];
+    const trimmed = raw.trim();
+    if (trimmed === "" || trimmed.startsWith("#")) continue;
+
+    const indent = raw.length - raw.trimStart().length;
+    let text = trimmed;
+    let keyIndent = indent;
+
+    // A sequence entry opens a fresh mapping scope for the keys that follow.
+    if (text === "-" || text.startsWith("- ")) {
+      while (top() !== null && top().indent > indent) frames.pop();
+      text = text.slice(1).trimStart();
+      keyIndent = indent + 2;
+      frames.push({ indent: keyIndent, keys: new Map() });
+      if (text === "") continue;
+    }
+
+    const entry = keyOf(text);
+    if (entry === null) continue;
+
+    while (top() !== null && top().indent > keyIndent) frames.pop();
+    if (top() === null || top().indent < keyIndent) {
+      frames.push({ indent: keyIndent, keys: new Map() });
+    }
+
+    const frame = top();
+    if (frame.keys.has(entry.key)) {
+      return {
+        key: entry.key,
+        line: index + 1,
+        firstLine: frame.keys.get(entry.key),
+        label,
+      };
+    }
+    frame.keys.set(entry.key, index + 1);
+
+    // Content of a block scalar is data, never keys: skip to the dedent.
+    if (isBlockScalar(entry.value)) {
+      while (index + 1 < lines.length) {
+        const next = lines[index + 1];
+        const nextTrimmed = next.trim();
+        if (
+          nextTrimmed !== "" &&
+          next.length - next.trimStart().length <= keyIndent
+        ) {
+          break;
+        }
+        index += 1;
+      }
+    }
+  }
+
+  return null;
+}
+
 function jobCondition(name) {
   const match = new RegExp(`^  ${name}:\\n(?:    .*\\n)*?    if: (.+)$`, "m")
     .exec(workflow);
@@ -157,5 +242,84 @@ describe("product job sequencing", () => {
         `the product job must not run generator-only task ${forbidden}`,
       );
     }
+  });
+
+  describe("workflow YAML strictness", () => {
+    it("accepts every shipped workflow with a duplicate-key-rejecting reader", () => {
+      for (
+        const name of [
+          "ci.yml",
+          "authoritative-toolchain.yml",
+          "edge-acceptance.yml",
+        ]
+      ) {
+        const source = readFileSync(
+          path.join(Deno.cwd(), ".github", "workflows", name),
+          "utf8",
+        );
+        assert.equal(
+          findDuplicateMappingKey(source, name),
+          null,
+          `${name} must contain no duplicate mapping keys`,
+        );
+      }
+    });
+
+    it("rejects a repeated mapping key, exactly as GitHub does", () => {
+      // The shape that failed the G2 push: one step carrying two `run:` keys, the
+      // second of which a permissive parser silently keeps.
+      const broken = [
+        "jobs:",
+        "  validate:",
+        "    steps:",
+        "      - name: identity",
+        "        run: |",
+        "          echo verified",
+        "        run: mise exec -- deno task fmt:check",
+        "",
+      ].join("\n");
+
+      const found = findDuplicateMappingKey(broken, "fixture");
+      assert.ok(found !== null, "a repeated key must be rejected");
+      assert.equal(found.key, "run", "the diagnostic must name the key");
+      assert.equal(
+        found.line,
+        7,
+        "the diagnostic must name the offending line",
+      );
+      assert.equal(
+        found.firstLine,
+        5,
+        "the diagnostic must name the first use",
+      );
+      assert.equal(
+        found.label,
+        "fixture",
+        "the diagnostic must name the document",
+      );
+    });
+
+    it("does not confuse keys belonging to different mappings", () => {
+      const fine = [
+        "jobs:",
+        "  a:",
+        "    steps:",
+        "      - name: one",
+        "        run: echo 1",
+        "      - name: two",
+        "        run: echo 2",
+        "  b:",
+        "    steps:",
+        "      - name: three",
+        "        run: echo 3",
+        "",
+      ].join("\n");
+
+      assert.equal(
+        findDuplicateMappingKey(fine, "fixture"),
+        null,
+        "repeated keys in sibling mappings are legitimate",
+      );
+    });
   });
 });

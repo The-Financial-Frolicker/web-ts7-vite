@@ -98,6 +98,8 @@ jobs:
           test -x "$tc"/node_modules/.deno/@cloudflare+workerd-linux-64@*/node_modules/@cloudflare/workerd-linux-64/bin/workerd
           test -x "$tc"/node_modules/.deno/@rolldown+binding-linux-x64-gnu@*/node_modules/@rolldown/binding-linux-x64-gnu/*.node
           echo "toolchain identity verified"
+
+      - name: Formatting check
         run: mise exec -- deno task fmt:check
 
       - name: Lint check
