@@ -552,12 +552,12 @@
       ],
       "typescript": {
         "evidence": "installed package manifest",
-        "path": "<external>/typescript",
+        "path": "generator/dependencies/node_modules/typescript",
         "version": "7.0.2"
       },
       "vite": {
         "evidence": "installed package manifest",
-        "path": "<external>/vite",
+        "path": "generator/dependencies/node_modules/vite",
         "version": "8.3.5"
       },
       "vitePlugin": {
@@ -565,7 +565,7 @@
         "version": "1.66.0"
       },
       "workerd": {
-        "binary": "<external>/workerd",
+        "binary": "generator/dependencies/node_modules/.deno/@cloudflare+workerd-linux-64@1.20261023.1/node_modules/@cloudflare/workerd-linux-64/bin/workerd",
         "consistent": true,
         "evidence": "Wrangler 4.156.0 and @cloudflare/vite-plugin 1.66.0 both resolve workerd 1.20261023.1",
         "platformPackage": "@cloudflare/workerd-linux-64@1.20261023.1",

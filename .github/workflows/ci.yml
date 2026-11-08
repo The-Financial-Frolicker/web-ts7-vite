@@ -119,9 +119,14 @@ jobs:
         run: mise exec -- deno task toolchain:install -- --allow-download
 
       - name: Record and verify the toolchain identity
+        # `GENERATOR_ROOT` is the generator-owned dependency installation that the
+        # provisioning step above materialised (P19). The step names it directly
+        # rather than re-deriving a path of its own.
+        env:
+          GENERATOR_ROOT: ${{ github.workspace }}/generator/dependencies
         run: |
           set -euo pipefail
-          tc="${XDG_DATA_HOME:-$HOME/.local/share}/web-ts7-vite/toolchain"
+          tc="$GENERATOR_ROOT"
           echo "::group::toolchain identity"
           cat "$tc/toolchain.json"
           sha256sum "$tc/package.json" "$tc/deno.json" "$tc/deno.lock"
