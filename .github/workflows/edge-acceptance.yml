@@ -18,8 +18,10 @@ name: Edge acceptance
 #
 #   * the Worker name is derived from `github.run_id` and `github.run_attempt`,
 #     so no two runs (or re-runs) can address the same deployment;
-#   * each run works in its own `${{ github.workspace }}/.acceptance` tree, so the
-#     build, the evidence and the deployment metadata never cross runs;
+#   * each run works in its own `${{ runner.temp }}/acceptance-<run>-<attempt>`
+#     tree, outside the checkout it is copied from, so the build, the evidence
+#     and the deployment metadata never cross runs — and the archive can never
+#     contain its own destination;
 #   * the artefact name is equally run-scoped, so evidence cannot be overwritten;
 #   * cleanup deletes `"$WORKER_NAME"` and nothing else.
 #
@@ -64,7 +66,13 @@ jobs:
       WORKER_NAME: edge-${{ github.run_id }}-${{ github.run_attempt }}
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
-      WORK_DIR: ${{ github.workspace }}/.acceptance
+      # The disposable tree lives in the runner's temporary directory, never
+      # inside `${{ github.workspace }}`: the prepare step archives the checkout
+      # into this directory, and a destination inside its own source makes the
+      # producing tar read a directory the extracting tar is still filling
+      # (`tar: ./.acceptance: file changed as we read it`). The name stays
+      # run-scoped, so overlapping runs and re-runs cannot share a tree.
+      WORK_DIR: ${{ runner.temp }}/acceptance-${{ github.run_id }}-${{ github.run_attempt }}
 
     steps:
       - name: Check out repository
@@ -140,12 +148,17 @@ jobs:
           BUILD_SHA: ${{ github.sha }}
         run: |
           cd "$WORK_DIR"
-          # The deployment identity is the disposable Worker name: unique per run
-          # and attempt, so the page cannot be confused with another deployment.
+          # The deployment identity is the generated configuration's Worker name.
+          # `init:project "$WORKER_NAME"` above wrote it into wrangler.jsonc, the
+          # build emits dist/worker/wrangler.json with that same name, and
+          # `check:deploy` verifies it — one name, carried by the configuration.
+          # The task is therefore invoked with no Wrangler arguments: the
+          # launcher's default invocation is `deploy --config <generated>`, and
+          # any non-empty argument list would replace that command instead of
+          # adding to it.
           export BUILD_DEPLOYMENT="$WORKER_NAME"
           set +e
-          VITE_PERMISSION_PROFILE=ci-runner mise exec -- deno task deploy \
-            -- --name "$WORKER_NAME" 2>&1 | tee "$WORK_DIR/deploy.log"
+          VITE_PERMISSION_PROFILE=ci-runner mise exec -- deno task deploy 2>&1 | tee "$WORK_DIR/deploy.log"
           status=${PIPESTATUS[0]}
           echo "deploy_exit=$status" >> "$GITHUB_OUTPUT"
           exit "$status"
@@ -153,7 +166,6 @@ jobs:
       - name: Edge acceptance (real browser, real deployment)
         if: ${{ steps.deploy.outputs.deploy_exit == '0' }}
         env:
-          DEPLOY_LOG: ${{ github.workspace }}/.acceptance/deploy.log
           DEPLOY_EXIT_CODE: "0"
           # Readiness budgets. The gate polls the published URL every two seconds
           # for up to thirty: Wrangler reports success before the workers.dev
@@ -163,6 +175,9 @@ jobs:
           EDGE_READINESS_INTERVAL: "2"
         run: |
           cd "$WORK_DIR"
+          # The deployment log belongs to this run's tree; deriving it here keeps
+          # `WORK_DIR` the single place the acceptance paths are declared.
+          export DEPLOY_LOG="$WORK_DIR/deploy.log"
           mise exec -- bash scripts/edge-accept.sh
 
       - name: Delete the disposable Worker and verify it is gone
@@ -237,11 +252,11 @@ jobs:
         with:
           name: edge-acceptance-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            ${{ github.workspace }}/.acceptance/artifacts/acceptance.json
-            ${{ github.workspace }}/.acceptance/artifacts/edge-readiness.json
-            ${{ github.workspace }}/.acceptance/artifacts/screenshot.png
-            ${{ github.workspace }}/.acceptance/artifacts/page.html
-            ${{ github.workspace }}/.acceptance/artifacts/cleanup.json
-            ${{ github.workspace }}/.acceptance/deploy.log
+            ${{ env.WORK_DIR }}/artifacts/acceptance.json
+            ${{ env.WORK_DIR }}/artifacts/edge-readiness.json
+            ${{ env.WORK_DIR }}/artifacts/screenshot.png
+            ${{ env.WORK_DIR }}/artifacts/page.html
+            ${{ env.WORK_DIR }}/artifacts/cleanup.json
+            ${{ env.WORK_DIR }}/deploy.log
           if-no-files-found: warn
           retention-days: 30

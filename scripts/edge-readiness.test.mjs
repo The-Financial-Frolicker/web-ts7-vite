@@ -467,7 +467,13 @@ describe("concurrent acceptance-run isolation", () => {
     return value
       .replaceAll("${{ github.run_id }}", run.runId)
       .replaceAll("${{ github.run_attempt }}", run.runAttempt)
-      .replaceAll("${{ github.workspace }}", run.workspace);
+      .replaceAll("${{ github.workspace }}", run.workspace)
+      .replaceAll("${{ runner.temp }}", run.runnerTemp);
+  }
+
+  /** True when `candidate` is `parent` or lies inside it. */
+  function isWithin(candidate, parent) {
+    return candidate === parent || candidate.startsWith(`${parent}/`);
   }
 
   function identity(run) {
@@ -479,9 +485,25 @@ describe("concurrent acceptance-run isolation", () => {
   }
 
   const workspace = "/home/runner/work/web-ts7-vite/web-ts7-vite";
-  const firstRun = { runId: "42109653598", runAttempt: "1", workspace };
-  const secondRun = { runId: "42109653599", runAttempt: "1", workspace };
-  const reRun = { runId: "42109653598", runAttempt: "2", workspace };
+  const runnerTemp = "/home/runner/work/_temp";
+  const firstRun = {
+    runId: "42109653598",
+    runAttempt: "1",
+    workspace,
+    runnerTemp,
+  };
+  const secondRun = {
+    runId: "42109653599",
+    runAttempt: "1",
+    workspace,
+    runnerTemp,
+  };
+  const reRun = {
+    runId: "42109653598",
+    runAttempt: "2",
+    workspace,
+    runnerTemp,
+  };
 
   it("gives each overlapping run its own Worker and artefact", () => {
     const first = identity(firstRun);
@@ -503,13 +525,29 @@ describe("concurrent acceptance-run isolation", () => {
     assert.ok(first.artifact !== attemptTwo.artifact);
   });
 
-  it("scopes each run's working tree to its own runner workspace", () => {
-    assert.match(workDirTemplate, /\$\{\{ github\.workspace \}\}/);
-    assert.equal(identity(firstRun).workDir, `${workspace}/.acceptance`);
-    assert.ok(
-      identity(firstRun).workDir.startsWith(`${workspace}/`),
-      "the working tree is inside the run's own checkout, never a shared path",
+  it("keeps each run's working tree outside the checkout it is copied from", () => {
+    // The prepare step archives the checkout *into* this directory. A
+    // destination inside its own source makes the producing tar read a
+    // directory the extracting tar is still filling, which fails intermittently
+    // with `tar: ./.acceptance: file changed as we read it`. The runner's
+    // temporary directory is disjoint from the workspace by construction.
+    assert.match(workDirTemplate, /\$\{\{ runner\.temp \}\}/);
+    assert.doesNotMatch(
+      workDirTemplate,
+      /github\.workspace/,
+      "the working tree must not be placed inside the archived checkout",
     );
+
+    const working = identity(firstRun).workDir;
+    assert.equal(working, "/home/runner/work/_temp/acceptance-42109653598-1");
+    assert.ok(
+      !isWithin(working, workspace),
+      `the working tree must stay outside the archive source: ${working}`,
+    );
+
+    // Still run-scoped: overlapping runs and a re-run never share a tree.
+    assert.ok(identity(firstRun).workDir !== identity(secondRun).workDir);
+    assert.ok(identity(firstRun).workDir !== identity(reRun).workDir);
 
     // The acceptance step must run relative to that tree, or the deployment and
     // the evidence would be written outside the run that produced them.
@@ -521,6 +559,119 @@ describe("concurrent acceptance-run isolation", () => {
     assert.ok(acceptanceStep.length > 0, "the acceptance step is missing");
     assert.match(acceptanceStep, /cd "\$WORK_DIR"/);
     assert.match(acceptanceStep, /bash scripts\/edge-accept\.sh/);
+    // The deployment log is derived from that declaration, not restated.
+    assert.match(
+      acceptanceStep,
+      /export DEPLOY_LOG="\$WORK_DIR\/deploy\.log"/,
+    );
+  });
+
+  it("archives the checkout into a destination it cannot contain", () => {
+    const prepareIndex = workflow.indexOf(
+      "- name: Prepare a disposable deployment tree",
+    );
+    const deployIndex = workflow.indexOf(
+      "- name: Build and deploy the disposable Worker",
+    );
+    assert.ok(prepareIndex > 0, "the prepare step is missing");
+    assert.ok(
+      deployIndex > prepareIndex,
+      "the prepare step must precede deploy",
+    );
+
+    const prepare = workflow.slice(prepareIndex, deployIndex);
+    // Source and destination are named explicitly, and they are different paths.
+    assert.match(prepare, /tar -C "\$GITHUB_WORKSPACE"/);
+    assert.match(prepare, /tar -C "\$WORK_DIR" -xf -/);
+
+    const source = workspace;
+    const destination = identity(firstRun).workDir;
+    assert.ok(
+      !isWithin(destination, source),
+      `the archive destination must not sit inside its source: ${destination}`,
+    );
+    assert.ok(
+      !isWithin(source, destination),
+      `the archive source must not sit inside its destination: ${source}`,
+    );
+  });
+
+  it("derives every acceptance path from the single WORK_DIR declaration", () => {
+    assert.doesNotMatch(
+      workflow,
+      /github\.workspace \}\}\/\.acceptance/,
+      "no step may restate the old in-checkout acceptance path",
+    );
+
+    const upload = workflow.slice(
+      workflow.indexOf("- name: Keep the acceptance evidence"),
+    );
+    assert.doesNotMatch(upload, /github\.workspace/);
+    assert.match(upload, /path: \|\n\s+\$\{\{ env\.WORK_DIR \}\}\/artifacts\//);
+    for (const name of ["acceptance.json", "cleanup.json", "page.html"]) {
+      assert.ok(
+        upload.includes(`\${{ env.WORK_DIR }}/artifacts/${name}`),
+        `the uploaded evidence must come from WORK_DIR: ${name}`,
+      );
+    }
+    assert.ok(upload.includes("${{ env.WORK_DIR }}/deploy.log"));
+  });
+
+  it("deploys the generated configuration instead of a second name argument", () => {
+    const deployIndex = workflow.indexOf(
+      "- name: Build and deploy the disposable Worker",
+    );
+    const acceptanceIndex = workflow.indexOf(
+      "- name: Edge acceptance (real browser, real deployment)",
+    );
+    assert.ok(deployIndex > 0, "the deploy step is missing");
+    assert.ok(
+      acceptanceIndex > deployIndex,
+      "the acceptance step must follow the deploy step",
+    );
+
+    // Comments explain the contract; only commands are inspected.
+    const step = workflow
+      .slice(deployIndex, acceptanceIndex)
+      .split("\n")
+      .filter((line) => !line.trimStart().startsWith("#"))
+      .join("\n")
+      .replace(/\\\s*\n\s*/g, " ")
+      .replace(/[ \t]+/g, " ");
+
+    assert.match(
+      step,
+      /deno task deploy/,
+      "the deploy step must run the Deno-owned deployment task",
+    );
+
+    // `buildWranglerDeployArgs` replaces its default `deploy --config …` with
+    // whatever list it receives, so an argument here would remove the generated
+    // configuration from the invocation instead of adding to it, and `--name`
+    // would duplicate the identity the initialised tree already carries.
+    assert.doesNotMatch(
+      step,
+      /deno task deploy[^|]*--/,
+      `no Wrangler argument may follow the deployment task:\n${step}`,
+    );
+    assert.doesNotMatch(
+      step,
+      /--name/,
+      "the Worker name must come from the generated configuration",
+    );
+
+    // That one identity is still established by the initialiser and still
+    // reaches the page, so the browser verifier keeps binding to this run.
+    const prepare = workflow.slice(
+      workflow.indexOf("- name: Prepare a disposable deployment tree"),
+      deployIndex,
+    );
+    assert.match(
+      prepare,
+      /deno task init:project "\$WORKER_NAME"/,
+      "the generated configuration must carry this run's Worker name",
+    );
+    assert.match(step, /export BUILD_DEPLOYMENT="\$WORKER_NAME"/);
   });
 
   it("scopes cleanup to the Worker this run created", () => {

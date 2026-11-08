@@ -8,7 +8,7 @@
  */
 
 import assert from "./lib/assert.mjs";
-import { readFileSync } from "./lib/fs.mjs";
+import { existsSync, readdirSync, readFileSync } from "./lib/fs.mjs";
 import path from "./lib/path.mjs";
 import { describe, it } from "./lib/test.mjs";
 
@@ -249,22 +249,53 @@ describe("product job sequencing", () => {
   });
 
   describe("workflow YAML strictness", () => {
+    // Role-aware by construction. A generated product ships exactly one
+    // workflow, `ci.yml`; the generator additionally ships the two workflows
+    // only the generator role can run. A test that demanded all three
+    // everywhere would either fail on a correctly generated product or force
+    // generator-only files into it, so the classifier's own marker decides
+    // which set this checkout owes, and both roles keep full coverage of theirs.
+    const workflowsDirectory = path.join(Deno.cwd(), ".github", "workflows");
+    const generatorOnlyWorkflows = [
+      "authoritative-toolchain.yml",
+      "edge-acceptance.yml",
+    ];
+    const isGenerator = existsSync(path.join(Deno.cwd(), MARKER_FILE));
+
     it("accepts every shipped workflow with a duplicate-key-rejecting reader", () => {
-      for (
-        const name of [
-          "ci.yml",
-          "authoritative-toolchain.yml",
-          "edge-acceptance.yml",
-        ]
-      ) {
+      const shipped = readdirSync(workflowsDirectory)
+        .filter((name) => name.endsWith(".yml") || name.endsWith(".yaml"))
+        .sort();
+
+      // `ci.yml` is the one workflow both roles ship, so its absence is a
+      // defect in either role rather than a boundary difference.
+      assert.ok(shipped.includes("ci.yml"), "ci.yml must be shipped");
+
+      for (const name of shipped) {
         const source = readFileSync(
-          path.join(Deno.cwd(), ".github", "workflows", name),
+          path.join(workflowsDirectory, name),
           "utf8",
         );
         assert.equal(
           findDuplicateMappingKey(source, name),
           null,
           `${name} must contain no duplicate mapping keys`,
+        );
+      }
+    });
+
+    it("holds each role to its own workflow set", () => {
+      // Symmetric on purpose: the generator must ship both generator-only
+      // workflows, and a product must not acquire them merely to satisfy a
+      // generator-level test. A product may still add workflows of its own; the
+      // strictness test above parses whatever it finds.
+      for (const name of generatorOnlyWorkflows) {
+        assert.equal(
+          existsSync(path.join(workflowsDirectory, name)),
+          isGenerator,
+          `${name} must ${
+            isGenerator ? "" : "not "
+          }be present in this repository role`,
         );
       }
     });
