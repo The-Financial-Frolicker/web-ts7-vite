@@ -123,6 +123,151 @@ function jobBody(name) {
   return next === -1 ? rest : rest.slice(0, next + 1);
 }
 
+/** The lines belonging to one job, bounded by the next top-level job key. */
+function jobLines(name, source = workflow) {
+  const lines = source.split("\n");
+  const start = lines.findIndex((line) => line === `  ${name}:`);
+  assert.ok(start !== -1, `job ${name} is missing`);
+
+  let end = lines.length;
+  for (let index = start + 1; index < lines.length; index += 1) {
+    if (/^ {2}[a-z0-9_-]+:$/.test(lines[index])) {
+      end = index;
+      break;
+    }
+  }
+
+  return { lines, start, end };
+}
+
+/**
+ * Declarations made by the job itself (indent 4), never by one of its steps.
+ *
+ * GitHub checks expression contexts per location: `hashFiles()` is legal in a
+ * step `if:` but rejected in a job `if:`, and the `runner` context is legal in a
+ * step `env:` but rejected in a job `env:`. Step declarations sit at indent 8 or
+ * deeper, so that indentation boundary is what separates the two.
+ *
+ * Limitation: an indentation reader for the block style this repository uses. It
+ * is not a YAML parser and not a general GitHub Actions schema validator.
+ */
+function jobDeclarations(name, source = workflow) {
+  const { lines, start, end } = jobLines(name, source);
+  const declarations = [];
+
+  for (let index = start + 1; index < end; index += 1) {
+    const line = lines[index];
+    const indent = line.length - line.trimStart().length;
+    if (indent !== 4) continue;
+
+    const text = line.trim();
+    const colon = text.indexOf(":");
+    if (colon <= 0) continue;
+    const key = text.slice(0, colon);
+    if (!/^[a-z0-9_-]+$/.test(key)) continue;
+
+    const block = [];
+    for (let next = index + 1; next < end; next += 1) {
+      const candidate = lines[next];
+      const candidateIndent = candidate.length - candidate.trimStart().length;
+      if (candidate.trim() !== "" && candidateIndent <= 4) break;
+      block.push(candidate);
+    }
+
+    declarations.push({
+      key,
+      value: text.slice(colon + 1).trim(),
+      block,
+      line: index + 1,
+    });
+  }
+
+  return declarations;
+}
+
+/** Job names declared under `jobs:`, in file order, for any workflow text. */
+export function workflowJobNames(source) {
+  const lines = source.split("\n");
+  const start = lines.findIndex((line) => line === "jobs:");
+  if (start === -1) return [];
+
+  const names = [];
+  for (let index = start + 1; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (line !== "" && !line.startsWith(" ")) break;
+
+    const match = /^ {2}([a-z0-9_-]+):$/.exec(line);
+    if (match !== null) names.push(match[1]);
+  }
+  return names;
+}
+
+/**
+ * Contexts GitHub rejects in a job-level declaration, and where each is judged.
+ *
+ * Only the two locations this repository already relies on are modelled: the
+ * point is context availability, not a reimplementation of the Actions schema.
+ * `runner` is step-scoped, so a job-level `env` may not reference it; `hashFiles()`
+ * needs a checkout context the job-level `if:` is evaluated without.
+ */
+export const JOB_LEVEL_CONTEXT_RULES = Object.freeze([
+  Object.freeze({
+    key: "env",
+    context: "runner",
+    pattern: /\$\{\{[^}]*\brunner\b/,
+  }),
+  Object.freeze({
+    key: "if",
+    context: "hashFiles()",
+    pattern: /hashFiles\(/,
+  }),
+]);
+
+/**
+ * Every prohibited job-level context reference in one workflow text.
+ *
+ * Comments are part of the declaration block and may legitimately mention a
+ * context, so only an actual `${{ … }}` expression (or the `hashFiles()` call the
+ * `if:` rule keys on) counts as a violation.
+ */
+export function jobLevelContextViolations(source, label = "workflow") {
+  const violations = [];
+
+  for (const job of workflowJobNames(source)) {
+    for (const entry of jobDeclarations(job, source)) {
+      const text = [entry.value, ...entry.block].join("\n");
+
+      for (const rule of JOB_LEVEL_CONTEXT_RULES) {
+        if (entry.key !== rule.key) continue;
+        if (!rule.pattern.test(text)) continue;
+        violations.push({
+          label,
+          job,
+          key: entry.key,
+          context: rule.context,
+          line: entry.line,
+        });
+      }
+    }
+  }
+
+  return violations;
+}
+
+/**
+ * Workflow files maintained in this checkout.
+ *
+ * Discovery is directory-based on purpose: the product manifest publishes paths
+ * that live under `.github/workflows`, so every file that can be published is
+ * discovered here without a second list to keep in step.
+ */
+export function workflowFiles(root = Deno.cwd()) {
+  const directory = path.join(root, ".github", "workflows");
+  return readdirSync(directory)
+    .filter((name) => name.endsWith(".yml") || name.endsWith(".yaml"))
+    .sort();
+}
+
 describe("repository role discrimination", () => {
   it("gates every job on the classifier's role output", () => {
     for (const name of ["validate", "build", "product"]) {
@@ -358,70 +503,6 @@ describe("product job sequencing", () => {
     });
   });
 
-  /** The lines belonging to one job, bounded by the next top-level job key. */
-  function jobLines(name, source = workflow) {
-    const lines = source.split("\n");
-    const start = lines.findIndex((line) => line === `  ${name}:`);
-    assert.ok(start !== -1, `job ${name} is missing`);
-
-    let end = lines.length;
-    for (let index = start + 1; index < lines.length; index += 1) {
-      if (/^ {2}[a-z0-9_-]+:$/.test(lines[index])) {
-        end = index;
-        break;
-      }
-    }
-
-    return { lines, start, end };
-  }
-
-  /**
-   * Declarations made by the job itself (indent 4), never by one of its steps.
-   *
-   * GitHub checks expression contexts per location: `hashFiles()` is legal in a
-   * step `if:` but rejected in a job `if:`, and the `runner` context is legal in a
-   * step `env:` but rejected in a job `env:`. Step declarations sit at indent 8 or
-   * deeper, so that indentation boundary is what separates the two.
-   *
-   * Limitation: an indentation reader for the block style this repository uses. It
-   * is not a YAML parser and not a general GitHub Actions schema validator.
-   */
-  function jobDeclarations(name, source = workflow) {
-    const { lines, start, end } = jobLines(name, source);
-    const declarations = [];
-
-    for (let index = start + 1; index < end; index += 1) {
-      const line = lines[index];
-      const indent = line.length - line.trimStart().length;
-      if (indent !== 4) continue;
-
-      const text = line.trim();
-      const colon = text.indexOf(":");
-      if (colon <= 0) continue;
-      const key = text.slice(0, colon);
-      if (!/^[a-z0-9_-]+$/.test(key)) continue;
-
-      const block = [];
-      for (let next = index + 1; next < end; next += 1) {
-        const candidate = lines[next];
-        const candidateIndent = candidate.length - candidate.trimStart().length;
-        if (candidate.trim() !== "" && candidateIndent <= 4) break;
-        block.push(candidate);
-      }
-
-      declarations.push({
-        key,
-        value: text.slice(colon + 1).trim(),
-        block,
-        line: index + 1,
-      });
-    }
-
-    return declarations;
-  }
-
-  const JOB_NAMES = ["classify", "validate", "build", "product"];
-
   function jobNeeds(name) {
     const entry = jobDeclarations(name).find((item) => item.key === "needs");
     if (entry === undefined) return [];
@@ -483,28 +564,17 @@ describe("product job sequencing", () => {
 
   describe("job-level expression contexts", () => {
     it("never uses hashFiles() in a job-level if", () => {
-      for (const name of JOB_NAMES) {
-        for (const entry of jobDeclarations(name)) {
-          if (entry.key !== "if") continue;
-          assert.ok(
-            !entry.value.includes("hashFiles("),
-            `job ${name} uses hashFiles() in a job-level if (line ${entry.line})`,
-          );
-        }
-      }
+      const violations = jobLevelContextViolations(workflow, "ci.yml").filter(
+        (violation) => violation.key === "if",
+      );
+      assert.equal(violations.length, 0, JSON.stringify(violations));
     });
 
     it("never uses the runner context in a job-level env", () => {
-      for (const name of JOB_NAMES) {
-        for (const entry of jobDeclarations(name)) {
-          if (entry.key !== "env") continue;
-          const text = [entry.value, ...entry.block].join("\n");
-          assert.ok(
-            !/\brunner\b/.test(text),
-            `job ${name} uses the runner context in a job-level env (line ${entry.line})`,
-          );
-        }
-      }
+      const violations = jobLevelContextViolations(workflow, "ci.yml").filter(
+        (violation) => violation.key === "env",
+      );
+      assert.equal(violations.length, 0, JSON.stringify(violations));
     });
 
     it("still permits those contexts where GitHub allows them", () => {
@@ -666,5 +736,144 @@ describe("product job sequencing", () => {
         "the path-to-mode binding must be reported",
       );
     });
+  });
+});
+
+describe("workflow context scope (every published workflow)", () => {
+  const workflowsDirectory = path.join(Deno.cwd(), ".github", "workflows");
+  const files = workflowFiles();
+
+  function sourceOf(name) {
+    return readFileSync(path.join(workflowsDirectory, name), "utf8");
+  }
+
+  it("discovers every workflow file maintained in this checkout", () => {
+    const onDisk = readdirSync(workflowsDirectory)
+      .filter((name) => name.endsWith(".yml") || name.endsWith(".yaml"))
+      .sort();
+
+    // Discovery is the directory, so a newly added workflow is covered without
+    // anyone remembering to add its name here.
+    assert.deepEqual(files, onDisk);
+    assert.ok(files.includes("ci.yml"), "ci.yml is shipped in both roles");
+  });
+
+  it("covers every workflow file the product manifest publishes", async () => {
+    const manifestPath = path.join(
+      Deno.cwd(),
+      "scripts",
+      "product-manifest.mjs",
+    );
+
+    if (!existsSync(manifestPath)) {
+      // A generated product publishes nothing from its own checkout, so the
+      // discovered set is the whole obligation there.
+      assert.deepEqual(files, ["ci.yml"]);
+      return;
+    }
+
+    const manifest = await import(
+      new URL("./product-manifest.mjs", import.meta.url).href
+    );
+    const published = manifest.productPaths()
+      .filter((entry) => entry.startsWith(".github/workflows/"))
+      .map((entry) => entry.slice(".github/workflows/".length))
+      .sort();
+
+    assert.ok(published.length > 0, "the manifest must publish a workflow");
+    for (const name of published) {
+      assert.ok(
+        files.includes(name),
+        `${name} is published but was not discovered`,
+      );
+    }
+  });
+
+  it("applies the context-scope rules to every discovered workflow", () => {
+    for (const name of files) {
+      assert.deepEqual(
+        jobLevelContextViolations(sourceOf(name), name),
+        [],
+        `${name} references a context where GitHub does not provide it`,
+      );
+    }
+  });
+
+  it("permits those contexts at step scope", () => {
+    const fixture = [
+      "jobs:",
+      "  build:",
+      "    steps:",
+      "      - name: step",
+      "        if: hashFiles('toolchain/deno.lock') != ''",
+      "        env:",
+      "          TOOLCHAIN_ROOT: ${{ runner.temp }}/toolchain",
+      "        run: echo ok",
+      "",
+    ].join("\n");
+
+    assert.deepEqual(jobLevelContextViolations(fixture, "fixture"), []);
+  });
+
+  it("rejects the runner context in a job-level env", () => {
+    // The P9 defect, reduced: this is what made the published workflow invalid.
+    const fixture = [
+      "jobs:",
+      "  acceptance:",
+      "    env:",
+      "      WORK_DIR: ${{ runner.temp }}/acceptance-1-1",
+      "    steps:",
+      "      - name: step",
+      "        run: echo ok",
+      "",
+    ].join("\n");
+
+    assert.deepEqual(jobLevelContextViolations(fixture, "fixture"), [
+      {
+        label: "fixture",
+        job: "acceptance",
+        key: "env",
+        context: "runner",
+        line: 3,
+      },
+    ]);
+  });
+
+  it("rejects hashFiles() in a job-level if", () => {
+    const fixture = [
+      "jobs:",
+      "  build:",
+      "    if: hashFiles('toolchain/deno.lock') != ''",
+      "    steps:",
+      "      - name: step",
+      "        run: echo ok",
+      "",
+    ].join("\n");
+
+    assert.deepEqual(jobLevelContextViolations(fixture, "fixture"), [
+      {
+        label: "fixture",
+        job: "build",
+        key: "if",
+        context: "hashFiles()",
+        line: 3,
+      },
+    ]);
+  });
+
+  it("does not read a prose mention of a context as an expression", () => {
+    const fixture = [
+      "jobs:",
+      "  build:",
+      "    env:",
+      "      # The runner's temporary directory is not available here.",
+      "      TOOLCHAIN_ROOT: /tmp/toolchain",
+      "    steps:",
+      "      - name: step",
+      "        run: echo ok",
+      "",
+    ].join("\n");
+
+    assert.deepEqual(jobLevelContextViolations(fixture, "fixture"), []);
   });
 });

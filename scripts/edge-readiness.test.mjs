@@ -450,9 +450,12 @@ describe("concurrent acceptance-run isolation", () => {
     /^[ \t]*WORKER_NAME:[ \t]*(.+?)[ \t]*$/m,
     "WORKER_NAME",
   );
-  const workDirTemplate = declaration(
-    /^[ \t]*WORK_DIR:[ \t]*(.+?)[ \t]*$/m,
-    "WORK_DIR",
+  // The path is derived in the preparation step's shell, not declared in a
+  // job-level `env`: the `runner` context is not available there, and a job-level
+  // `${{ runner.temp }}` made the published workflow invalid.
+  const workDirAssignment = declaration(
+    /^[ \t]*WORK_DIR="(.+?)"[ \t]*$/m,
+    "the WORK_DIR assignment",
   );
   const artifactTemplate = declaration(
     /^[ \t]*name:[ \t]*(edge-acceptance-.+?)[ \t]*$/m,
@@ -468,7 +471,9 @@ describe("concurrent acceptance-run isolation", () => {
       .replaceAll("${{ github.run_id }}", run.runId)
       .replaceAll("${{ github.run_attempt }}", run.runAttempt)
       .replaceAll("${{ github.workspace }}", run.workspace)
-      .replaceAll("${{ runner.temp }}", run.runnerTemp);
+      .replaceAll("$RUNNER_TEMP", run.runnerTemp)
+      .replaceAll("${GITHUB_RUN_ID}", run.runId)
+      .replaceAll("${GITHUB_RUN_ATTEMPT}", run.runAttempt);
   }
 
   /** True when `candidate` is `parent` or lies inside it. */
@@ -479,7 +484,7 @@ describe("concurrent acceptance-run isolation", () => {
   function identity(run) {
     return {
       workerName: render(workerTemplate, run),
-      workDir: render(workDirTemplate, run),
+      workDir: render(workDirAssignment, run),
       artifact: render(artifactTemplate, run),
     };
   }
@@ -525,15 +530,48 @@ describe("concurrent acceptance-run isolation", () => {
     assert.ok(first.artifact !== attemptTwo.artifact);
   });
 
+  it("derives WORK_DIR at step scope and publishes it to later steps", () => {
+    const prepareIndex = workflow.indexOf(
+      "- name: Prepare a disposable deployment tree",
+    );
+    const deployIndex = workflow.indexOf(
+      "- name: Build and deploy the disposable Worker",
+    );
+    assert.ok(prepareIndex > 0, "the prepare step is missing");
+    assert.ok(
+      deployIndex > prepareIndex,
+      "the prepare step must precede deploy",
+    );
+
+    const prepare = workflow.slice(prepareIndex, deployIndex);
+
+    // Derived once, from the step-scoped `$RUNNER_TEMP`, carrying the run and
+    // attempt identity.
+    assert.match(
+      prepare,
+      /WORK_DIR="\$RUNNER_TEMP\/acceptance-\$\{GITHUB_RUN_ID\}-\$\{GITHUB_RUN_ATTEMPT\}"/,
+    );
+    // Published through `$GITHUB_ENV`, which is how every later step receives it.
+    assert.match(prepare, /echo "WORK_DIR=\$WORK_DIR" >> "\$GITHUB_ENV"/);
+
+    // One assignment only, and no YAML-level declaration to disagree with it.
+    assert.equal(workflow.match(/WORK_DIR="/g)?.length ?? 0, 1);
+    assert.doesNotMatch(
+      workflow,
+      /^[ \t]+WORK_DIR:[ \t]/m,
+      "WORK_DIR must not be declared in a workflow env block",
+    );
+  });
+
   it("keeps each run's working tree outside the checkout it is copied from", () => {
     // The prepare step archives the checkout *into* this directory. A
     // destination inside its own source makes the producing tar read a
     // directory the extracting tar is still filling, which fails intermittently
     // with `tar: ./.acceptance: file changed as we read it`. The runner's
     // temporary directory is disjoint from the workspace by construction.
-    assert.match(workDirTemplate, /\$\{\{ runner\.temp \}\}/);
+    assert.match(workDirAssignment, /^\$RUNNER_TEMP\/acceptance-/);
     assert.doesNotMatch(
-      workDirTemplate,
+      workDirAssignment,
       /github\.workspace/,
       "the working tree must not be placed inside the archived checkout",
     );

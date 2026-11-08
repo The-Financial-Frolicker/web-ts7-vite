@@ -18,10 +18,10 @@ name: Edge acceptance
 #
 #   * the Worker name is derived from `github.run_id` and `github.run_attempt`,
 #     so no two runs (or re-runs) can address the same deployment;
-#   * each run works in its own `${{ runner.temp }}/acceptance-<run>-<attempt>`
-#     tree, outside the checkout it is copied from, so the build, the evidence
-#     and the deployment metadata never cross runs — and the archive can never
-#     contain its own destination;
+#   * each run works in its own `$RUNNER_TEMP/acceptance-<run>-<attempt>` tree,
+#     outside the checkout it is copied from, so the build, the evidence and the
+#     deployment metadata never cross runs — and the archive can never contain
+#     its own destination;
 #   * the artefact name is equally run-scoped, so evidence cannot be overwritten;
 #   * cleanup deletes `"$WORKER_NAME"` and nothing else.
 #
@@ -66,13 +66,9 @@ jobs:
       WORKER_NAME: edge-${{ github.run_id }}-${{ github.run_attempt }}
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
-      # The disposable tree lives in the runner's temporary directory, never
-      # inside `${{ github.workspace }}`: the prepare step archives the checkout
-      # into this directory, and a destination inside its own source makes the
-      # producing tar read a directory the extracting tar is still filling
-      # (`tar: ./.acceptance: file changed as we read it`). The name stays
-      # run-scoped, so overlapping runs and re-runs cannot share a tree.
-      WORK_DIR: ${{ runner.temp }}/acceptance-${{ github.run_id }}-${{ github.run_attempt }}
+      # `WORK_DIR` is deliberately absent: the `runner` context is not available
+      # in a job-level `env`, so the acceptance tree path is derived once in the
+      # preparation step and published to the later steps through `$GITHUB_ENV`.
 
     steps:
       - name: Check out repository
@@ -118,8 +114,19 @@ jobs:
         # The template's placeholder is not a valid Worker name, so the same
         # throwaway-copy idiom as scripts/ci.sh applies: initialise a unique
         # identity and never touch the checked-out tree.
+        #
+        # The tree lives in the runner's temporary directory, never inside
+        # `$GITHUB_WORKSPACE`: this step archives the checkout into it, and a
+        # destination inside its own source makes the producing tar read a
+        # directory the extracting tar is still filling
+        # (`tar: ./.acceptance: file changed as we read it`). The path is derived
+        # here, once, from the step-scoped `$RUNNER_TEMP` and published to the
+        # later steps through `$GITHUB_ENV`, because the `runner` context is not
+        # available in a job-level `env`.
         run: |
           set -euo pipefail
+          WORK_DIR="$RUNNER_TEMP/acceptance-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "WORK_DIR=$WORK_DIR" >> "$GITHUB_ENV"
           mkdir -p "$WORK_DIR"
           tar -C "$GITHUB_WORKSPACE" \
             --exclude=./.git \
