@@ -164,7 +164,7 @@ describe("provenance reader (product)", () => {
         product(),
         "--generator",
         generatorCheckout(MATERIALISATION, 3328, IMPLEMENTATION),
-        "--toolchain-root",
+        "--generator-root",
         installation(IDENTITY),
       ], io);
       assert.equal(code, 0, io.err.join("; "));
@@ -181,7 +181,7 @@ describe("provenance reader (product)", () => {
         product(),
         "--generator",
         generatorCheckout(MATERIALISATION, 3328, IMPLEMENTATION),
-        "--toolchain-root",
+        "--generator-root",
         installation({ ...IDENTITY, implementation: "d".repeat(64) }),
       ], io);
       assert.equal(code, 1);
@@ -199,7 +199,7 @@ describe("provenance reader (product)", () => {
         product(),
         "--generator",
         generatorCheckout("e".repeat(64)),
-        "--toolchain-root",
+        "--generator-root",
         installation(IDENTITY),
       ], io);
       assert.equal(code, 1);
@@ -215,7 +215,7 @@ describe("provenance reader (product)", () => {
         product(),
         "--generator",
         generatorCheckout(MATERIALISATION),
-        "--toolchain-root",
+        "--generator-root",
         dir,
       ], io);
       assert.equal(code, 1);
@@ -230,7 +230,7 @@ describe("provenance reader (product)", () => {
         product(),
         "--generator",
         generatorCheckout(MATERIALISATION),
-        "--toolchain-root",
+        "--generator-root",
         installation({ ...IDENTITY, spec: "", resolution: undefined }),
       ], io);
       assert.equal(code, 1);
@@ -250,7 +250,7 @@ describe("provenance reader (product)", () => {
       assert.equal(code, 1);
       assert.match(
         io.err.join(" "),
-        /requires --generator DIR and --toolchain-root/,
+        /requires --generator DIR and --generator-root/,
       );
     });
 

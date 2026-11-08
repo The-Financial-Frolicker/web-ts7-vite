@@ -20,22 +20,26 @@ import {
 
 const projectRoot = Deno.cwd();
 // The toolchain is installed outside the application tree; resolution uses it.
-const toolchainRoot = Deno.env.get("TOOLCHAIN_ROOT") ??
-  `${Deno.env.get("HOME")}/.local/share/web-ts7-vite/toolchain`;
+// The generator owns its Deno dependency tree inside its own subroot.
+const generatorInstallationRoot = path.join(
+  projectRoot,
+  "generator",
+  "dependencies",
+);
 const buildScript = path.join(projectRoot, "scripts", "build.sh");
 const ciScript = path.join(projectRoot, "scripts", "ci.sh");
 const dryRunScript = path.join(projectRoot, "scripts", "deploy-dry-run.sh");
 
 describe("Deno-owned Vite invocation", () => {
   it("resolves the installed Vite CLI entry", () => {
-    const viteBin = resolveViteBin(toolchainRoot);
+    const viteBin = resolveViteBin(generatorInstallationRoot);
 
     assert.ok(viteBin.endsWith("/vite/bin/vite.js"), viteBin);
     assert.ok(Deno.statSync(viteBin).isFile, `${viteBin} must be a file`);
   });
 
   it("resolves both required native bindings", () => {
-    const invocation = resolveViteInvocation(toolchainRoot);
+    const invocation = resolveViteInvocation(generatorInstallationRoot);
 
     assert.ok(
       invocation.rolldown.endsWith(".node") &&
@@ -58,7 +62,7 @@ describe("Deno-owned Vite invocation", () => {
   });
 
   it("keeps the restricted local profile as the default", () => {
-    const invocation = resolveViteInvocation(toolchainRoot);
+    const invocation = resolveViteInvocation(generatorInstallationRoot);
     const args = buildViteArgs(invocation);
 
     for (
@@ -105,7 +109,7 @@ describe("Deno-owned Vite invocation", () => {
   });
 
   it("gives the ci-runner profile --allow-all and keeps the pinned flags", () => {
-    const invocation = resolveViteInvocation(toolchainRoot);
+    const invocation = resolveViteInvocation(generatorInstallationRoot);
     const args = buildViteArgs(
       invocation,
       ["--mode", "production"],
@@ -136,7 +140,7 @@ describe("Deno-owned Vite invocation", () => {
   });
 
   it("fails clearly for an unknown permission profile", () => {
-    const invocation = resolveViteInvocation(toolchainRoot);
+    const invocation = resolveViteInvocation(generatorInstallationRoot);
 
     assert.throws(
       () => buildViteArgs(invocation, [], "root"),
@@ -184,7 +188,12 @@ describe("Deno-owned Vite invocation", () => {
       block,
       /--allow-net|--allow-sys|--allow-ffi|--allow-write/,
     );
-    assert.match(block, /--allow-read="\$PROJECT_ROOT,\$TOOLCHAIN_ROOT"/);
+    assert.match(block, /--allow-read="\$GENERATOR_READ_PATHS"/);
+    // The grant is the project root plus the generator-owned installation.
+    assert.match(
+      text,
+      /GENERATOR_READ_PATHS="\$PROJECT_ROOT,\$GENERATOR_ROOT"/,
+    );
     assert.equal(
       block.match(/--allow-run/g)?.length,
       1,

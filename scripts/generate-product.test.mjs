@@ -101,6 +101,9 @@ function runProductTask(product, task) {
     env: {
       ...Deno.env.toObject(),
       PATH: `${denoDirectory}:${Deno.env.get("PATH") ?? ""}`,
+      // The product is a temporary test application: it reuses the generator's
+      // dependency installation through the owning project root.
+      GENERATOR_PROJECT_ROOT: generatorRoot,
     },
   });
 
@@ -114,12 +117,19 @@ function runProductTask(product, task) {
  */
 function shareDependencies(product) {
   symlinkSync(
-    path.join(generatorRoot, "node_modules"),
+    path.join(generatorDependencies, "node_modules"),
     path.join(product, "node_modules"),
   );
 }
 
-const hasDependencies = existsSync(path.join(generatorRoot, "node_modules"));
+const generatorDependencies = path.join(
+  generatorRoot,
+  "generator",
+  "dependencies",
+);
+const hasDependencies = existsSync(
+  path.join(generatorDependencies, "node_modules"),
+);
 /**
  * A stand-in `deno` that records every task it is asked to run.
  *
@@ -151,6 +161,9 @@ function runCiStage(root, stubDirectory, stage) {
     env: {
       ...Deno.env.toObject(),
       PATH: `${stubDirectory}:${Deno.env.get("PATH") ?? ""}`,
+      // A product run by CI is a temporary test application: it reuses the
+      // generator's dependency installation.
+      GENERATOR_PROJECT_ROOT: generatorRoot,
     },
   });
 

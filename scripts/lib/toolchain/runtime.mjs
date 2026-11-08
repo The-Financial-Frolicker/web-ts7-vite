@@ -12,6 +12,7 @@
 
 import { join } from "../path.mjs";
 import { readFileSync } from "../fs.mjs";
+import { absolutePath, isContained, requireContained } from "./containment.mjs";
 
 export class RuntimePolicyError extends Error {
   constructor(message) {
@@ -97,37 +98,150 @@ function realDirectory(path, label) {
 }
 
 /**
- * The configured installation path, without requiring it to exist.
+ * Product-owned installation roots.
  *
- * `TOOLCHAIN_ROOT` when set, otherwise `$XDG_DATA_HOME/web-ts7-vite/toolchain`
- * with the standard XDG default. Provisioning needs the path before the
- * directory exists; resolution needs it checked — both use this one rule.
+ * The generator owns exactly one subtree of its project root:
+ *
+ *   <generator project root>/generator/                  the permitted subtree
+ *   <generator project root>/generator/dependencies/     the Deno project tree
+ *   <generator project root>/generator/.staging-<pid>/   staging
+ *   <generator project root>/generator/.previous/        the replaced tree
+ *
+ * `GENERATOR_PROJECT_ROOT` names the project root that owns the installation: a
+ * temporary test-application copy sets it to the generator checkout so the copy
+ * uses the generator's one installation instead of materialising its own.
+ * `GENERATOR_ROOT` overrides the dependency tree and is subject to exactly the
+ * same containment check as the default, so it is not a route around ownership.
  */
-export function toolchainRootPath(env = Deno.env) {
-  const override = env.get("TOOLCHAIN_ROOT");
-  if (override !== undefined && override !== "") return override;
+export const GENERATOR_SUBROOT = "generator";
+export const GENERATOR_DEPENDENCIES = "dependencies";
+export const GENERATOR_STAGING_PREFIX = ".staging-";
+export const GENERATOR_PREVIOUS = ".previous";
+export const APPLICATION_SUBROOT = "application";
+export const GENERATOR_PROJECT_ROOT_VARIABLE = "GENERATOR_PROJECT_ROOT";
+export const GENERATOR_ROOT_VARIABLE = "GENERATOR_ROOT";
 
-  const xdg = env.get("XDG_DATA_HOME");
-  const home = env.get("HOME");
-  const base = xdg !== undefined && xdg !== ""
-    ? xdg
-    : home === undefined || home === ""
-    ? undefined
-    : join(home, ".local", "share");
+/** The real project root that owns the installation. */
+export function generatorProjectRoot(projectRoot = Deno.cwd(), env = Deno.env) {
+  const override = env.get(GENERATOR_PROJECT_ROOT_VARIABLE);
+  // Unset means "this project root"; set-but-empty is an invalid override and
+  // is rejected rather than silently replaced by the default.
+  const chosen = override === undefined
+    ? absolutePath(projectRoot, "the project root")
+    : absolutePath(override, GENERATOR_PROJECT_ROOT_VARIABLE);
 
-  if (base === undefined) {
+  return realDirectory(chosen, "generator project root");
+}
+
+/** The generator-owned subtree; nothing may be installed outside it. */
+export function generatorSubrootPath(projectRoot = Deno.cwd(), env = Deno.env) {
+  return join(generatorProjectRoot(projectRoot, env), GENERATOR_SUBROOT);
+}
+
+/**
+ * The application-owned subtree, named only so a generator installation that
+ * targets it can be refused with a legible message. The generator never owns or
+ * creates it; the symmetric rule belongs to the independent application.
+ */
+export function applicationSubrootPath(
+  projectRoot = Deno.cwd(),
+  env = Deno.env,
+) {
+  return join(generatorProjectRoot(projectRoot, env), APPLICATION_SUBROOT);
+}
+
+/** Containment check shared by every generator-owned installation path. */
+function ownedInstallationPath(
+  candidate,
+  projectRoot,
+  env,
+  candidateLabel,
+  strict,
+) {
+  const subroot = generatorSubrootPath(projectRoot, env);
+  const application = applicationSubrootPath(projectRoot, env);
+
+  if (isContained(candidate, application)) {
     fail(
-      "cannot determine the toolchain installation root; set TOOLCHAIN_ROOT " +
-        "or XDG_DATA_HOME",
+      `${candidateLabel} ${candidate} targets the application-owned root; the ` +
+        `generator may only install inside ${subroot}`,
     );
   }
 
-  return join(base, "web-ts7-vite", "toolchain");
+  return requireContained(candidate, subroot, {
+    candidateLabel,
+    permittedLabel: "the generator-owned subroot",
+    strict,
+    hint: `the generator installation must stay inside ${subroot}`,
+  });
 }
 
-/** The installed toolchain root, required to exist as a real directory. */
-export function toolchainRoot(env = Deno.env) {
-  return realDirectory(toolchainRootPath(env), "toolchain installation");
+/**
+ * The generator's Deno dependency tree.
+ *
+ * The default is a child of the generator-owned subroot; an override must be a
+ * strict child of the same subroot, so the tree can never be the subroot itself
+ * (staging and the replaced tree are its siblings) and never another product's.
+ */
+export function generatorInstallationRootPath(
+  projectRoot = Deno.cwd(),
+  env = Deno.env,
+) {
+  const subroot = generatorSubrootPath(projectRoot, env);
+  const override = env.get(GENERATOR_ROOT_VARIABLE);
+  const candidate = override === undefined
+    ? join(subroot, GENERATOR_DEPENDENCIES)
+    : absolutePath(override, GENERATOR_ROOT_VARIABLE);
+
+  return ownedInstallationPath(
+    candidate,
+    projectRoot,
+    env,
+    `the ${GENERATOR_ROOT_VARIABLE} installation root`,
+    true,
+  );
+}
+
+/** Staging directory: a sibling of the dependency tree, inside the subroot. */
+export function generatorStagingPath(
+  projectRoot = Deno.cwd(),
+  env = Deno.env,
+  pid = Deno.pid,
+) {
+  const subroot = generatorSubrootPath(projectRoot, env);
+  return ownedInstallationPath(
+    join(subroot, `${GENERATOR_STAGING_PREFIX}${pid}`),
+    projectRoot,
+    env,
+    "the staging directory",
+    true,
+  );
+}
+
+/** The replaced installation: a sibling of the dependency tree, in the subroot. */
+export function generatorPreviousPath(
+  projectRoot = Deno.cwd(),
+  env = Deno.env,
+) {
+  const subroot = generatorSubrootPath(projectRoot, env);
+  return ownedInstallationPath(
+    join(subroot, GENERATOR_PREVIOUS),
+    projectRoot,
+    env,
+    "the previous installation path",
+    true,
+  );
+}
+
+/** The installed dependency tree, required to exist as a real directory. */
+export function generatorInstallationRoot(
+  projectRoot = Deno.cwd(),
+  env = Deno.env,
+) {
+  return realDirectory(
+    generatorInstallationRootPath(projectRoot, env),
+    "generator installation",
+  );
 }
 
 /** The installation record, written last by provisioning. */
@@ -138,7 +252,7 @@ export function installedIdentity(root) {
     text = readFileSync(path, "utf8");
   } catch (error) {
     fail(
-      `${root} is not a complete toolchain installation (${error.message}). ` +
+      `${root} is not a complete generator installation (${error.message}). ` +
         `A refresh may have failed; re-run \`deno task toolchain:install\`.`,
     );
   }
@@ -152,25 +266,25 @@ export function installedIdentity(root) {
 
 /**
  * Everything a launcher needs before it does any work: the pinned Deno, the
- * canonical installation root, and an installation whose recorded identity
- * matches this runtime.
+ * canonical generator installation root, and an installation whose recorded
+ * identity matches this runtime.
  */
 export function runtimePolicy(
-  appRoot,
+  projectRoot = Deno.cwd(),
   running = Deno.version.deno,
   env = Deno.env,
 ) {
-  const deno = assertDenoVersion(appRoot, running);
-  const root = toolchainRoot(env);
+  const deno = assertDenoVersion(projectRoot, running);
+  const root = generatorInstallationRoot(projectRoot, env);
   const identity = installedIdentity(root);
 
   if (identity.deno !== deno) {
     fail(
-      `the installed toolchain was provisioned for Deno ${identity.deno}, but ` +
-        `this process is Deno ${deno}. Re-provision with ` +
+      `the installed generator dependencies were provisioned for Deno ` +
+        `${identity.deno}, but this process is Deno ${deno}. Re-provision with ` +
         `\`deno task toolchain:install\`.`,
     );
   }
 
-  return { deno, toolchainRoot: root, identity };
+  return { deno, generatorInstallationRoot: root, identity };
 }

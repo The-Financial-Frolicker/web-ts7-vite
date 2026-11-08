@@ -77,11 +77,11 @@ function profileKey(base, profile, defaultProfile) {
  */
 export function describePermissionProfiles(
   root = Deno.cwd(),
-  toolchainRoot = root,
+  generatorInstallationRoot = root,
 ) {
   const viteInvocation = {
     viteBin: "<vite>",
-    runner: join(toolchainRoot, "scripts", "vite-runner.mjs"),
+    runner: join(generatorInstallationRoot, "scripts", "vite-runner.mjs"),
     rolldown: "<rolldown>",
     lightningcss: "<lightningcss>",
   };
@@ -134,7 +134,11 @@ export function describePermissionProfiles(
       normalisePermissionFlags(
         buildViteServerArgs(
           {
-            runner: join(toolchainRoot, "scripts", "vite-runner.mjs"),
+            runner: join(
+              generatorInstallationRoot,
+              "scripts",
+              "vite-runner.mjs",
+            ),
             appRoot: root,
             rolldown: "<rolldown>",
             lightningcss: "<lightningcss>",

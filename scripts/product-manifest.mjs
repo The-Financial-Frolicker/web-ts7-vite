@@ -66,6 +66,7 @@ export const PRODUCT_MANIFEST = Object.freeze({
     "scripts/tsc-check.mjs",
     "scripts/tsc-check.sh",
     "scripts/toolchain-source.mjs",
+    "scripts/lib/toolchain/containment.mjs",
     "scripts/lib/toolchain/provenance.mjs",
     "scripts/ci-workflow.test.mjs",
     "scripts/github-output.test.mjs",

@@ -78,9 +78,9 @@ export function splitTypeSpecifier(specifier) {
 }
 
 /** The native compiler executable. */
-export function resolveTsc(toolchainRoot) {
+export function resolveTsc(generatorInstallationRoot) {
   const packageDir = findPackage(
-    join(toolchainRoot, "node_modules"),
+    join(generatorInstallationRoot, "node_modules"),
     typescriptPlatformPackage(),
   );
   const tsc = join(packageDir, "lib", "tsc");
@@ -97,7 +97,11 @@ export function resolveTsc(toolchainRoot) {
  * paths (the overlay lives elsewhere) and maps each `types` entry that names a
  * toolchain package to its installed declaration file.
  */
-export function overlayConfig(appRoot, tsconfigPath, toolchainRoot) {
+export function overlayConfig(
+  appRoot,
+  tsconfigPath,
+  generatorInstallationRoot,
+) {
   const config = JSON.parse(
     stripJsonc(readFileSync(join(appRoot, tsconfigPath), "utf8")),
   );
@@ -116,7 +120,7 @@ export function overlayConfig(appRoot, tsconfigPath, toolchainRoot) {
     try {
       const { packageName, subpath } = splitTypeSpecifier(name);
       const packageDir = findPackage(
-        join(toolchainRoot, "node_modules"),
+        join(generatorInstallationRoot, "node_modules"),
         packageName,
       );
       files.push(
@@ -165,11 +169,11 @@ export function main(
     }
 
     const policy = runtimePolicy(appRoot);
-    const tsc = resolveTsc(policy.toolchainRoot);
+    const tsc = resolveTsc(policy.generatorInstallationRoot);
 
     // Resolve-only mode: the shell entry point asks once for the compiler path,
     // so it can grant `--allow-run` on the exact executable without duplicating
-    // any toolchain-root or platform resolution here.
+    // any generator-root or platform resolution here.
     if (argv.includes("--print-tsc")) {
       io.log(tsc);
       return 0;
@@ -184,7 +188,11 @@ export function main(
       overlay,
       `${
         JSON.stringify(
-          overlayConfig(appRoot, tsconfigPath, policy.toolchainRoot),
+          overlayConfig(
+            appRoot,
+            tsconfigPath,
+            policy.generatorInstallationRoot,
+          ),
           null,
           2,
         )
@@ -194,7 +202,11 @@ export function main(
     if (printProfile) {
       io.log(
         JSON.stringify(
-          { tsc, overlay, toolchainRoot: policy.toolchainRoot },
+          {
+            tsc,
+            overlay,
+            generatorInstallationRoot: policy.generatorInstallationRoot,
+          },
           null,
           2,
         ),
@@ -203,7 +215,7 @@ export function main(
     }
 
     io.error(
-      `TypeScript: ${tsc} -p ${overlay} (toolchain ${policy.toolchainRoot})`,
+      `TypeScript: ${tsc} -p ${overlay} (toolchain ${policy.generatorInstallationRoot})`,
     );
     return execute(tsc, ["-p", overlay], appRoot);
   } catch (error) {

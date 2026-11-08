@@ -41,8 +41,48 @@ if ! command -v deno >/dev/null 2>&1; then
 fi
 
 DENO_BIN="$(readlink -f "$(command -v deno)")"
-TOOLCHAIN_ROOT="$(readlink -f "${TOOLCHAIN_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/web-ts7-vite/toolchain}")"
-if [[ -z "$TOOLCHAIN_ROOT" ]]; then
+# Generator-owned dependency installation. The rule matches
+# scripts/lib/toolchain/runtime.mjs: the tree must resolve inside
+# <GENERATOR_PROJECT_ROOT>/generator, and a temporary test-application copy
+# names the generator checkout through GENERATOR_PROJECT_ROOT so it reuses the
+# one installation instead of creating its own.
+if [[ -z "${GENERATOR_PROJECT_ROOT+set}" ]]; then
+    GENERATOR_PROJECT_ROOT="$PROJECT_ROOT"
+elif [[ -z "$GENERATOR_PROJECT_ROOT" ]]; then
+    echo "ERROR: GENERATOR_PROJECT_ROOT is set but empty" >&2
+    exit 1
+fi
+if [[ -z "${GENERATOR_ROOT+set}" ]]; then
+    GENERATOR_ROOT="$GENERATOR_PROJECT_ROOT/generator/dependencies"
+elif [[ -z "$GENERATOR_ROOT" ]]; then
+    echo "ERROR: GENERATOR_ROOT is set but empty" >&2
+    exit 1
+fi
+case "$GENERATOR_ROOT" in
+    /*) ;;
+    *)
+        echo "ERROR: GENERATOR_ROOT must be an absolute path: $GENERATOR_ROOT" >&2
+        exit 1
+        ;;
+esac
+GENERATOR_PROJECT_ROOT="$(readlink -m "$GENERATOR_PROJECT_ROOT")"
+GENERATOR_ROOT="$(readlink -m "$GENERATOR_ROOT")"
+case "$GENERATOR_ROOT/" in
+    "$GENERATOR_PROJECT_ROOT/generator/"*) ;;
+    *)
+        echo "ERROR: generator installation root $GENERATOR_ROOT is outside $GENERATOR_PROJECT_ROOT/generator" >&2
+        exit 1
+        ;;
+esac
+
+# The resolver canonicalises the owning project root as well as the tree, so a
+# temporary test-application copy grants read on the generator checkout it
+# reuses. When the two are the same directory the grant is unchanged.
+GENERATOR_READ_PATHS="$PROJECT_ROOT,$GENERATOR_ROOT"
+if [[ "$GENERATOR_PROJECT_ROOT" != "$PROJECT_ROOT" ]]; then
+    GENERATOR_READ_PATHS="$GENERATOR_READ_PATHS,$GENERATOR_PROJECT_ROOT"
+fi
+if [[ -z "$GENERATOR_ROOT" ]]; then
     echo "ERROR: the toolchain installation is not present." >&2
     echo "       Materialise it with: mise exec -- deno task toolchain:install" >&2
     exit 1
@@ -60,7 +100,7 @@ resolve_workerd() {
     local workerd
     workerd="$(
         deno run \
-            --allow-read="$PROJECT_ROOT,$TOOLCHAIN_ROOT" \
+            --allow-read="$GENERATOR_READ_PATHS" \
             --allow-env \
             scripts/contracts/author-cli.mjs workerd-path
     )" || return 1
@@ -105,7 +145,7 @@ if [[ -z "${EMSDK:-}" || ! -d "${EMSDK:-/nonexistent}" ]]; then
 fi
 
 deno run \
-    --allow-read="$PROJECT_ROOT,$TOOLCHAIN_ROOT,$TEMP_ROOT,$EMSDK" \
+    --allow-read="$PROJECT_ROOT,$GENERATOR_ROOT,$TEMP_ROOT,$EMSDK" \
     --allow-env \
     --allow-sys \
     --allow-write="$PROJECT_ROOT/toolchain-contracts.json,$TEMP_ROOT" \

@@ -339,16 +339,23 @@ describe("product job sequencing", () => {
       "no product task may precede the provenance gate",
     );
     assert.ok(
-      body.includes("--generator") && body.includes("--toolchain-root"),
+      body.includes("--generator") && body.includes("--generator-root"),
       "the verifier must receive the verified checkout and the installation root",
     );
   });
 
   it("provisions outside the product checkout, without implicit installation", () => {
-    assert.ok(body.includes("TOOLCHAIN_ROOT:"), "TOOLCHAIN_ROOT must be set");
     assert.ok(
-      body.includes("${{ runner.temp }}/toolchain"),
+      body.includes("GENERATOR_PROJECT_ROOT:"),
+      "GENERATOR_PROJECT_ROOT must name the verified generator checkout",
+    );
+    assert.ok(
+      body.includes("${{ runner.temp }}/generator"),
       "the installation must live outside the product checkout",
+    );
+    assert.ok(
+      body.includes("GENERATOR_PROJECT_ROOT/generator/dependencies"),
+      "the verifier must receive the generator-owned installation root",
     );
     assert.ok(
       !body.includes("deno install"),
@@ -581,7 +588,7 @@ describe("product job sequencing", () => {
       // A step-level `runner` reference is exactly what the product job relies on.
       assert.ok(
         jobBody("product").includes(
-          "TOOLCHAIN_ROOT: ${{ runner.temp }}/toolchain",
+          "GENERATOR_PROJECT_ROOT: ${{ runner.temp }}/generator",
         ),
         "product steps must declare the installation path at step level",
       );
@@ -602,12 +609,12 @@ describe("product job sequencing", () => {
       "  validate:",
       "    if: hashFiles('toolchain/deno.lock') != ''",
       "    env:",
-      "      TOOLCHAIN_ROOT: ${{ runner.temp }}/toolchain",
+      "      GENERATOR_PROJECT_ROOT: ${{ runner.temp }}/generator",
       "    steps:",
       "      - name: legitimate step",
       "        if: hashFiles('toolchain/deno.lock') != ''",
       "        env:",
-      "          TOOLCHAIN_ROOT: ${{ runner.temp }}/toolchain",
+      "          GENERATOR_PROJECT_ROOT: ${{ runner.temp }}/generator",
       "        run: echo ok",
       "  build:",
       "    steps:",
@@ -807,7 +814,7 @@ describe("workflow context scope (every published workflow)", () => {
       "      - name: step",
       "        if: hashFiles('toolchain/deno.lock') != ''",
       "        env:",
-      "          TOOLCHAIN_ROOT: ${{ runner.temp }}/toolchain",
+      "          GENERATOR_PROJECT_ROOT: ${{ runner.temp }}/generator",
       "        run: echo ok",
       "",
     ].join("\n");
@@ -867,7 +874,7 @@ describe("workflow context scope (every published workflow)", () => {
       "  build:",
       "    env:",
       "      # The runner's temporary directory is not available here.",
-      "      TOOLCHAIN_ROOT: /tmp/toolchain",
+      "      GENERATOR_ROOT: /tmp/toolchain",
       "    steps:",
       "      - name: step",
       "        run: echo ok",

@@ -7,6 +7,7 @@
  */
 
 import assert from "./lib/assert.mjs";
+import path from "./lib/path.mjs";
 import { describe, it } from "./lib/test.mjs";
 import {
   buildWranglerDryRunArgs,
@@ -17,12 +18,18 @@ import {
 
 const projectRoot = Deno.cwd();
 // Toolchain packages live in the installed toolchain, outside the application.
-const toolchainRoot = Deno.env.get("TOOLCHAIN_ROOT") ??
-  `${Deno.env.get("HOME")}/.local/share/web-ts7-vite/toolchain`;
+// The generator owns its Deno dependency tree inside its own subroot.
+const generatorInstallationRoot = path.join(
+  projectRoot,
+  "generator",
+  "dependencies",
+);
 
 describe("Deno-owned Wrangler dry-run", () => {
   it("resolves the direct Wrangler CLI and esbuild", () => {
-    const invocation = resolveWranglerDryRunInvocation(toolchainRoot);
+    const invocation = resolveWranglerDryRunInvocation(
+      generatorInstallationRoot,
+    );
 
     assert.ok(invocation.wranglerCli.endsWith("/wrangler-dist/cli.js"));
     assert.ok(
@@ -35,7 +42,9 @@ describe("Deno-owned Wrangler dry-run", () => {
   });
 
   it("builds the dry-run-specific profile and forwards arguments", () => {
-    const invocation = resolveWranglerDryRunInvocation(toolchainRoot);
+    const invocation = resolveWranglerDryRunInvocation(
+      generatorInstallationRoot,
+    );
     const writes = writablePaths(projectRoot);
     const args = buildWranglerDryRunArgs(invocation, projectRoot, [
       "--var",

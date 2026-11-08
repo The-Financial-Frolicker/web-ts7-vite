@@ -83,16 +83,19 @@ export function serverStatePaths(appRoot) {
 }
 
 /** Real, resolved paths for everything the profile grants access to. */
-export function resolveViteServerInvocation(toolchainRoot, appRoot) {
-  const vite = resolveViteInvocation(toolchainRoot);
+export function resolveViteServerInvocation(
+  generatorInstallationRoot,
+  appRoot,
+) {
+  const vite = resolveViteInvocation(generatorInstallationRoot);
   return {
     runner: Deno.realPathSync(
-      join(toolchainRoot, "scripts", "vite-runner.mjs"),
+      join(generatorInstallationRoot, "scripts", "vite-runner.mjs"),
     ),
     appRoot: Deno.realPathSync(appRoot),
     rolldown: vite.rolldown,
     lightningcss: vite.lightningcss,
-    workerd: resolveWorkerd(toolchainRoot),
+    workerd: resolveWorkerd(generatorInstallationRoot),
   };
 }
 
@@ -174,7 +177,7 @@ export async function main(
 
     const appRoot = Deno.realPathSync(projectRoot);
     const invocation = resolveViteServerInvocation(
-      policy.toolchainRoot,
+      policy.generatorInstallationRoot,
       appRoot,
     );
     const port = serverPort(mode, env);

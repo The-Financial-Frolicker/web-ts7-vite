@@ -238,8 +238,11 @@ export function requireHeadIs(root, sha, run) {
  * 6–7. The installed toolchain must be complete and its observed tree must equal
  * the digest recorded in its own validated identity record.
  */
-export async function requireInstalledIdentity(toolchainRoot, digest) {
-  const file = join(toolchainRoot, "toolchain.json");
+export async function requireInstalledIdentity(
+  generatorInstallationRoot,
+  digest,
+) {
+  const file = join(generatorInstallationRoot, "toolchain.json");
   let identity;
   try {
     identity = JSON.parse(readFileSync(file, "utf8"));
@@ -257,7 +260,9 @@ export async function requireInstalledIdentity(toolchainRoot, digest) {
     fail(`${file} records no materialisation digest`);
   }
 
-  const observed = await digest(join(toolchainRoot, "node_modules"));
+  const observed = await digest(
+    join(generatorInstallationRoot, "node_modules"),
+  );
   if (observed.digest !== identity.materialisation) {
     fail(
       `the installed toolchain does not match its own record: recorded ` +
@@ -293,12 +298,15 @@ export async function requireInstalledIdentity(toolchainRoot, digest) {
  * caller's job.
  */
 export async function releaseProvenance(
-  { root, ref, toolchainRoot, run, digest },
+  { root, ref, generatorInstallationRoot, run, digest },
 ) {
   requireCleanTree(root, run);
   const sha = resolveReleaseTag(root, ref, run);
   requireHeadIs(root, sha, run);
-  const { identity } = await requireInstalledIdentity(toolchainRoot, digest);
+  const { identity } = await requireInstalledIdentity(
+    generatorInstallationRoot,
+    digest,
+  );
 
   return validateSource({
     repository: GENERATOR_REPOSITORY,

@@ -12,7 +12,7 @@ import os from "./lib/os.mjs";
 import path from "./lib/path.mjs";
 import { after, describe, it } from "./lib/test.mjs";
 import { resolveTsc } from "./tsc-check.mjs";
-import { toolchainRoot } from "./lib/toolchain/runtime.mjs";
+import { generatorInstallationRoot } from "./lib/toolchain/runtime.mjs";
 
 import {
   checkCapabilityBoundary,
@@ -469,11 +469,13 @@ describe("Worker typecheck coverage", () => {
         "--allow-read",
         "--allow-env",
         `--allow-write=${path.join(root, ".wrangler")}`,
-        `--allow-run=${resolveTsc(toolchainRoot())}`,
+        `--allow-run=${resolveTsc(generatorInstallationRoot())}`,
         path.join(projectRoot, "scripts", "tsc-check.mjs"),
         "worker/tsconfig.json",
       ],
       cwd: root,
+      // A temporary copy reuses the generator's own installation.
+      env: { GENERATOR_PROJECT_ROOT: projectRoot },
     });
     return {
       status: result.code,

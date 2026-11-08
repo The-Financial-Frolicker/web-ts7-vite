@@ -36,7 +36,7 @@ import {
 } from "./scopes.mjs";
 import { SCHEMA_VERSION } from "./schema.mjs";
 import { describeToolchain } from "./toolchain.mjs";
-import { toolchainRoot } from "../lib/toolchain/runtime.mjs";
+import { generatorInstallationRoot } from "../lib/toolchain/runtime.mjs";
 import { runCapabilityProbe } from "./workerd-probe.mjs";
 import {
   discoverTypeScript,
@@ -350,8 +350,8 @@ export async function deriveContracts({
   tempRoot,
   vitePermissionProfile = "local",
 } = {}) {
-  const identity = await currentIdentity(root, toolchainRoot());
-  const toolchain = describeToolchain(root, toolchainRoot());
+  const identity = await currentIdentity(root, generatorInstallationRoot());
+  const toolchain = describeToolchain(root, generatorInstallationRoot());
   const emsdkRoot = requireEmscripten();
 
   io.log(`[refresh] emscripten SDK ${emsdkRoot}`);
@@ -381,7 +381,7 @@ export async function deriveContracts({
     }`,
   );
 
-  const typescriptLibs = discoverTypeScript(toolchainRoot());
+  const typescriptLibs = discoverTypeScript(generatorInstallationRoot());
   io.log(
     `[refresh] typescript editions ${typescriptLibs.editions.join(", ")}; ` +
       `libraries ${typescriptLibs.libraries.join(", ") || "none"}`,

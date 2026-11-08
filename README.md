@@ -417,10 +417,13 @@ mise exec -- deno task toolchain:install
 
 The first records and verifies the pinned tool binaries and their `.mise.toml`
 projection. The second materialises the toolchain's own
-[toolchain/deno.lock](toolchain/deno.lock) into an installation outside this
-checkout (`$XDG_DATA_HOME/web-ts7-vite/toolchain`, or `TOOLCHAIN_ROOT`), staged
-and then swapped into place, and writes `toolchain.json` last as its readiness
-record. `--frozen` inside that install means a lock that disagrees with the
+[toolchain/deno.lock](toolchain/deno.lock) into the generator-owned subtree
+`generator/dependencies/` beneath this project root (override the tree with
+`GENERATOR_ROOT`, or name the owning project root with
+`GENERATOR_PROJECT_ROOT`), staged in a sibling directory inside the same
+subtree and then swapped into place, and writes `toolchain.json` last as its
+readiness record. Anything that resolves outside `generator/` is rejected
+before the installation touches the filesystem. `--frozen` inside that install means a lock that disagrees with the
 manifests fails instead of resolving; the first provision needs registry access,
 afterwards the artefacts are cached.
 
@@ -1507,8 +1510,9 @@ The workflow runs on two jobs:
   checks the declared toolchain with `deno task toolchain:prepare -- --check`,
   runs `scripts/resolve-python.sh` for the same interpreter the build will use,
   and provisions the toolchain dependency domain with
-  `deno task toolchain:install -- --allow-download` into a CI-specific
-  `TOOLCHAIN_ROOT`. It then runs formatting, linting,
+  `deno task toolchain:install -- --allow-download` into the checkout's own
+  `generator/dependencies` subtree (`GENERATOR_PROJECT_ROOT` names the owning
+  project root, which is how a temporary copy reuses the generator's tree). It then runs formatting, linting,
   both typechecks, the Node dependency-boundary check and tests, Worker runtime
   tests, toolchain discovery and contract conformance tests, the guarded
   generator-only suites (`test:toolchain-config`, `test:generator`,

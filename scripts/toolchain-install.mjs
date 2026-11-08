@@ -14,11 +14,15 @@
  * old tree is removed after a successful swap.
  */
 
-import { dirname, join } from "./lib/path.mjs";
+import { join } from "./lib/path.mjs";
 import { readFileSync } from "./lib/fs.mjs";
 import {
   assertDenoVersion,
-  toolchainRootPath,
+  generatorInstallationRootPath,
+  generatorPreviousPath,
+  generatorProjectRoot,
+  generatorStagingPath,
+  generatorSubrootPath,
 } from "./lib/toolchain/runtime.mjs";
 import {
   digestOfFiles,
@@ -145,6 +149,43 @@ export function validateStaging(staging) {
   return installed;
 }
 
+/**
+ * Resolve every path the installation will touch, with containment enforced.
+ *
+ * Pure: it creates nothing, so a rejected override fails before any mutation.
+ * Every returned path is inside the generator-owned subroot.
+ */
+export function planInstallation({
+  projectRoot = Deno.cwd(),
+  env = Deno.env,
+  pid = Deno.pid,
+} = {}) {
+  const generatorProject = generatorProjectRoot(projectRoot, env);
+  const subroot = generatorSubrootPath(projectRoot, env);
+  const target = generatorInstallationRootPath(projectRoot, env);
+  const staging = generatorStagingPath(projectRoot, env, pid);
+  const previous = generatorPreviousPath(projectRoot, env);
+
+  for (
+    const [label, candidate] of [
+      ["the staging directory", staging],
+      ["the previous installation path", previous],
+    ]
+  ) {
+    if (candidate === target) {
+      fail(`${label} must differ from the installation root ${target}`);
+    }
+  }
+
+  return {
+    generatorProjectRoot: generatorProject,
+    subroot,
+    target,
+    staging,
+    previous,
+  };
+}
+
 /** CLI entry point; returns an exit code. */
 export async function main(
   argv = Deno.args,
@@ -155,10 +196,16 @@ export async function main(
   try {
     const seedIndex = argv.indexOf("--seed-from");
     const seedFrom = seedIndex === -1 ? undefined : argv[seedIndex + 1];
-    const target = toolchainRootPath(env);
+
+    // Every path is resolved and containment-checked before anything is
+    // created, so an escaping override fails closed with no filesystem effect.
+    const plan = planInstallation({ projectRoot: appRoot, env });
+    const { target, staging, previous } = plan;
 
     if (argv.includes("--print")) {
-      io.log(JSON.stringify({ target, seedFrom: seedFrom ?? null }, null, 2));
+      io.log(
+        JSON.stringify({ ...plan, seedFrom: seedFrom ?? null }, null, 2),
+      );
       return 0;
     }
 
@@ -170,10 +217,8 @@ export async function main(
       texts[name] = readFileSync(join(sourceDir, name), "utf8");
     }
 
-    // 2. Staging.
-    const parent = dirname(target);
-    Deno.mkdirSync(parent, { recursive: true });
-    const staging = join(parent, `.staging-${Deno.pid}`);
+    // 2. Staging: a sibling of the dependency tree, inside the same subroot, so
+    // the final rename stays on one filesystem.
     removeIfPresent(staging);
     Deno.mkdirSync(staging, { recursive: true });
     for (const name of SOURCE_FILES) {
@@ -259,8 +304,7 @@ export async function main(
       `${JSON.stringify(identity, null, 2)}\n`,
     );
 
-    // 6. Swap: one installation, no history.
-    const previous = `${target}.previous`;
+    // 6. Swap: one installation, no history, all inside the generator subroot.
     removeIfPresent(previous);
     let hadPrevious = false;
     try {

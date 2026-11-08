@@ -8,6 +8,7 @@
  */
 
 import assert from "./lib/assert.mjs";
+import path from "./lib/path.mjs";
 import { describe, it } from "./lib/test.mjs";
 import {
   buildViteServerArgs,
@@ -22,8 +23,12 @@ import { buildViteArgs, resolveViteInvocation } from "./vite-build.mjs";
 
 const projectRoot = Deno.cwd();
 // The toolchain is installed outside the application tree; resolution uses it.
-const toolchainRoot = Deno.env.get("TOOLCHAIN_ROOT") ??
-  `${Deno.env.get("HOME")}/.local/share/web-ts7-vite/toolchain`;
+// The generator owns its Deno dependency tree inside its own subroot.
+const generatorInstallationRoot = path.join(
+  projectRoot,
+  "generator",
+  "dependencies",
+);
 
 function fakeEnv(entries = {}) {
   const map = new Map(Object.entries(entries));
@@ -57,7 +62,10 @@ describe("Deno-owned Vite server launcher", () => {
   });
 
   it("keeps dev and preview profiles separate and port-specific", () => {
-    const invocation = resolveViteServerInvocation(toolchainRoot, projectRoot);
+    const invocation = resolveViteServerInvocation(
+      generatorInstallationRoot,
+      projectRoot,
+    );
     const dev = buildViteServerArgs(invocation, "dev", SERVER_PORTS.dev);
     const preview = buildViteServerArgs(
       invocation,
@@ -84,7 +92,10 @@ describe("Deno-owned Vite server launcher", () => {
   });
 
   it("grants only what the server needs", () => {
-    const invocation = resolveViteServerInvocation(toolchainRoot, projectRoot);
+    const invocation = resolveViteServerInvocation(
+      generatorInstallationRoot,
+      projectRoot,
+    );
     const args = buildViteServerArgs(invocation, "dev", SERVER_PORTS.dev);
 
     for (
@@ -121,7 +132,10 @@ describe("Deno-owned Vite server launcher", () => {
   });
 
   it("grants every path-scoped permission on a resolved real path", () => {
-    const invocation = resolveViteServerInvocation(toolchainRoot, projectRoot);
+    const invocation = resolveViteServerInvocation(
+      generatorInstallationRoot,
+      projectRoot,
+    );
     const args = buildViteServerArgs(invocation, "dev", SERVER_PORTS.dev);
 
     for (const flag of ["--allow-run", "--allow-ffi", "--allow-write"]) {
@@ -160,8 +174,11 @@ describe("Deno-owned Vite server launcher", () => {
   });
 
   it("shares one plugin policy with the build: same runner, different mode", () => {
-    const vite = resolveViteInvocation(toolchainRoot);
-    const server = resolveViteServerInvocation(toolchainRoot, projectRoot);
+    const vite = resolveViteInvocation(generatorInstallationRoot);
+    const server = resolveViteServerInvocation(
+      generatorInstallationRoot,
+      projectRoot,
+    );
     const build = buildViteArgs(vite, [], "local", projectRoot);
     const dev = buildViteServerArgs(server, "dev", SERVER_PORTS.dev);
 

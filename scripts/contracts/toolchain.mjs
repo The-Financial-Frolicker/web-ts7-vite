@@ -322,11 +322,13 @@ export function describePath(root, value) {
  * Paths are stored relative to the project root: a contract is a committed
  * artefact, so a path from the machine that authored it must never leak into it.
  */
-export function describeToolchain(root, toolchainRoot = root) {
+export function describeToolchain(root, generatorInstallationRoot = root) {
   const platform = platformIdentity();
   const pins = readMisePins(root);
-  const specifiers = readLockSpecifiers(toolchainRoot);
-  const { typescript, vite, graph } = resolvePackageIdentity(toolchainRoot);
+  const specifiers = readLockSpecifiers(generatorInstallationRoot);
+  const { typescript, vite, graph } = resolvePackageIdentity(
+    generatorInstallationRoot,
+  );
   const relative = (value) => describePath(root, value);
 
   return {
@@ -344,7 +346,9 @@ export function describeToolchain(root, toolchainRoot = root) {
     mise: { pins, evidence: ".mise.toml [tools]" },
     lockfile: { specifiers, evidence: "deno.lock specifiers" },
     emscripten: describeEmscripten(root),
-    browserCompatSources: discoverBrowserCompatSources(toolchainRoot),
+    browserCompatSources: discoverBrowserCompatSources(
+      generatorInstallationRoot,
+    ),
     packages: {
       typescript: {
         version: typescript.manifest.version,

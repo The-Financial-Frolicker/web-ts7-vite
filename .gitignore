@@ -35,3 +35,8 @@ dist-ssr
 # It describes this machine's installation; the committed contract lock is the
 # authoritative record and is refreshed only by `deno task contract:refresh`.
 /.contracts/
+
+# Generator-owned Deno dependency installation (see
+# scripts/lib/toolchain/runtime.mjs). The manifests live in toolchain/;
+# this subtree is materialised locally and never committed.
+/generator/

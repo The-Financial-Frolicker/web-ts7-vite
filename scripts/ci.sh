@@ -54,9 +54,52 @@ cleanup() {
 trap cleanup EXIT
 
 require_dependencies() {
-    TOOLCHAIN_ROOT="$(readlink -f "${TOOLCHAIN_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/web-ts7-vite/toolchain}")"
-    if [[ ! -d "$TOOLCHAIN_ROOT" ]]; then
-        echo "ERROR: the toolchain is not installed. Provision it first:" >&2
+    # Generator-owned dependency installation. The rule matches
+    # scripts/lib/toolchain/runtime.mjs: the tree must resolve inside
+    # <GENERATOR_PROJECT_ROOT>/generator, and a temporary test-application copy
+    # names the generator checkout through GENERATOR_PROJECT_ROOT so it reuses
+    # the one installation instead of creating its own.
+    if [[ -z "${GENERATOR_PROJECT_ROOT+set}" ]]; then
+        GENERATOR_PROJECT_ROOT="$PROJECT_ROOT"
+    elif [[ -z "$GENERATOR_PROJECT_ROOT" ]]; then
+        echo "ERROR: GENERATOR_PROJECT_ROOT is set but empty" >&2
+        exit 1
+    fi
+    if [[ -z "${GENERATOR_ROOT+set}" ]]; then
+        GENERATOR_ROOT="$GENERATOR_PROJECT_ROOT/generator/dependencies"
+    elif [[ -z "$GENERATOR_ROOT" ]]; then
+        echo "ERROR: GENERATOR_ROOT is set but empty" >&2
+        exit 1
+    fi
+    case "$GENERATOR_ROOT" in
+        /*) ;;
+        *)
+            echo "ERROR: GENERATOR_ROOT must be an absolute path: $GENERATOR_ROOT" >&2
+            exit 1
+            ;;
+    esac
+    GENERATOR_PROJECT_ROOT="$(readlink -m "$GENERATOR_PROJECT_ROOT")"
+    GENERATOR_ROOT="$(readlink -m "$GENERATOR_ROOT")"
+    case "$GENERATOR_ROOT/" in
+        "$GENERATOR_PROJECT_ROOT/generator/"*) ;;
+        *)
+            echo "ERROR: generator installation root $GENERATOR_ROOT is outside $GENERATOR_PROJECT_ROOT/generator" >&2
+            exit 1
+            ;;
+    esac
+
+    # The resolver canonicalises the owning project root as well as the tree, so a
+    # temporary test-application copy grants read on the generator checkout it
+    # reuses. When the two are the same directory the grant is unchanged.
+    GENERATOR_READ_PATHS="$PROJECT_ROOT,$GENERATOR_ROOT"
+    if [[ "$GENERATOR_PROJECT_ROOT" != "$PROJECT_ROOT" ]]; then
+        GENERATOR_READ_PATHS="$GENERATOR_READ_PATHS,$GENERATOR_PROJECT_ROOT"
+    fi
+    # The throwaway copy below must resolve this same installation, not one
+    # relative to the copy.
+    export GENERATOR_PROJECT_ROOT GENERATOR_ROOT
+    if [[ ! -d "$GENERATOR_ROOT" ]]; then
+        echo "ERROR: the generator dependencies are not installed. Provision them first:" >&2
         echo "    deno task toolchain:install" >&2
         exit 1
     fi
@@ -144,6 +187,7 @@ run_build_checks() {
         --exclude=./build-wasm \
         --exclude=./.wrangler \
         --exclude=./public/wasm \
+        --exclude=./generator \
         --exclude='./.aider*' \
         -cf - . | tar -C "$WORK_DIR" -xf -
     # No application dependency tree to link: the template has no app packages.

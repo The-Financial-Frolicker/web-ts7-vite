@@ -395,7 +395,7 @@ export function main(argv = Deno.args, root = Deno.cwd()) {
     // Deno pin and installed toolchain, before anything is resolved.
     const policy = runtimePolicy(root);
 
-    const invocation = resolveViteInvocation(policy.toolchainRoot);
+    const invocation = resolveViteInvocation(policy.generatorInstallationRoot);
     const args = buildViteArgs(invocation, extraArgs, profile, root);
 
     if (printProfile) {

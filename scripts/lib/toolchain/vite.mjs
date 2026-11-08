@@ -14,7 +14,7 @@
  * here inspects the host.
  */
 import { DiscoveryError } from "./discovery.mjs";
-import { toolchainRoot } from "./runtime.mjs";
+import { generatorInstallationRoot } from "./runtime.mjs";
 import {
   buildViteProbeArgs,
   DEFAULT_VITE_PROBE_PROFILE,
@@ -26,8 +26,8 @@ export function discoverViteTargets(
   root,
   { profile = DEFAULT_VITE_PROBE_PROFILE } = {},
 ) {
-  const invocation = resolveViteInvocation(toolchainRoot());
-  const script = `${toolchainRoot()}/scripts/vite-probe.mjs`;
+  const invocation = resolveViteInvocation(generatorInstallationRoot());
+  const script = `${generatorInstallationRoot()}/scripts/vite-probe.mjs`;
 
   const result = new Deno.Command(Deno.execPath(), {
     args: buildViteProbeArgs(invocation, script, root, profile),

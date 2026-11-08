@@ -48,10 +48,13 @@ export function deployStatePaths(appRoot) {
 }
 
 /** Real, resolved paths for the profile and the default invocation. */
-export function resolveWranglerDeployInvocation(toolchainRoot, appRoot) {
+export function resolveWranglerDeployInvocation(
+  generatorInstallationRoot,
+  appRoot,
+) {
   return {
-    wranglerCli: resolveWranglerCli(toolchainRoot),
-    esbuild: resolveEsbuild(toolchainRoot),
+    wranglerCli: resolveWranglerCli(generatorInstallationRoot),
+    esbuild: resolveEsbuild(generatorInstallationRoot),
     appRoot: Deno.realPathSync(appRoot),
     config: join(Deno.realPathSync(appRoot), "dist", "worker", "wrangler.json"),
   };
@@ -122,7 +125,7 @@ export function main(
 
     const appRoot = Deno.realPathSync(projectRoot);
     const invocation = resolveWranglerDeployInvocation(
-      policy.toolchainRoot,
+      policy.generatorInstallationRoot,
       appRoot,
     );
     const args = buildWranglerDeployArgs(invocation, extraArgs);

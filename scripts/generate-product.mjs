@@ -33,7 +33,7 @@ import {
   renderSource,
   SOURCE_FILE,
 } from "./lib/toolchain/provenance.mjs";
-import { toolchainRoot } from "./lib/toolchain/runtime.mjs";
+import { generatorInstallationRoot } from "./lib/toolchain/runtime.mjs";
 import { treeDigest } from "./lib/toolchain/tree-digest.mjs";
 
 export const EXIT_OK = 0;
@@ -318,7 +318,7 @@ export async function main(argv = Deno.args, io = console) {
       provenance = await releaseProvenance({
         root: Deno.cwd(),
         ref: toolchainRef,
-        toolchainRoot: toolchainRoot(),
+        generatorInstallationRoot: generatorInstallationRoot(),
         run: createGitRunner(),
         digest: treeDigest,
       });

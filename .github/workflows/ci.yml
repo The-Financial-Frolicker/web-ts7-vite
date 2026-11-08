@@ -320,6 +320,9 @@ jobs:
         # only, and applies to every task below.
         env:
           VITE_PERMISSION_PROFILE: ci-runner
+          # The product is a temporary test application: it reuses the
+          # generator's dependency installation instead of creating its own.
+          GENERATOR_PROJECT_ROOT: ${{ github.workspace }}
         run: |
           set -euo pipefail
           product="${RUNNER_TEMP}/ci-product"
@@ -422,8 +425,6 @@ jobs:
       # generator checkout, which is what authorises a generator-only task.
       - name: Provision the toolchain from the verified generator release
         working-directory: ${{ runner.temp }}/generator
-        env:
-          TOOLCHAIN_ROOT: ${{ runner.temp }}/toolchain
         run: |
           set -euo pipefail
           mise exec -- deno task toolchain:install -- --allow-download
@@ -432,31 +433,31 @@ jobs:
       # the verified checkout's own implementation.
       - name: Verify provenance and materialisation
         env:
-          TOOLCHAIN_ROOT: ${{ runner.temp }}/toolchain
+          GENERATOR_PROJECT_ROOT: ${{ runner.temp }}/generator
         run: |
           set -euo pipefail
           deno run --allow-read --allow-env \
             "$GITHUB_WORKSPACE/scripts/toolchain-source.mjs" verify \
             --generator "${{ runner.temp }}/generator" \
-            --toolchain-root "$TOOLCHAIN_ROOT"
+            --generator-root "$GENERATOR_PROJECT_ROOT/generator/dependencies"
 
       # Stage E — product acceptance, only after every gate above.
       - name: Client typecheck
         env:
-          TOOLCHAIN_ROOT: ${{ runner.temp }}/toolchain
+          GENERATOR_PROJECT_ROOT: ${{ runner.temp }}/generator
         run: mise exec -- deno task check:client
 
       - name: Worker typecheck
         env:
-          TOOLCHAIN_ROOT: ${{ runner.temp }}/toolchain
+          GENERATOR_PROJECT_ROOT: ${{ runner.temp }}/generator
         run: mise exec -- deno task check:worker
 
       - name: Build
         env:
-          TOOLCHAIN_ROOT: ${{ runner.temp }}/toolchain
+          GENERATOR_PROJECT_ROOT: ${{ runner.temp }}/generator
         run: mise exec -- deno task build
 
       - name: Wrangler deploy dry run
         env:
-          TOOLCHAIN_ROOT: ${{ runner.temp }}/toolchain
+          GENERATOR_PROJECT_ROOT: ${{ runner.temp }}/generator
         run: mise exec -- deno task deploy:dry-run

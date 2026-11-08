@@ -65,18 +65,35 @@ export function read(productRoot, io, argvFormatGitHub) {
   io.log(`TC_MATERIALISATION=${record.materialisation}`);
 }
 
-/** Verify the installed toolchain against the product's recorded digest. */
-async function verify(productRoot, generatorRoot, toolchainRoot, io) {
+/**
+ * Verify the installed dependencies against the product's recorded digest.
+ *
+ * `generatorCheckout` is the verified generator revision (the digest
+ * implementation is imported from it); `generatorInstallationRoot` is the
+ * generator-owned dependency tree that revision materialised.
+ */
+async function verify(
+  productRoot,
+  generatorCheckout,
+  generatorInstallationRoot,
+  io,
+) {
   const expected = readSource(productRoot);
 
   // The digest algorithm belongs to the generator; import it from the checkout
   // the workflow pinned rather than duplicating it in the product.
   const digestUrl = `file://${
-    join(generatorRoot, "scripts", "lib", "toolchain", "tree-digest.mjs")
+    join(
+      generatorCheckout,
+      "scripts",
+      "lib",
+      "toolchain",
+      "tree-digest.mjs",
+    )
   }`;
   const { treeDigest } = await import(digestUrl);
 
-  const identityPath = join(toolchainRoot, "toolchain.json");
+  const identityPath = join(generatorInstallationRoot, "toolchain.json");
   let identity;
   try {
     identity = JSON.parse(readFileSync(identityPath, "utf8"));
@@ -84,7 +101,9 @@ async function verify(productRoot, generatorRoot, toolchainRoot, io) {
     fail(`no toolchain identity at ${identityPath} (${error.message})`);
   }
 
-  const observed = await treeDigest(join(toolchainRoot, "node_modules"));
+  const observed = await treeDigest(
+    join(generatorInstallationRoot, "node_modules"),
+  );
 
   io.log(`provenance: ref=${expected.ref} sha=${expected.sha}`);
   io.log(`provenance: expected implementation ${expected.implementation}`);
@@ -146,21 +165,24 @@ export async function main(argv = Deno.args, io = console) {
       return 0;
     }
     if (command === "verify") {
-      const generatorRoot = argument(argv, "--generator");
-      const toolchainRoot = argument(argv, "--toolchain-root");
-      if (generatorRoot === undefined || toolchainRoot === undefined) {
-        fail("verify requires --generator DIR and --toolchain-root DIR");
+      const generatorCheckout = argument(argv, "--generator");
+      const generatorInstallationRoot = argument(argv, "--generator-root");
+      if (
+        generatorCheckout === undefined ||
+        generatorInstallationRoot === undefined
+      ) {
+        fail("verify requires --generator DIR and --generator-root DIR");
       }
       await verify(
         productRoot,
-        Deno.realPathSync(generatorRoot),
-        Deno.realPathSync(toolchainRoot),
+        Deno.realPathSync(generatorCheckout),
+        Deno.realPathSync(generatorInstallationRoot),
         io,
       );
       return 0;
     }
     io.error(
-      "usage: toolchain-source.mjs read|verify [--root DIR] [--generator DIR] [--toolchain-root DIR]",
+      "usage: toolchain-source.mjs read|verify [--root DIR] [--generator DIR] [--generator-root DIR]",
     );
     return 2;
   } catch (error) {

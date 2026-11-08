@@ -65,11 +65,13 @@ export async function probeCatalogueDigest() {
 
 export async function currentIdentity(
   root = Deno.cwd(),
-  toolchainRoot = root,
+  generatorInstallationRoot = root,
 ) {
   const platform = platformIdentity();
   const wrangler = readWranglerConfig(root);
-  const { typescript, vite, graph } = resolvePackageIdentity(toolchainRoot);
+  const { typescript, vite, graph } = resolvePackageIdentity(
+    generatorInstallationRoot,
+  );
 
   return {
     platform,
@@ -84,7 +86,7 @@ export async function currentIdentity(
       manifest: vite.manifest,
       buildTarget: readViteBuildTarget(root),
     },
-    launchers: describePermissionProfiles(root, toolchainRoot),
+    launchers: describePermissionProfiles(root, generatorInstallationRoot),
     capabilities: await probeCatalogueDigest(),
   };
 }

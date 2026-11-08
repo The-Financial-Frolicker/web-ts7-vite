@@ -96,7 +96,9 @@ export function main(argv = Deno.args, root = Deno.cwd(), execute = runChild) {
     // Deno pin and installed toolchain, before any resolution or execution.
     const policy = runtimePolicy(root);
 
-    const invocation = resolveWranglerDryRunInvocation(policy.toolchainRoot);
+    const invocation = resolveWranglerDryRunInvocation(
+      policy.generatorInstallationRoot,
+    );
     const extraArgs = argv[0] === "--print-profile" ? [] : argv;
     const args = buildWranglerDryRunArgs(invocation, root, extraArgs);
 

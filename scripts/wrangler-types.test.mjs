@@ -7,6 +7,7 @@
  */
 
 import assert from "./lib/assert.mjs";
+import path from "./lib/path.mjs";
 import { describe, it } from "./lib/test.mjs";
 import {
   buildWranglerTypesArgs,
@@ -18,30 +19,39 @@ import {
 } from "./wrangler-types.mjs";
 
 // Toolchain packages live in the installed toolchain, outside the application.
-const toolchainRoot = Deno.env.get("TOOLCHAIN_ROOT") ??
-  `${Deno.env.get("HOME")}/.local/share/web-ts7-vite/toolchain`;
+// The generator owns its Deno dependency tree inside its own subroot.
+const projectRoot = Deno.cwd();
+const generatorInstallationRoot = path.join(
+  projectRoot,
+  "generator",
+  "dependencies",
+);
 
 describe("Deno-owned Wrangler type generation", () => {
   it("resolves the installed Wrangler CLI main entry", () => {
-    const cli = resolveWranglerCli(toolchainRoot);
+    const cli = resolveWranglerCli(generatorInstallationRoot);
 
     assert.ok(cli.endsWith("/wrangler-dist/cli.js"), cli);
     assert.ok(Deno.statSync(cli).isFile, `${cli} must be a file`);
   });
 
   it("resolves the installed workerd and esbuild executables", () => {
-    const invocation = resolveWranglerTypesInvocation(toolchainRoot);
+    const invocation = resolveWranglerTypesInvocation(
+      generatorInstallationRoot,
+    );
 
     assert.ok(invocation.workerd.endsWith("/bin/workerd"), invocation.workerd);
     assert.ok(invocation.esbuild.endsWith("/bin/esbuild"), invocation.esbuild);
     assert.ok(Deno.statSync(invocation.workerd).isFile);
     assert.ok(Deno.statSync(invocation.esbuild).isFile);
-    assert.equal(resolveWorkerd(toolchainRoot), invocation.workerd);
-    assert.equal(resolveEsbuild(toolchainRoot), invocation.esbuild);
+    assert.equal(resolveWorkerd(generatorInstallationRoot), invocation.workerd);
+    assert.equal(resolveEsbuild(generatorInstallationRoot), invocation.esbuild);
   });
 
   it("grants only the explicit Wrangler-types profile", () => {
-    const invocation = resolveWranglerTypesInvocation(toolchainRoot);
+    const invocation = resolveWranglerTypesInvocation(
+      generatorInstallationRoot,
+    );
     const args = buildWranglerTypesArgs(invocation, ["--check"]);
 
     for (
