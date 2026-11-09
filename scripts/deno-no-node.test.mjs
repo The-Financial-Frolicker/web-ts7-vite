@@ -139,3 +139,109 @@ describe("deno-no-node wrapper", () => {
     }
   });
 });
+
+describe("protected-domain enforcement (promoted invariant)", () => {
+  // The wrapper is a command-name exclusion. These cases establish what it does
+  // reject, what it cannot see, and that Node's mere presence is not a breach.
+  const repo = Deno.cwd();
+  const wrapper = `${repo}/scripts/deno-no-node.sh`;
+
+  function outsideTripwire() {
+    const env = Deno.env.toObject();
+    delete env.DENO_NO_NODE_ACTIVE; // the suite itself runs one tripwire deep
+    return env;
+  }
+
+  function run(command) {
+    return new Deno.Command("bash", {
+      args: [wrapper, ...command],
+      cwd: repo,
+      env: outsideTripwire(),
+      stdout: "piped",
+      stderr: "piped",
+      stdin: "null",
+    }).outputSync();
+  }
+
+  it("rejects a direct invocation by executable name", () => {
+    const result = run(["node", "-e", "0"]);
+    assert.equal(result.code, 127);
+    assert.match(
+      new TextDecoder().decode(result.stderr),
+      /Node\.js is excluded from project-owned execution/,
+    );
+  });
+
+  it("rejects an indirect invocation through a shell", () => {
+    const result = run(["bash", "-c", "node -e 0"]);
+    assert.equal(result.code, 127);
+    assert.match(
+      new TextDecoder().decode(result.stderr),
+      /excluded from project-owned execution/,
+    );
+  });
+
+  it("rejects a shebang that resolves node through PATH", () => {
+    const directory = Deno.makeTempDirSync({ prefix: "no-node-shebang-" });
+    try {
+      const script = `${directory}/tool`;
+      Deno.writeTextFileSync(
+        script,
+        "#!/usr/bin/env node\nconsole.log('hosted by node');\n",
+      );
+      Deno.chmodSync(script, 0o755);
+      const result = run([script]);
+      assert.equal(result.code, 127, "the shebang must not find node");
+    } finally {
+      Deno.removeSync(directory, { recursive: true });
+    }
+  });
+
+  it("states its own scope, so the guarantee cannot drift wider than the code", () => {
+    // The observed behaviour of an absolute path is not uniform: a real binary
+    // ignores PATH entirely, while a launcher such as a mise shim still resolves
+    // through PATH and is caught. Because the outcome depends on what the
+    // absolute path is, the contract is held in the wrapper's own header rather
+    // than asserted here as a guarantee the mechanism cannot keep.
+    const header = Deno.readTextFileSync(`${repo}/scripts/deno-no-node.sh`);
+    assert.match(header, /command-name exclusion, not an OS process sandbox/);
+    assert.match(header, /absolute path such as \/usr\/bin\/node/);
+    assert.match(header, /outside its reach/);
+  });
+
+  it("permits Node to be installed and available", () => {
+    // Presence is not execution: Deno-hosted protected work must still run, and
+    // no installation may be pruned to make the guarantee look stronger.
+    const result = run([
+      "deno",
+      "eval",
+      "console.log('protected operation ran')",
+    ]);
+    assert.equal(result.code, 0);
+    assert.match(
+      new TextDecoder().decode(result.stdout),
+      /protected operation ran/,
+    );
+  });
+
+  it("leaves deployment integration outside the prohibition", () => {
+    const tasks = JSON.parse(Deno.readTextFileSync(`${repo}/deno.json`)).tasks;
+
+    // Deployment itself is not wrapped: Node is permitted there, and a
+    // deployment run can never be reported as a build-toolchain breach.
+    assert.equal(tasks.deploy.includes("deno-no-node.sh"), false);
+
+    // The protected build domain is wrapped.
+    for (const name of ["build", "validate", "check:client", "test:scripts"]) {
+      assert.ok(
+        tasks[name].includes("deno-no-node.sh"),
+        `${name} is protected and must run under the tripwire`,
+      );
+    }
+
+    // Known overlap, recorded rather than silently reclassified: the dry-run task
+    // also performs the build, so it currently runs under the tripwire. Separating
+    // the two phases belongs to the build/deployment lifecycle work, not here.
+    assert.ok(tasks["deploy:dry-run"].includes("deno-no-node.sh"));
+  });
+});

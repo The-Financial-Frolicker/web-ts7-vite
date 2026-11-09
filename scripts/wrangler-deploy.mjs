@@ -25,6 +25,7 @@
 
 import { join } from "./lib/path.mjs";
 import { runtimePolicy } from "./lib/toolchain/runtime.mjs";
+import { assertDeploymentRuntime } from "./lib/cloudflare/deployment-runtime.mjs";
 import { resolveEsbuild, resolveWranglerCli } from "./wrangler-types.mjs";
 
 /** The only host the deployment path is granted. */
@@ -122,6 +123,11 @@ export function main(
 
   try {
     const policy = runtimePolicy(projectRoot);
+
+    // Deployment policy: the runtime Wrangler will execute must be the one the
+    // build-side plugin graph pulled in. Checked here, at the deployment boundary,
+    // and never in the toolchain certificate.
+    assertDeploymentRuntime({ nodeModules: policy.generatorInstallationRoot });
 
     const appRoot = Deno.realPathSync(projectRoot);
     const invocation = resolveWranglerDeployInvocation(

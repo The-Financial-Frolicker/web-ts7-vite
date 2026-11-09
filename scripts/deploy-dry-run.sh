@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
-# Build, validate and run Wrangler dry-run through the Deno-owned launcher.
-# This script never performs a real deployment.
+# Build, package and dry-run: the combined convenience path. Never deploys.
+#
+# Like scripts/deploy.sh this owns only the build half; the dry run itself is
+# scripts/deploy-artefact-dry-run.sh, which is also callable on its own against a
+# hand-off produced elsewhere and never rebuilds.
+#
+# Usage: scripts/deploy-dry-run.sh [--name WORKER] [wrangler arguments...]
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -76,17 +81,10 @@ fi
 echo "Building application..."
 deno task build
 
-if [[ ! -f "$WRANGLER_CONFIG" ]]; then
-    echo "Generated Wrangler configuration not found: $WRANGLER_CONFIG" >&2
-    exit 1
-fi
+echo "Packaging the artefact hand-off..."
+deno task artefact:pack
 
-echo "Checking deployment artefacts..."
-deno task check:deploy
-
-echo "Running Wrangler dry-run..."
-deno run \
-    --allow-read="$GENERATOR_READ_PATHS" \
-    --allow-env=HOME,XDG_CONFIG_HOME,XDG_DATA_HOME,GENERATOR_ROOT,GENERATOR_PROJECT_ROOT \
-    --allow-run="$DENO_BIN" \
-    scripts/wrangler-dry-run.mjs "$@"
+# One deployment implementation: the deployment-only dry run consumes the
+# hand-off this launcher has just produced, exactly as the real deployment does.
+echo "Dry-running the built artefact..."
+exec "${BASH:-bash}" "$PROJECT_ROOT/scripts/deploy-artefact-dry-run.sh" "$@"

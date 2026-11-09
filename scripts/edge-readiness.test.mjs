@@ -532,10 +532,10 @@ describe("concurrent acceptance-run isolation", () => {
 
   it("derives WORK_DIR at step scope and publishes it to later steps", () => {
     const prepareIndex = workflow.indexOf(
-      "- name: Prepare a disposable deployment tree",
+      "- name: Prepare the acceptance tree and install the payload",
     );
     const deployIndex = workflow.indexOf(
-      "- name: Build and deploy the disposable Worker",
+      "- name: Deploy the transferred artefact",
     );
     assert.ok(prepareIndex > 0, "the prepare step is missing");
     assert.ok(
@@ -606,10 +606,10 @@ describe("concurrent acceptance-run isolation", () => {
 
   it("archives the checkout into a destination it cannot contain", () => {
     const prepareIndex = workflow.indexOf(
-      "- name: Prepare a disposable deployment tree",
+      "- name: Prepare the acceptance tree and install the payload",
     );
     const deployIndex = workflow.indexOf(
-      "- name: Build and deploy the disposable Worker",
+      "- name: Deploy the transferred artefact",
     );
     assert.ok(prepareIndex > 0, "the prepare step is missing");
     assert.ok(
@@ -655,9 +655,9 @@ describe("concurrent acceptance-run isolation", () => {
     assert.ok(upload.includes("${{ env.WORK_DIR }}/deploy.log"));
   });
 
-  it("deploys the generated configuration instead of a second name argument", () => {
+  it("deploys the transferred artefact under the deployment-owned name", () => {
     const deployIndex = workflow.indexOf(
-      "- name: Build and deploy the disposable Worker",
+      "- name: Deploy the transferred artefact",
     );
     const acceptanceIndex = workflow.indexOf(
       "- name: Edge acceptance (real browser, real deployment)",
@@ -677,39 +677,60 @@ describe("concurrent acceptance-run isolation", () => {
       .replace(/\\\s*\n\s*/g, " ")
       .replace(/[ \t]+/g, " ");
 
+    // The deployment-only interface, never the combined build-and-deploy task:
+    // the deployment job must not be able to rebuild what it was handed.
     assert.match(
       step,
-      /deno task deploy/,
-      "the deploy step must run the Deno-owned deployment task",
-    );
-
-    // `buildWranglerDeployArgs` replaces its default `deploy --config …` with
-    // whatever list it receives, so an argument here would remove the generated
-    // configuration from the invocation instead of adding to it, and `--name`
-    // would duplicate the identity the initialised tree already carries.
-    assert.doesNotMatch(
-      step,
-      /deno task deploy[^|]*--/,
-      `no Wrangler argument may follow the deployment task:\n${step}`,
+      /deno task deploy:artefact/,
+      "the deploy step must run the deployment-only task",
     );
     assert.doesNotMatch(
       step,
-      /--name/,
-      "the Worker name must come from the generated configuration",
+      /deno task deploy(?!:)/,
+      `the deploy step must not run the combined task:\n${step}`,
     );
 
-    // That one identity is still established by the initialiser and still
-    // reaches the page, so the browser verifier keeps binding to this run.
+    // The Worker name is supplied by the deployment …
+    assert.match(
+      step,
+      /deno task deploy:artefact -- --name "\$WORKER_NAME"/,
+      "the deployment must supply the Worker name",
+    );
+    // … while the generated configuration is supplied by the interface itself.
+    // `scripts/deploy-artefact.sh` composes `deploy --config <artefact> --name`
+    // and refuses `--name` combined with explicit Wrangler arguments, so restating
+    // the configuration here would bypass that composition instead of adding to it.
+    assert.doesNotMatch(
+      step,
+      /--config/,
+      "the deployment-only interface owns the generated configuration",
+    );
+
+    // The payload keeps the identity it was built with: the initialiser names
+    // this run in the acceptance tree, and the build job compiled that same name
+    // into the page the browser verifier binds to.
     const prepare = workflow.slice(
-      workflow.indexOf("- name: Prepare a disposable deployment tree"),
+      workflow.indexOf(
+        "- name: Prepare the acceptance tree and install the payload",
+      ),
       deployIndex,
     );
     assert.match(
       prepare,
       /deno task init:project "\$WORKER_NAME"/,
-      "the generated configuration must carry this run's Worker name",
+      "the acceptance tree must carry this run's Worker name",
     );
-    assert.match(step, /export BUILD_DEPLOYMENT="\$WORKER_NAME"/);
+
+    const build = workflow.slice(
+      workflow.indexOf("- name: Build and qualify the disposable hand-off"),
+      workflow.indexOf("- name: Package the hand-off"),
+    );
+    assert.ok(build.length > 0, "the build step is missing");
+    assert.match(
+      build,
+      /export BUILD_DEPLOYMENT="\$WORKER_NAME"/,
+      "the build must compile this run's deployment identity into the page",
+    );
   });
 
   it("scopes cleanup to the Worker this run created", () => {

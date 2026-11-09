@@ -1,13 +1,23 @@
 #!/usr/bin/env bash
-# Build, validate and deploy the application through the Deno-owned launchers.
+# Build, package and deploy: the combined convenience path.
+#
+# The lifecycle is split deliberately, so that a build job can hand an artefact
+# to an independent deployment job:
+#
+#   scripts/deploy.sh              build → package → deploy (this file)
+#   scripts/deploy-artefact.sh     deploy an existing hand-off (never builds)
+#
+# This script owns the build half only. It produces the artefact hand-off and
+# then hands the deployment to scripts/deploy-artefact.sh, so there is one
+# deployment implementation and both callers exercise it.
 #
 # Node is excluded: this script enters the same PATH tripwire as every other
-# project-owned task, and the deployment itself runs Wrangler under Deno with the
+# project-owned task, and the deployment runs Wrangler under Deno with the
 # profile in scripts/wrangler-deploy.mjs:
 #
 #   read, env, sys, write=<app>/.wrangler, run=<real esbuild>, net=api.cloudflare.com
 #
-# Usage: scripts/deploy.sh [wrangler arguments...]
+# Usage: scripts/deploy.sh [--name WORKER] [wrangler arguments...]
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -38,18 +48,12 @@ mkdir -p "$PROJECT_ROOT/.wrangler/tmp" \
 echo "Building application..."
 deno task build
 
-WRANGLER_CONFIG="$PROJECT_ROOT/dist/worker/wrangler.json"
-if [[ ! -f "$WRANGLER_CONFIG" ]]; then
-    echo "Generated Wrangler configuration not found: $WRANGLER_CONFIG" >&2
-    exit 1
-fi
+echo "Packaging the artefact hand-off..."
+deno task artefact:pack
 
-echo "Checking deployment artefacts..."
-deno task check:deploy
-
-echo "Running Wrangler under Deno..."
-deno run \
-    --allow-read \
-    --allow-env \
-    --allow-run="$DENO_BIN" \
-    scripts/wrangler-deploy.mjs "$@"
+# One deployment implementation: the deployment-only interface consumes the
+# hand-off this launcher has just produced. Splitting the two responsibilities
+# (build here, deploy there) is what lets the build job hand an artefact to an
+# independent deployment job.
+echo "Deploying..."
+exec "${BASH:-bash}" "$PROJECT_ROOT/scripts/deploy-artefact.sh" "$@"

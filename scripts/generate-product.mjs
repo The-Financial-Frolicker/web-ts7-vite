@@ -84,6 +84,7 @@ export const PRODUCT_VALIDATE = Object.freeze([
   "test:worker",
   "test:scripts",
   "test:deploy",
+  "test:artefact",
   "test:boundary",
   "test:contracts",
   "test:provenance-source",

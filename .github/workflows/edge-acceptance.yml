@@ -51,28 +51,31 @@ env:
   DENO_NO_UPDATE_CHECK: "1"
 
 jobs:
-  edge-acceptance:
-    name: Edge acceptance (ubuntu-24.04)
+  # ---------------------------------------------------------------------------
+  # Build the disposable hand-off.
+  #
+  # This job owns the whole build toolchain — mise, Emscripten, CMake, Ninja,
+  # TypeScript, Vite — and Cloudflare credentials are deliberately absent from
+  # it. What leaves the job is the artefact: `dist/` plus the record that
+  # describes it. The deployment job cannot build, so the boundary is structural
+  # rather than a convention.
+  # ---------------------------------------------------------------------------
+  edge-build:
+    name: Build the disposable hand-off (ubuntu-24.04)
     if: ${{ inputs.confirm == 'accept' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
-    # Add this job to a protected environment once one exists in the repository:
-    #   environment: cloudflare-edge-acceptance
-    # Referencing a non-existent environment would create an unprotected one, so
-    # the explicit dispatch plus confirmation input is the gate for now.
+    timeout-minutes: 30
 
     env:
-      # Disposable, non-production identity. Never a shared staging Worker.
+      # Disposable, non-production identity. Never a shared staging Worker. The
+      # same value drives the build identity and the deployment, because the
+      # acceptance assertions compare the page's compiled identity with the
+      # Worker that is actually deployed.
       WORKER_NAME: edge-${{ github.run_id }}-${{ github.run_attempt }}
       # The disposable tree is a temporary test application: it reuses the
       # generator's own dependency installation instead of materialising a
       # second one under its copy.
       GENERATOR_PROJECT_ROOT: ${{ github.workspace }}
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
-      # `WORK_DIR` is deliberately absent: the `runner` context is not available
-      # in a job-level `env`, so the acceptance tree path is derived once in the
-      # preparation step and published to the later steps through `$GITHUB_ENV`.
 
     steps:
       - name: Check out repository
@@ -87,13 +90,127 @@ jobs:
           cache_save_post: true
           install: true
 
-      - name: Install Node for the Wrangler deployment
-        # The build runs on Deno; the real deployment path is Node-hosted because
-        # Wrangler is a Node tool (see README "Runtime ownership"). Node is not a
-        # project-managed tool, so Actions provides it.
-        uses: actions/setup-node@v5
+      - name: Install npm dependencies
+        run: mise exec -- deno task toolchain:install -- --allow-download
+
+      - name: Prepare a disposable build tree
+        # The template's placeholder is not a valid Worker name, so the same
+        # throwaway-copy idiom as scripts/ci.sh applies: initialise a unique
+        # identity and never touch the checked-out tree.
+        #
+        # The tree lives in the runner's temporary directory, never inside
+        # `$GITHUB_WORKSPACE`: this step archives the checkout into it, and a
+        # destination inside its own source makes the producing tar read a
+        # directory the extracting tar is still filling
+        # (`tar: ./.acceptance: file changed as we read it`).
+        run: |
+          set -euo pipefail
+          BUILD_DIR="$RUNNER_TEMP/build-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "BUILD_DIR=$BUILD_DIR" >> "$GITHUB_ENV"
+          mkdir -p "$BUILD_DIR"
+          tar -C "$GITHUB_WORKSPACE" \
+            --exclude=./.git \
+            --exclude=./node_modules \
+            --exclude=./dist \
+            --exclude=./build-wasm \
+            --exclude=./.wrangler \
+            --exclude=./public/wasm \
+            --exclude=./artifacts \
+            --exclude=./artefacts \
+            --exclude=./generator \
+            --exclude='./.aider*' \
+            -cf - . | tar -C "$BUILD_DIR" -xf -
+          ln -s "$GITHUB_WORKSPACE/node_modules" "$BUILD_DIR/node_modules"
+          cd "$BUILD_DIR"
+          mise exec -- deno task init:project "$WORKER_NAME"
+
+      - name: Build and qualify the disposable hand-off
+        # Vite's build needs the explicit CI profile on a hosted runner
+        # (denoland/deno#37062).
+        #
+        # BUILD_SHA and BUILD_DEPLOYMENT are compiled into the page, so the
+        # browser verifier can prove it observed *this* revision and *this*
+        # deployment instance. They are supplied to the build, never guessed.
+        env:
+          BUILD_SHA: ${{ github.sha }}
+          VITE_PERMISSION_PROFILE: ci-runner
+        run: |
+          set -euo pipefail
+          cd "$BUILD_DIR"
+          export BUILD_DEPLOYMENT="$WORKER_NAME"
+          mise exec -- deno task build
+          mise exec -- deno task check:deploy
+
+      - name: Package the hand-off
+        run: |
+          set -euo pipefail
+          cd "$BUILD_DIR"
+          mise exec -- deno task artefact:pack --out "$RUNNER_TEMP/handoff"
+
+      # Hidden files are part of the payload: `dist/client/.assetsignore` steers
+      # which files Wrangler uploads as assets, so it must cross the boundary.
+      - name: Upload the hand-off
+        uses: actions/upload-artifact@v4
         with:
-          node-version: "22"
+          name: edge-handoff-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/handoff/dist
+            ${{ runner.temp }}/handoff/artefact-manifest.json
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # Deploy, accept, clean up.
+  #
+  # This job downloads the hand-off and never builds: it establishes the same
+  # project identity the build used (so `check:deploy` can compare the generated
+  # configuration with it), installs the payload, and deploys it under the
+  # deployment-owned Worker name. Edge acceptance, evidence collection and
+  # cleanup are unchanged; only the payload's origin changed.
+  # ---------------------------------------------------------------------------
+  edge-deploy:
+    name: Edge acceptance (ubuntu-24.04)
+    needs: edge-build
+    if: ${{ inputs.confirm == 'accept' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    # Add this job to a protected environment once one exists in the repository:
+    #   environment: cloudflare-edge-acceptance
+    # Referencing a non-existent environment would create an unprotected one, so
+    # the explicit dispatch plus confirmation input is the gate for now.
+
+    env:
+      # Disposable, non-production identity. Never a shared staging Worker.
+      WORKER_NAME: edge-${{ github.run_id }}-${{ github.run_attempt }}
+      # The acceptance tree reuses the generator's own dependency installation
+      # instead of materialising a second one under its copy.
+      GENERATOR_PROJECT_ROOT: ${{ github.workspace }}
+      # Credentials exist only in the deployment job; the build job has none.
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+      # `WORK_DIR` is deliberately absent: the `runner` context is not available
+      # in a job-level `env`, so the acceptance tree path is derived once in the
+      # preparation step and published to the later steps through `$GITHUB_ENV`.
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # The deployment path needs one interpreter and the deployment dependency
+      # closure. `install: false` keeps Emscripten, CMake, Ninja, TypeScript and
+      # Vite out of this job: none of them is reachable from its commands.
+      - name: Install mise without the build toolchain
+        uses: jdx/mise-action@v5
+        with:
+          cache: true
+          cache_save_post: true
+          install: false
+
+      - name: Install the pinned Deno only
+        run: mise install deno
 
       - name: Install npm dependencies
         run: mise exec -- deno task toolchain:install -- --allow-download
@@ -114,7 +231,13 @@ jobs:
           fi
           echo "Cloudflare credentials present (values are never printed)."
 
-      - name: Prepare a disposable deployment tree
+      - name: Download the hand-off
+        uses: actions/download-artifact@v4
+        with:
+          name: edge-handoff-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/handoff
+
+      - name: Prepare the acceptance tree and install the payload
         # The template's placeholder is not a valid Worker name, so the same
         # throwaway-copy idiom as scripts/ci.sh applies: initialise a unique
         # identity and never touch the checked-out tree.
@@ -127,6 +250,9 @@ jobs:
         # here, once, from the step-scoped `$RUNNER_TEMP` and published to the
         # later steps through `$GITHUB_ENV`, because the `runner` context is not
         # available in a job-level `env`.
+        #
+        # `dist/` comes from the hand-off the build job produced — the checkout
+        # has none, and nothing here builds one.
         run: |
           set -euo pipefail
           WORK_DIR="$RUNNER_TEMP/acceptance-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
@@ -140,37 +266,32 @@ jobs:
             --exclude=./.wrangler \
             --exclude=./public/wasm \
             --exclude=./artifacts \
+            --exclude=./artefacts \
             --exclude=./generator \
             --exclude='./.aider*' \
             -cf - . | tar -C "$WORK_DIR" -xf -
           ln -s "$GITHUB_WORKSPACE/node_modules" "$WORK_DIR/node_modules"
           cd "$WORK_DIR"
           mise exec -- deno task init:project "$WORKER_NAME"
+          cp -a "$RUNNER_TEMP/handoff/dist" "$WORK_DIR/dist"
+          cp "$RUNNER_TEMP/handoff/artefact-manifest.json" "$WORK_DIR/artefact-manifest.json"
 
-      - name: Build and deploy the disposable Worker
+      - name: Deploy the transferred artefact
         id: deploy
-        # `deno task deploy` builds, checks the deployment artefacts and runs the
-        # Node-hosted Wrangler deployment. Vite's build needs the explicit CI
-        # profile on a hosted runner (denoland/deno#37062).
+        # `deno task deploy:artefact` verifies the hand-off, checks the deployment
+        # artefacts and runs the Deno-hosted Wrangler deployment. It does not
+        # build: the payload was produced by the `edge-build` job and crossed the
+        # boundary as an artefact.
         #
-        # BUILD_SHA and BUILD_DEPLOYMENT are compiled into the page, so the
-        # browser verifier can prove it observed *this* revision and *this*
-        # deployment instance. They are passed to the build, never guessed.
-        env:
-          BUILD_SHA: ${{ github.sha }}
+        # The Worker name is supplied here, by the deployment, with `--name`. The
+        # payload keeps the name it was built with; the deployment decides where
+        # it is deployed. (In this workflow the two are the same value, so the
+        # page's compiled identity still matches the deployed instance; the
+        # mechanism is what makes them separable.)
         run: |
           cd "$WORK_DIR"
-          # The deployment identity is the generated configuration's Worker name.
-          # `init:project "$WORKER_NAME"` above wrote it into wrangler.jsonc, the
-          # build emits dist/worker/wrangler.json with that same name, and
-          # `check:deploy` verifies it — one name, carried by the configuration.
-          # The task is therefore invoked with no Wrangler arguments: the
-          # launcher's default invocation is `deploy --config <generated>`, and
-          # any non-empty argument list would replace that command instead of
-          # adding to it.
-          export BUILD_DEPLOYMENT="$WORKER_NAME"
           set +e
-          VITE_PERMISSION_PROFILE=ci-runner mise exec -- deno task deploy 2>&1 | tee "$WORK_DIR/deploy.log"
+          mise exec -- deno task deploy:artefact -- --name "$WORKER_NAME" 2>&1 | tee "$WORK_DIR/deploy.log"
           status=${PIPESTATUS[0]}
           echo "deploy_exit=$status" >> "$GITHUB_OUTPUT"
           exit "$status"

@@ -16,6 +16,7 @@
 
 import { join } from "./lib/path.mjs";
 import { runtimePolicy } from "./lib/toolchain/runtime.mjs";
+import { assertDeploymentRuntime } from "./lib/cloudflare/deployment-runtime.mjs";
 import { resolveEsbuild, resolveWranglerCli } from "./wrangler-types.mjs";
 
 function fail(message) {
@@ -95,6 +96,11 @@ export function main(argv = Deno.args, root = Deno.cwd(), execute = runChild) {
   try {
     // Deno pin and installed toolchain, before any resolution or execution.
     const policy = runtimePolicy(root);
+
+    // Deployment policy: the runtime Wrangler will execute must be the one the
+    // build-side plugin graph pulled in. Checked here, at the deployment boundary,
+    // and never in the toolchain certificate.
+    assertDeploymentRuntime({ nodeModules: policy.generatorInstallationRoot });
 
     const invocation = resolveWranglerDryRunInvocation(
       policy.generatorInstallationRoot,

@@ -50,6 +50,10 @@ export const PRODUCT_MANIFEST = Object.freeze({
     "scripts/ci.sh",
     "scripts/deploy.sh",
     "scripts/deploy-dry-run.sh",
+    "scripts/deploy-artefact.sh",
+    "scripts/deploy-artefact-dry-run.sh",
+    "scripts/artefact.mjs",
+    "scripts/artefact.test.mjs",
     "scripts/deno-no-node.sh",
     "scripts/resolve-python.sh",
     "scripts/worker-types.sh",
@@ -80,6 +84,13 @@ export const PRODUCT_MANIFEST = Object.freeze({
     "scripts/wrangler-types.test.mjs",
     "scripts/wrangler-dry-run.mjs",
     "scripts/wrangler-dry-run.test.mjs",
+    // The deployment launchers' Cloudflare integration modules. `wrangler-deploy
+    // .mjs` and `wrangler-dry-run.mjs` import them for the B5 deployment runtime
+    // check, so a product that received the launchers without them could not
+    // deploy at all.
+    "scripts/lib/cloudflare/deployment-runtime.mjs",
+    "scripts/lib/cloudflare/deployment-runtime.test.mjs",
+    "scripts/lib/cloudflare/workerd-runtime.mjs",
     "scripts/build-scripts.test.mjs",
     "scripts/deno-no-node.test.mjs",
     "scripts/contracts.verify.test.mjs",

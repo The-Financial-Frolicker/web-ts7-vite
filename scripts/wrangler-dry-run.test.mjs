@@ -105,3 +105,143 @@ describe("Deno-owned Wrangler dry-run", () => {
     );
   });
 });
+
+// --- Deployment runtime boundary -------------------------------------------
+//
+// These cases exercise the launcher, not the policy: an incompatible or
+// unresolved deployment runtime must prevent Wrangler from being executed at
+// all. The executor is injected, so a test that reaches it is visible here.
+
+function writeFixtureFile(root, relative, contents) {
+  const file = `${root}/${relative}`;
+  Deno.mkdirSync(file.slice(0, file.lastIndexOf("/")), { recursive: true });
+  Deno.writeTextFileSync(file, contents);
+}
+
+function fixturePlatformPackage() {
+  const osName = { win32: "windows" }[Deno.build.os] ?? Deno.build.os;
+  const arch = { x86_64: "64", aarch64: "arm64", arm: "arm", ia32: "ia32" }[
+    Deno.build.arch
+  ] ?? Deno.build.arch;
+  return `@cloudflare/workerd-${osName}-${arch}`;
+}
+
+/** A project root whose installation resolves (or fails to resolve) a runtime. */
+function makeDeploymentRoot({ plugin = true, mismatch = false } = {}) {
+  const root = Deno.realPathSync(
+    Deno.makeTempDirSync({ prefix: "deploy-launcher-" }),
+  );
+  const installation = `${root}/generator/dependencies`;
+  const platform = fixturePlatformPackage();
+
+  const write = (relative, contents) =>
+    writeFixtureFile(installation, relative, contents);
+  const pkg = (name, version, extra = {}) =>
+    write(
+      `.deno/${
+        name.replaceAll("/", "+")
+      }@${version}/node_modules/${name}/package.json`,
+      JSON.stringify({ name, version, ...extra }),
+    );
+
+  writeFixtureFile(
+    root,
+    ".mise.toml",
+    `[tools]\ndeno = "${Deno.version.deno}"\n`,
+  );
+  write(
+    "toolchain.json",
+    JSON.stringify({
+      schema: 1,
+      deno: Deno.version.deno,
+      spec: "s",
+      resolution: "r",
+      materialisation: "a".repeat(64),
+      implementation: "b".repeat(64),
+    }),
+  );
+
+  const wranglerMiniflare = "5.0.0";
+  const pluginMiniflare = mismatch ? "5.1.0" : "5.0.0";
+  const wranglerWorkerd = "1.0.0";
+  const pluginWorkerd = mismatch ? "1.1.0" : "1.0.0";
+
+  pkg("wrangler", "4.156.0", {
+    dependencies: { miniflare: wranglerMiniflare },
+  });
+  if (plugin) {
+    pkg("@cloudflare/vite-plugin", "1.66.0", {
+      dependencies: { miniflare: pluginMiniflare },
+    });
+  }
+  pkg("miniflare", wranglerMiniflare, {
+    dependencies: { workerd: wranglerWorkerd },
+  });
+  pkg("workerd", wranglerWorkerd, {
+    optionalDependencies: { [platform]: "1.0.0" },
+  });
+  if (mismatch) {
+    pkg("miniflare", pluginMiniflare, {
+      dependencies: { workerd: pluginWorkerd },
+    });
+    pkg("workerd", pluginWorkerd, {
+      optionalDependencies: { [platform]: "1.0.0" },
+    });
+  }
+  pkg(platform, "1.0.0");
+  write(
+    `.deno/${
+      platform.replaceAll("/", "+")
+    }@1.0.0/node_modules/${platform}/bin/workerd`,
+    "#!/bin/sh\n",
+  );
+
+  return root;
+}
+
+function withDeploymentRoot(options, body) {
+  const root = makeDeploymentRoot(options);
+  try {
+    return body(root);
+  } finally {
+    Deno.removeSync(root, { recursive: true });
+  }
+}
+
+describe("deployment runtime enforcement", () => {
+  it("runs the injected executor when the graphs are compatible", () => {
+    // The real installation is compatible today, so the launcher must reach the
+    // injected executor. Nothing is executed for real: the executor is a stub.
+    let called = 0;
+    const code = main([], Deno.cwd(), () => {
+      called += 1;
+      return 0;
+    });
+    assert.equal(code, 0);
+    assert.equal(called, 1);
+  });
+
+  it("aborts before execution when the workerd versions differ", () => {
+    withDeploymentRoot({ mismatch: true }, (root) => {
+      let called = 0;
+      const code = main([], root, () => {
+        called += 1;
+        return 0;
+      });
+      assert.equal(code, 1);
+      assert.equal(called, 0, "the executor must not run");
+    });
+  });
+
+  it("aborts before execution when a graph cannot be resolved", () => {
+    withDeploymentRoot({ plugin: false }, (root) => {
+      let called = 0;
+      const code = main([], root, () => {
+        called += 1;
+        return 0;
+      });
+      assert.equal(code, 1);
+      assert.equal(called, 0, "the executor must not run");
+    });
+  });
+});

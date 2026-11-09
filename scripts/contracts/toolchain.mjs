@@ -8,7 +8,11 @@
  *   wrangler/package.json                -> miniflare version it requires
  *   miniflare/package.json               -> workerd version it requires
  *   workerd/package.json                 -> platform package holding the binary
- *   @cloudflare/vite-plugin/package.json -> the second graph, used as a check
+ *
+ * The Cloudflare Vite plugin is not consulted: it is deployment integration,
+ * owned by the Deno application dependency domain. Its runtime is compared with
+ * Wrangler's at the deployment boundary, so this build-toolchain certificate
+ * never depends on it.
  *
  * Nothing here executes a binary. Execution belongs to `discover.mjs`, which is
  * a local-only operation; CI must be able to compute the same fingerprint from
@@ -16,8 +20,32 @@
  */
 
 import { findPackage } from "../lib/toolchain/discovery.mjs";
+import { resolveWorkerdRuntime } from "../lib/cloudflare/workerd-runtime.mjs";
 import path from "../lib/path.mjs";
 import { readFileSync } from "../lib/fs.mjs";
+
+/** The tools whose versions the operator specifies on the command line. */
+export const SPECIFIED_TOOLS = Object.freeze([
+  "deno",
+  "vite",
+  "wrangler",
+  "emscripten",
+]);
+
+/**
+ * The mise tool identifier for each supplied tool.
+ *
+ * Emscripten's mise tool is `emsdk`; Vite and Wrangler are installed through
+ * mise's npm backend. This map is the only place the identity is stated, and
+ * both the rendered `.mise.toml` and the availability guard use it, so the file
+ * and the check cannot disagree.
+ */
+export const MISE_TOOL_ID = Object.freeze({
+  deno: "deno",
+  vite: "npm:vite",
+  wrangler: "npm:wrangler",
+  emscripten: "emsdk",
+});
 
 export class ToolchainError extends Error {
   constructor(message) {
@@ -44,59 +72,11 @@ export function platformIdentity() {
   };
 }
 
-/**
- * Pick the platform package from the manifest's own optionalDependencies.
- *
- * The naming is not derivable from `Deno.build` alone (`linux-64`, not
- * `linux-x64`; `windows-64`, not `win32-x64`), so it is matched against the
- * names the installed package actually offers. A missing match is an error, not
- * a guess.
- */
-function workerdPlatformPackage(manifest, platform) {
-  const os = { win32: "windows" }[platform.os] ?? platform.os;
-  const arch = { x86_64: "64", aarch64: "arm64", arm: "arm", ia32: "ia32" }[
-    platform.arch
-  ] ?? platform.arch;
-  const optional = manifest.optionalDependencies ?? {};
-
-  for (const suffix of [`${os}-${arch}`, `${os}-x${arch}`]) {
-    const name = `@cloudflare/workerd-${suffix}`;
-    if (typeof optional[name] === "string") {
-      return { name, version: optional[name] };
-    }
-  }
-
-  fail(
-    `workerd@${manifest.version} does not offer a runtime for ` +
-      `${platform.os}/${platform.arch}; it offers ` +
-      `${Object.keys(optional).join(", ") || "nothing"}`,
-  );
-}
-
 function requireInstalled(root, name, version, why) {
   try {
     return findPackage(root, name, version === undefined ? {} : { version });
   } catch (error) {
     fail(`${why}: ${error.message}`);
-  }
-}
-
-function requireDependency(manifest, name, owner) {
-  const version = manifest.dependencies?.[name] ??
-    manifest.optionalDependencies?.[name];
-  if (typeof version !== "string" || version.length === 0) {
-    fail(`${owner} does not declare a ${name} dependency`);
-  }
-  return version;
-}
-
-function realFile(file, label) {
-  try {
-    if (!Deno.statSync(file).isFile) fail(`${label} is not a file: ${file}`);
-    return Deno.realPathSync(file);
-  } catch (error) {
-    if (error instanceof ToolchainError) throw error;
-    fail(`${label} is missing or unreadable: ${file} (${error.message})`);
   }
 }
 
@@ -119,11 +99,45 @@ export function readMisePins(root) {
     }
     if (!inTools || trimmed.length === 0 || trimmed.startsWith("#")) continue;
 
-    const match = /^([A-Za-z0-9_.-]+)\s*=\s*"([^"]*)"/.exec(trimmed);
-    if (match !== null) pins[match[1]] = match[2];
+    // A declaration key may be bare (`deno`) or quoted when it names a backend
+    // (`"npm:vite"`). Both forms are the project configuration mise reads.
+    const match = /^(?:"([^"]+)"|([A-Za-z0-9_.-]+))\s*=\s*"([^"]*)"/
+      .exec(trimmed);
+    if (match !== null) pins[match[1] ?? match[2]] = match[3];
   }
 
   return pins;
+}
+
+/**
+ * The supplied toolchain tuple, as declared in the project's mise configuration.
+ *
+ * The four versions are the toolchain definition. `toolchain:specify` is the
+ * only writer of `.mise.toml`, it writes exactly the versions supplied on the
+ * command line, and it refuses a tuple that is incomplete, malformed or not
+ * available through mise; so this reads the supplied tuple rather than an
+ * observation. Nothing is probed or re-resolved here, and the build
+ * prerequisites cmake/ninja are deliberately excluded: they are not the tuple.
+ */
+export function readToolchainTuple(root) {
+  const pins = readMisePins(root);
+  const tuple = {};
+
+  for (const tool of SPECIFIED_TOOLS) {
+    const id = MISE_TOOL_ID[tool];
+    const declared = pins[id];
+    if (typeof declared !== "string" || !/^\d+\.\d+\.\d+$/.test(declared)) {
+      const shown = JSON.stringify(id);
+      fail(
+        `.mise.toml declares no exact ${shown} version, so the toolchain ` +
+          `tuple is incomplete; run \`deno task toolchain:specify\` with the ` +
+          `four supplied versions`,
+      );
+    }
+    tuple[tool] = declared;
+  }
+
+  return tuple;
 }
 
 /** Direct dependency versions from `deno.lock` specifiers, when present. */
@@ -178,112 +192,32 @@ export function discoverBrowserCompatSources(root) {
 }
 
 /**
- * Resolve the workerd binary selected by the Wrangler and Vite plugin graphs.
+ * The workerd runtime the certified build toolchain executes.
  *
- * Both graphs are resolved because the project uses both: Wrangler for type
- * generation and deployment, the Vite plugin for the build. They must agree on
- * the runtime, otherwise one capability contract cannot describe the workflow.
+ * Wrangler is a tuple member: its runtime is what type generation, the
+ * deployment dry run and deployment execute, so it is a build-toolchain fact.
+ * The resolution walk itself is shared with the deployment boundary
+ * (`lib/cloudflare/workerd-runtime.mjs`); this module contributes the policy that
+ * only Wrangler is certified.
+ *
+ * The Cloudflare Vite plugin is deliberately *not* resolved here. It is
+ * deployment integration owned by the Deno application dependency domain, and
+ * whether its runtime agrees with Wrangler's is a deployment compatibility
+ * question, checked at the deployment boundary.
  */
 export function resolveWorkerdGraph(root) {
-  const platform = platformIdentity();
-
-  const wrangler = requireInstalled(root, "wrangler", undefined, "Wrangler");
-  const wranglerVersion = wrangler.manifest.version;
-  const wranglerTree = resolveMiniflareTree(
-    root,
-    requireDependency(
-      wrangler.manifest,
-      "miniflare",
-      `wrangler@${wranglerVersion}`,
-    ),
-    `wrangler@${wranglerVersion}`,
-    platform,
-  );
-
-  const vitePlugin = requireInstalled(
-    root,
-    "@cloudflare/vite-plugin",
-    undefined,
-    "the Cloudflare Vite plugin",
-  );
-  const vitePluginVersion = vitePlugin.manifest.version;
-  const pluginTree = resolveMiniflareTree(
-    root,
-    requireDependency(
-      vitePlugin.manifest,
-      "miniflare",
-      `@cloudflare/vite-plugin@${vitePluginVersion}`,
-    ),
-    `@cloudflare/vite-plugin@${vitePluginVersion}`,
-    platform,
-  );
-
-  const consistent =
-    wranglerTree.workerdVersion === pluginTree.workerdVersion &&
-    wranglerTree.binary === pluginTree.binary;
+  const runtime = resolveWorkerdRuntime(root, "wrangler", {
+    platform: platformIdentity(),
+  });
 
   return {
-    binary: wranglerTree.binary,
-    workerdVersion: wranglerTree.workerdVersion,
-    platformPackage: wranglerTree.platformPackage,
-    wranglerVersion,
-    vitePluginVersion,
-    miniflare: [wranglerTree, pluginTree],
-    consistent,
-    detail: consistent
-      ? `Wrangler ${wranglerVersion} and @cloudflare/vite-plugin ` +
-        `${vitePluginVersion} both resolve workerd ${wranglerTree.workerdVersion}`
-      : `Wrangler ${wranglerVersion} resolves workerd ` +
-        `${wranglerTree.workerdVersion}, but @cloudflare/vite-plugin ` +
-        `${vitePluginVersion} resolves ${pluginTree.workerdVersion}; one ` +
-        `contract cannot describe two runtimes`,
-  };
-}
-
-function resolveMiniflareTree(
-  root,
-  miniflareVersion,
-  requiredBy,
-  platform,
-) {
-  const miniflare = requireInstalled(
-    root,
-    "miniflare",
-    miniflareVersion,
-    `Miniflare required by ${requiredBy}`,
-  );
-  const workerdVersion = requireDependency(
-    miniflare.manifest,
-    "workerd",
-    `miniflare@${miniflareVersion}`,
-  );
-  const workerd = requireInstalled(
-    root,
-    "workerd",
-    workerdVersion,
-    `workerd required by miniflare@${miniflareVersion}`,
-  );
-
-  const platformPackage = workerdPlatformPackage(workerd.manifest, platform);
-  const installedPlatform = requireInstalled(
-    root,
-    platformPackage.name,
-    platformPackage.version,
-    `workerd platform package for ${platform.key}`,
-  );
-  const binary = realFile(
-    path.join(installedPlatform.dir, "bin", "workerd"),
-    `${platformPackage.name} workerd executable`,
-  );
-
-  return {
-    miniflareVersion,
-    miniflarePath: miniflare.dir,
-    requiredBy,
-    workerdVersion,
-    workerdPath: workerd.dir,
-    platformPackage: `${platformPackage.name}@${platformPackage.version}`,
-    binary,
+    binary: runtime.binary,
+    workerdVersion: runtime.workerdVersion,
+    platformPackage: runtime.platformPackage,
+    wranglerVersion: runtime.packageVersion,
+    miniflare: [runtime],
+    detail: `Wrangler ${runtime.packageVersion} resolves workerd ` +
+      `${runtime.workerdVersion}`,
   };
 }
 
@@ -332,6 +266,13 @@ export function describeToolchain(root, generatorInstallationRoot = root) {
   const relative = (value) => describePath(root, value);
 
   return {
+    // The authoritative toolchain definition: the four versions supplied to
+    // `toolchain:specify`. Distinct from the findings that follow, which
+    // describe what the installed toolchain turned out to support.
+    tuple: {
+      ...readToolchainTuple(root),
+      evidence: ".mise.toml [tools] as written by `toolchain:specify`",
+    },
     deno: {
       version: Deno.version.deno,
       evidence: "Deno.version.deno of the process that authored the contract",
@@ -364,10 +305,6 @@ export function describeToolchain(root, generatorInstallationRoot = root) {
         version: graph.wranglerVersion,
         evidence: "installed package manifest",
       },
-      vitePlugin: {
-        version: graph.vitePluginVersion,
-        evidence: "installed package manifest",
-      },
       miniflare: graph.miniflare.map((tree) => ({
         version: tree.miniflareVersion,
         requiredBy: tree.requiredBy,
@@ -378,7 +315,6 @@ export function describeToolchain(root, generatorInstallationRoot = root) {
         version: graph.workerdVersion,
         platformPackage: graph.platformPackage,
         binary: relative(graph.binary),
-        consistent: graph.consistent,
         evidence: graph.detail,
       },
     },

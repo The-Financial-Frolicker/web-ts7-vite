@@ -68,8 +68,16 @@ The host provides:
 - a POSIX shell, `git`, `curl` and the Linux utilities listed above;
 - network access for the first toolchain and dependency installation;
 - a Cloudflare account for a real deployment (not for builds or dry runs);
-- no Node.js. Every workflow — build, validation, tests, development, preview,
-  dry run and deployment — runs under the pinned Deno.
+- no Node.js as the host for the web toolchain. Build, validation, tests,
+  development, preview and dry run execute under the pinned Deno, and the PATH
+  tripwire (`scripts/deno-no-node.sh`) rejects any `node`/`nodejs` resolved
+  through it. Two narrow facts qualify that statement: Deno's `node:`
+  compatibility layer is not a Node process, and the Node runtime bundled with
+  the pinned Emscripten SDK
+  (`emsdk/6.0.13/node/*/bin/node`) may execute internally as an implementation
+  dependency of Emscripten — it is never used to host Vite, Wrangler, TypeScript
+  or the build. Deployment integration is separately owned and outside this
+  guarantee.
 
 The repository provides the pinned tools through [`.mise.toml`](.mise.toml), the
 dependency graph through [deno.lock](deno.lock), and the build, test and
@@ -706,6 +714,9 @@ of this documentation if it remains useful.
 | `scripts/deno-no-node.sh` | PATH tripwire for project-owned execution; rejects command-name `node`/`nodejs` attempts |
 | `scripts/resolve-python.sh` | Resolves the `emcc` interpreter: `EMSDK_PYTHON`, then a host `python3` that satisfies the SDK requirement, then a mise-provisioned fallback at that same requirement |
 | `scripts/deploy-dry-run.sh` | Builds, validates artefacts and invokes the Deno dry-run launcher; never deploys |
+| `scripts/artefact.mjs` | The build → deployment hand-off: `pack` writes `artefact-manifest.json` beside a copy of `dist/`, `verify` re-hashes a received payload and refuses a truncated, altered or substituted tree |
+| `scripts/deploy-artefact.sh` | Deploys an existing hand-off: verify, `check:deploy`, then the Deno Wrangler launcher; never builds. `--name` supplies the deployment identity |
+| `scripts/deploy-artefact-dry-run.sh` | The same checks and the Deno dry-run launcher against an existing hand-off; no upload, no credentials |
 | `scripts/contract-refresh.sh` | Contract refresh entry point (generator only): derives the lock from the authorised configuration and the installed toolchain via the authoring CLI; `--print-workerd` prints the resolved runtime path without probing |
 | `scripts/contracts/` | Contract model: scopes and fingerprints, schema and conformance, verification, product CLI (`cli.mjs`), plus generator-only derivation, probing and authoring |
 | `.mise.toml`, `deno.json`, `package.json`, `deno.lock` | The mise configuration specification and task definitions; the locked dependency graph lives in `toolchain/` |
@@ -1161,6 +1172,11 @@ Run these from the project root with dependencies installed. Commands marked
 | `deno task test:wasm` | Build-tree WASM smoke test on Deno, Node globals hidden (`19 + 23 = 42`) | Build required |
 | `deno task test:wasm:published` | Published (`dist/client`) WASM smoke test on Deno (`19 + 23 = 42`) | Full build required |
 | `deno task check:deploy` | Generated config/artefact consistency, symlink containment and the Node boundary in the emitted bundles | Full build required |
+| `deno task artefact:pack` | Copies `dist/` into a hand-off and writes `artefact-manifest.json` (build identity, toolchain pins, per-file sha256) | Full build required |
+| `deno task artefact:verify` | Re-hashes `dist/` and compares it with `artefact-manifest.json`; fails on a missing manifest, a missing/extra/altered file or a digest mismatch | A hand-off |
+| `deno task test:artefact` | Hand-off pack/verify tests in temporary fixtures | Dependencies |
+| `deno task deploy:artefact` | Verify the hand-off, check the artefacts, run the B5 runtime check and deploy; never builds. `--name` supplies the Worker name | A hand-off, dependencies, credentials |
+| `deno task deploy:artefact:dry-run` | The same checks and the Deno dry run against a hand-off; no credentials, no upload | A hand-off, dependencies |
 | `deno task deploy:dry-run` | Build, artefact check and Deno-owned `wrangler deploy --dry-run` | Initialised project, dependencies |
 | `deno task validate` | `fmt:check`, `lint`, client/Worker typechecks, the Node boundary check and every Deno test suite, then contract enforcement (the acceptance gate, last) | Dependencies; works on the template |
 | `deno task ci` | `scripts/ci.sh all` (static checks plus isolated build validation) | Dependencies; works on the template |
@@ -1260,11 +1276,17 @@ Worker; a dry run does not.
 ### Commands
 
 ```bash
-# build, validate the deployment artefacts, then package without uploading
+# build, package and validate the deployment artefacts, then dry-run (no upload)
 mise exec -- deno task deploy:dry-run
 
-# build, validate, then deploy
+# build, package, validate, then deploy
 mise exec -- deno task deploy
+
+# package the build output as a hand-off (writes artefact-manifest.json)
+mise exec -- deno task artefact:pack
+
+# deploy an existing hand-off: no build, no source tree needed
+mise exec -- deno task deploy:artefact
 
 # validate an existing build without invoking Wrangler
 mise exec -- deno task check:deploy
@@ -1274,25 +1296,71 @@ mise exec -- deno task check:deploy
 Deno-owned `scripts/deploy-dry-run.sh` / `scripts/wrangler-dry-run.mjs` path.
 `check:deploy` requires a completed build.
 
+### Build and deployment are separate operations
+
+Building and deploying have different owners, dependencies and lifetimes, so the
+lifecycle is split at the artefact:
+
+```
+build → qualify → package (artefact:pack) → hand off → deploy (deploy:artefact)
+```
+
+| Operation | Owns | Never does |
+| --- | --- | --- |
+| `deno task build` | mise toolchain, Emscripten/CMake/Ninja, typechecks, Vite | touch credentials |
+| `deno task check:deploy` | artefact coherence, routing, Node boundary | invoke Wrangler |
+| `deno task artefact:pack` | copies `dist/` into a hand-off and writes `artefact-manifest.json` | rebuild |
+| `deno task artefact:verify` | re-hashes the received `dist/`, refuses a truncated/altered/substituted payload | trust the sender |
+| `deno task deploy:artefact` | hand-off verification, `check:deploy`, B5 runtime check, `wrangler deploy` | run any build command |
+| `deno task deploy` | the combined convenience path: build, pack, then `deploy:artefact` | duplicate deployment logic |
+
+The hand-off is a directory containing the payload and one record:
+
+```
+artefact-manifest.json   build identity, pinned toolchain tuple, per-file sha256
+dist/                    the deployable payload, hidden files included
+```
+
+What the digest proves is **payload integrity**: the tree the deployment received
+is byte for byte the tree the build produced. It is not a signature, and it is not
+an authenticity claim; the repository's existing provenance
+(`toolchain.json`, `.toolchain-source.json`, the commit and the workflow identity)
+remains the authority for *who* built what. The record adds the one fact those
+mechanisms do not state — which payload belongs to which build.
+
+`deploy:artefact` accepts the deployment identity, so one payload can be deployed
+under different Worker names without touching it:
+
+```bash
+mise exec -- deno task deploy:artefact -- --name edge-1234-1
+```
+
+`--name` becomes `wrangler deploy --name …`: Wrangler overrides the generated
+configuration's name and the payload is not modified. Explicit Wrangler arguments
+replace the default command (the launcher's documented convention), so they cannot
+be combined with `--name`.
+
 ### What the dry-run and deployment commands do
 
 `scripts/deploy-dry-run.sh`:
 
 1. Runs `deno task build`.
-2. Confirms that the generated configuration
-   `dist/worker/wrangler.json` exists.
-3. Runs `deno task check:deploy` against the generated artefacts.
-4. Runs the Deno-owned Wrangler dry-run launcher with that configuration and
-   `--dry-run`.
+2. Runs `deno task artefact:pack`.
+3. Hands the hand-off to `scripts/deploy-artefact-dry-run.sh`.
 
-`scripts/deploy.sh` — the real deployment path — is unchanged:
+`scripts/deploy.sh` — the combined convenience path — does the same and then hands
+the hand-off to `scripts/deploy-artefact.sh`.
 
-1. Runs `deno task build`.
-2. Confirms that the generated configuration exists.
+`scripts/deploy-artefact.sh` (deployment only, no build):
+
+1. Verifies `artefact-manifest.json` against `dist/` and refuses a mismatch.
+2. Confirms that the generated configuration `dist/worker/wrangler.json` exists.
 3. Runs `deno task check:deploy`.
 4. Runs Wrangler’s `deploy` under Deno with that generated configuration
    (`scripts/wrangler-deploy.mjs`: read/env/sys, write to `.wrangler`, the real
-   `esbuild`, and `api.cloudflare.com` only).
+   `esbuild`, and `api.cloudflare.com` only), adding `--name` when one was given.
+   The B5 deployment-runtime check runs inside that launcher, before Wrangler
+   starts.
 
 Extra arguments are passed through to Wrangler by both paths. The dry-run
 launcher adds `--dry-run` itself; it does not use the npm Wrangler wrapper.
@@ -1400,6 +1468,20 @@ gh workflow run edge-acceptance.yml -f confirm=accept
 
 The workflow is `workflow_dispatch`-only (it deploys), never production, and uses
 a throwaway Worker named `edge-<run_id>-<attempt>` that is deleted at the end.
+
+### The run is two jobs joined by the artefact
+
+| Job | Owns | Cannot |
+| --- | --- | --- |
+| `edge-build` | the full build toolchain, `deno task build`, `check:deploy`, `artefact:pack`; uploads `edge-handoff-<run>-<attempt>` | read a Cloudflare credential |
+| `edge-deploy` | download, `init:project` identity, `deploy:artefact` (`--name "$WORKER_NAME"`), edge acceptance, cleanup, evidence | build anything |
+
+The build identity (`BUILD_SHA`, `BUILD_DEPLOYMENT`) is compiled into the page by
+`edge-build`; `edge-deploy` deploys the payload it receives and never rebuilds, so
+the acceptance assertions still compare the delivered page's identity with the
+deployed Worker. `needs: edge-build` means a failed build deploys nothing and
+therefore has nothing to tear down.
+
 Evidence is uploaded as the `edge-acceptance-<run_id>-<attempt>` artefact, after
 cleanup, so it contains the cleanup outcome:
 

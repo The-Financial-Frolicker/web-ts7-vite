@@ -24,6 +24,15 @@ import {
   sortEditions,
 } from "./lib/toolchain/discovery.mjs";
 
+import {
+  assertToolchainBoundary,
+  installedVersions,
+  npmToolchainMembers,
+  ownershipReport,
+} from "./toolchain-install.mjs";
+import { readToolchainTuple } from "./contracts/toolchain.mjs";
+import { readFileSync } from "./lib/fs.mjs";
+
 const temporaryRoots = [];
 
 after(() => {
@@ -175,5 +184,126 @@ describe("findPackage", () => {
       () => findPackage(root, "miniflare", { version: "3.0.0" }),
       /cannot find miniflare@3\.0\.0/,
     );
+  });
+});
+
+describe("the mise/Deno toolchain boundary", () => {
+  const tuple = Object.freeze({
+    deno: "2.9.8",
+    vite: "8.3.5",
+    wrangler: "4.156.0",
+    emscripten: "6.0.13",
+  });
+
+  it("treats only npm-backed tuple members as Deno-installable packages", () => {
+    assert.deepEqual(npmToolchainMembers(tuple), {
+      vite: "8.3.5",
+      wrangler: "4.156.0",
+    });
+    // Deno and Emscripten are not npm packages, and the build prerequisites are
+    // not tuple members at all.
+    const members = npmToolchainMembers(tuple);
+    for (const absent of ["deno", "emscripten", "cmake", "ninja"]) {
+      assert.equal(
+        absent in members,
+        false,
+        `${absent} must not be a boundary member`,
+      );
+    }
+  });
+
+  it("records a same-version copy as ownership debt, not as correctness", () => {
+    const summary = assertToolchainBoundary({
+      tuple,
+      manifest: { vite: "8.3.5", wrangler: "4.156.0" },
+      inventory: { vite: ["8.3.5"], wrangler: ["4.156.0"] },
+    });
+    assert.equal(summary.length, 2);
+    assert.deepEqual(summary.map((entry) => entry.copies), [1, 1]);
+
+    // Matching versions do not make the ownership correct: the report names the
+    // packages that belong to mise but are installed by Deno.
+    const report = ownershipReport({
+      tuple,
+      inventory: { vite: ["8.3.5"], wrangler: ["4.156.0"] },
+    });
+    assert.equal(report.clean, false);
+    assert.deepEqual(report.ownedByDeno, ["vite", "wrangler"]);
+    assert.deepEqual(report.violations.map((entry) => entry.requiredOwner), [
+      "mise",
+      "mise",
+    ]);
+  });
+
+  it("reports a closure with no toolchain packages as clean", () => {
+    const report = ownershipReport({
+      tuple,
+      inventory: { vite: [], wrangler: [] },
+    });
+    assert.equal(report.clean, true);
+    assert.deepEqual(report.ownedByDeno, []);
+    assert.deepEqual(report.violations, []);
+  });
+
+  it("rejects a loose declaration of a toolchain component", () => {
+    for (const loose of ["^8.3.5", "~8.3.5", "8.x", "*", "latest"]) {
+      assert.throws(
+        () =>
+          assertToolchainBoundary({
+            tuple,
+            manifest: { vite: loose },
+            inventory: { vite: ["8.3.5"] },
+          }),
+        /toolchain components are specified exactly/,
+        `${loose} must be refused`,
+      );
+    }
+  });
+
+  it("rejects a second copy at another version anywhere in the closure", () => {
+    assert.throws(
+      () =>
+        assertToolchainBoundary({
+          tuple,
+          manifest: { vite: "8.3.5" },
+          inventory: { vite: ["8.3.5", "8.3.6"] },
+        }),
+      /vite 8\.3\.6 is installed in the Deno dependency tree/,
+    );
+  });
+
+  it("ignores packages that are not toolchain components", () => {
+    const summary = assertToolchainBoundary({
+      tuple,
+      manifest: { typescript: "~7.0.2" },
+      inventory: { typescript: ["7.0.2"], picocolors: ["1.1.1"] },
+    });
+    assert.deepEqual(summary.map((entry) => entry.name), ["vite", "wrangler"]);
+  });
+
+  it("holds against the real installation", () => {
+    const root = Deno.cwd();
+    const real = readToolchainTuple(root);
+    const members = npmToolchainMembers(real);
+    const summary = assertToolchainBoundary({
+      tuple: real,
+      manifest: JSON.parse(
+        readFileSync(path.join(root, "toolchain", "package.json"), "utf8"),
+      ).dependencies ?? {},
+      inventory: installedVersions(
+        path.join(root, "generator", "dependencies", "node_modules"),
+        Object.keys(members),
+      ),
+    });
+
+    assert.deepEqual(summary.map((entry) => entry.name), ["vite", "wrangler"]);
+    for (const entry of summary) {
+      assert.equal(
+        entry.declared,
+        entry.version,
+        `${entry.name} declared exactly`,
+      );
+      assert.ok(entry.copies >= 1, `${entry.name} is present in the Deno tree`);
+    }
   });
 });

@@ -345,6 +345,161 @@ jobs:
           echo "generated product validated independently"
 
   # ---------------------------------------------------------------------------
+  # Build → deployment hand-off (generator).
+  #
+  # The build and the deployment are separate jobs with separate runners, so the
+  # only thing that crosses between them is the artefact: `dist/` plus the record
+  # that describes it. The build job owns the toolchain; the deployment job owns
+  # nothing but the deployment dependency closure and must never build. A
+  # regression that reintroduces a build command therefore fails in the deployment
+  # job rather than hiding inside a combined path.
+  # ---------------------------------------------------------------------------
+  handoff:
+    name: Build and package the hand-off (generator)
+    needs: [classify, build]
+    if: needs.classify.outputs.generator == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install the pinned toolchain with mise
+        uses: jdx/mise-action@v5
+        with:
+          cache: true
+          cache_save_post: true
+          install: true
+
+      - name: Provision the toolchain
+        if: hashFiles('scripts/toolchain-install.mjs') != ''
+        run: mise exec -- deno task toolchain:install -- --allow-download
+
+      # The template's identity placeholder is not a valid Cloudflare Worker name,
+      # so the build runs on an initialised disposable copy, exactly as
+      # scripts/ci.sh does. The copy is kept: its `dist/` is what the hand-off is
+      # packaged from.
+      - name: Initialise a disposable project identity
+        if: hashFiles('scripts/init-project.mjs') != ''
+        run: |
+          set -euo pipefail
+          tree="${RUNNER_TEMP}/handoff-build"
+          rm -rf "$tree"
+          mkdir -p "$tree"
+          tar -C "$GITHUB_WORKSPACE" \
+            --exclude=./.git \
+            --exclude=./node_modules \
+            --exclude=./dist \
+            --exclude=./build-wasm \
+            --exclude=./.wrangler \
+            --exclude=./public/wasm \
+            --exclude=./artifacts \
+            --exclude=./artefacts \
+            --exclude=./generator \
+            --exclude='./.aider*' \
+            -cf - . | tar -C "$tree" -xf -
+          cd "$tree"
+          mise exec -- deno task init:project ci-handoff
+
+      - name: Build and qualify the artefact
+        env:
+          # The disposable copy reuses the generator's one installation.
+          GENERATOR_PROJECT_ROOT: ${{ github.workspace }}
+          # Vite's Linux platform probe needs the documented CI profile on a
+          # hosted runner (denoland/deno#37062); the `local` profile is unchanged.
+          VITE_PERMISSION_PROFILE: ci-runner
+          BUILD_SHA: ${{ github.sha }}
+          BUILD_DEPLOYMENT: ci-handoff
+        run: |
+          set -euo pipefail
+          cd "${RUNNER_TEMP}/handoff-build"
+          mise exec -- deno task build
+          mise exec -- deno task check:deploy
+
+      - name: Package the hand-off
+        run: |
+          set -euo pipefail
+          mise exec -- deno task artefact:pack -- \
+            --root "${RUNNER_TEMP}/handoff-build" \
+            --out "${RUNNER_TEMP}/handoff"
+
+      # Hidden files are part of the payload: `dist/client/.assetsignore` tells
+      # Wrangler which files not to upload as assets, so a transfer that dropped
+      # dotfiles would ship a different artefact. `include-hidden-files` is
+      # therefore required, not cosmetic.
+      - name: Upload the hand-off
+        uses: actions/upload-artifact@v4
+        with:
+          name: deploy-handoff
+          path: |
+            ${{ runner.temp }}/handoff/dist
+            ${{ runner.temp }}/handoff/artefact-manifest.json
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # Deployment validation (generator).
+  #
+  # Consumes the downloaded hand-off and nothing else: no `deno task build`, no
+  # Emscripten, no CMake, no Ninja, no TypeScript, no Vite. The dry run executes
+  # the same validation and the same B5 deployment-runtime check as a real
+  # deployment, which is the part CI can prove without credentials.
+  # ---------------------------------------------------------------------------
+  deployment:
+    name: Deployment validation from the hand-off (generator)
+    needs: [classify, handoff]
+    if: needs.classify.outputs.generator == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # `install: false` on purpose: the deployment job must not install the build
+      # toolchain. Only the interpreter the deployment path needs is installed.
+      - name: Install mise without the build toolchain
+        uses: jdx/mise-action@v5
+        with:
+          cache: true
+          cache_save_post: true
+          install: false
+
+      - name: Install the pinned Deno only
+        run: mise install deno
+
+      - name: Provision the deployment dependency closure
+        if: hashFiles('scripts/toolchain-install.mjs') != ''
+        run: mise exec -- deno task toolchain:install -- --allow-download
+
+      - name: Download the hand-off from the build job
+        uses: actions/download-artifact@v4
+        with:
+          name: deploy-handoff
+          path: .
+
+      # The artefact's generated configuration carries the Worker name it was
+      # built with, and `check:deploy` compares that name with `package.json`.
+      # This checkout is the template, whose name is a placeholder, so the
+      # deployment establishes the same identity the build used. This is identity
+      # substitution only — no build runs here.
+      - name: Establish the artefact's project identity
+        if: hashFiles('scripts/init-project.mjs') != ''
+        run: mise exec -- deno task init:project ci-handoff
+
+      - name: Verify the hand-off
+        run: mise exec -- deno task artefact:verify
+
+      - name: Deployment validation (artefact, B5 runtime check, Wrangler dry run)
+        run: mise exec -- deno task deploy:artefact:dry-run
+
+  # ---------------------------------------------------------------------------
   # Generated product path.
   #
   # A generated product ships no `toolchain/` directory, which is the role

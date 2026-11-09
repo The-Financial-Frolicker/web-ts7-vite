@@ -31,6 +31,11 @@ dist-ssr
 /public/wasm/
 .aider*
 
+# The build → deployment hand-off produced by `deno task artefact:pack`. It
+# describes one build of this tree, so it is generated output, never committed.
+/artefact-manifest.json
+/artefacts/
+
 # Local toolchain provenance scratch written by `deno task toolchain:prepare`.
 # It describes this machine's installation; the committed contract lock is the
 # authoritative record and is refreshed only by `deno task contract:refresh`.

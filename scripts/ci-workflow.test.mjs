@@ -884,3 +884,143 @@ describe("workflow context scope (every published workflow)", () => {
     assert.deepEqual(jobLevelContextViolations(fixture, "fixture"), []);
   });
 });
+
+/**
+ * Build/deployment separation.
+ *
+ * The split is a structural guarantee, so it is asserted structurally: the
+ * deployment job must not be able to build, and it must consume the hand-off the
+ * build job uploaded. A workflow that quietly re-grew a build step in the
+ * deployment job would fail here rather than passing silently.
+ *
+ * Edge acceptance is generator-only and absent from a generated product, so its
+ * assertions are skipped when the file is not shipped.
+ */
+function bodyOf(source, name) {
+  const { lines, start, end } = jobLines(name, source);
+  return lines.slice(start + 1, end).join("\n");
+}
+
+function deployedWorkflow() {
+  const file = path.join(
+    Deno.cwd(),
+    ".github",
+    "workflows",
+    "edge-acceptance.yml",
+  );
+  return existsSync(file) ? readFileSync(file, "utf8") : null;
+}
+
+const BUILD_COMMANDS = [
+  "deno task build",
+  "scripts/build.sh",
+  "scripts/build-wasm.sh",
+  "deno task ci",
+  "artefact:pack",
+];
+
+describe("build/deployment separation in ci.yml", () => {
+  it("has a build job that packages and uploads the hand-off", () => {
+    const body = bodyOf(workflow, "handoff");
+    assert.ok(body.includes("deno task artefact:pack"), body);
+    assert.ok(body.includes("uses: actions/upload-artifact"), body);
+    assert.ok(
+      body.includes("include-hidden-files: true"),
+      "the hand-off upload must keep hidden payload files",
+    );
+    assert.ok(
+      !body.includes("CLOUDFLARE"),
+      "the build job needs no credentials",
+    );
+  });
+
+  it("has a deployment job that consumes the uploaded hand-off", () => {
+    const body = bodyOf(workflow, "deployment");
+    assert.ok(body.includes("uses: actions/download-artifact"), body);
+    assert.ok(body.includes("deno task artefact:verify"), body);
+    assert.ok(body.includes("deno task deploy:artefact:dry-run"), body);
+  });
+
+  it("makes the deployment job depend on the build job", () => {
+    const { lines, start, end } = jobLines("deployment");
+    const needs = lines.slice(start + 1, end).find((line) =>
+      line.trimStart().startsWith("needs:")
+    );
+    assert.ok(needs !== undefined && needs.includes("handoff"), String(needs));
+  });
+
+  it("cannot build in the deployment job", () => {
+    const body = bodyOf(workflow, "deployment");
+    for (const command of BUILD_COMMANDS) {
+      assert.ok(
+        !body.includes(command),
+        `the deployment job must not run ${command}`,
+      );
+    }
+  });
+
+  it("installs no build toolchain in the deployment job", () => {
+    const body = bodyOf(workflow, "deployment");
+    assert.ok(body.includes("mise install deno"), body);
+    assert.ok(
+      !/mise exec -- (emcc|cmake|ninja|tsc)/.test(body),
+      "the deployment job must not invoke a build tool",
+    );
+  });
+});
+
+describe("build/deployment separation in edge acceptance", () => {
+  const source = deployedWorkflow();
+
+  it("splits the build from the deployment", () => {
+    if (source === null) return;
+    const build = bodyOf(source, "edge-build");
+    const deploy = bodyOf(source, "edge-deploy");
+
+    assert.ok(build.includes("deno task artefact:pack"), build);
+    assert.ok(build.includes("include-hidden-files: true"), build);
+    assert.ok(deploy.includes("uses: actions/download-artifact"), deploy);
+    assert.ok(
+      deploy.includes("deno task deploy:artefact"),
+      "the deployment must use the deployment-only interface",
+    );
+  });
+
+  it("cannot build in the deployment job", () => {
+    if (source === null) return;
+    const deploy = bodyOf(source, "edge-deploy");
+    for (const command of BUILD_COMMANDS) {
+      assert.ok(
+        !deploy.includes(command),
+        `the deployment job must not run ${command}`,
+      );
+    }
+    assert.ok(!deploy.includes("VITE_PERMISSION_PROFILE"), deploy);
+  });
+
+  it("keeps credentials out of the build job", () => {
+    if (source === null) return;
+    const build = bodyOf(source, "edge-build");
+    assert.ok(!build.includes("CLOUDFLARE_API_TOKEN"), build);
+    assert.ok(!build.includes("CLOUDFLARE_ACCOUNT_ID"), build);
+  });
+
+  it("keeps the acceptance, cleanup and evidence steps in the deployment job", () => {
+    if (source === null) return;
+    const deploy = bodyOf(source, "edge-deploy");
+    for (
+      const step of [
+        "Edge acceptance (real browser, real deployment)",
+        "Delete the disposable Worker and verify it is gone",
+        "Keep the acceptance evidence",
+      ]
+    ) {
+      assert.ok(deploy.includes(step), `the deployment job must keep: ${step}`);
+    }
+  });
+
+  it("needs no Node in the deployment path", () => {
+    if (source === null) return;
+    assert.ok(!source.includes("actions/setup-node"), source.slice(0, 0));
+  });
+});

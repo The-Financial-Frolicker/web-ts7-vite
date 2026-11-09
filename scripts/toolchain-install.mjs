@@ -24,6 +24,7 @@ import {
   generatorStagingPath,
   generatorSubrootPath,
 } from "./lib/toolchain/runtime.mjs";
+import { MISE_TOOL_ID, readToolchainTuple } from "./contracts/toolchain.mjs";
 import {
   digestOfFiles,
   fileDigest,
@@ -187,6 +188,146 @@ export function planInstallation({
 }
 
 /** CLI entry point; returns an exit code. */
+/**
+ * Toolchain *version* consistency, and the ownership debt it does not fix.
+ *
+ * A tuple member installed through mise's npm backend is a tool. The same
+ * package also appears in this Deno dependency closure, because the Deno runners
+ * execute the tools from here. That coexistence is an ownership defect, not a
+ * design: the toolchain closure belongs to mise. It is not correct because the
+ * versions happen to agree.
+ *
+ * `assertToolchainBoundary` therefore checks only what it can check: that no
+ * copy in the closure has drifted from the tuple version, so two toolchains can
+ * never be selected by whichever path ran first. `ownershipReport` records the
+ * defect itself, so it is enumerated rather than tolerated.
+ *
+ * Removing the duplication requires the toolchain to be hosted from the mise
+ * tree (feasibility established: Deno imports Vite from the mise installation
+ * with its native bindings). That pivot also redefines what the installation
+ * identity digests cover, so it is a separate, deliberate change.
+ */
+export function npmToolchainMembers(tuple) {
+  const members = {};
+  for (const tool of Object.keys(tuple)) {
+    const id = MISE_TOOL_ID[tool];
+    if (typeof id === "string" && id.startsWith("npm:")) {
+      members[id.slice(4)] = tuple[tool];
+    }
+  }
+  return members;
+}
+
+/** Fail unless the closure carries no second toolchain copy. */
+/**
+ * Enumerate toolchain packages present in the Deno dependency closure.
+ *
+ * Any entry is ownership debt: the toolchain closure belongs to mise. The report
+ * exists so the debt is counted and cannot silently grow, and so the assertion
+ * that it is empty becomes the acceptance gate once the tools are hosted from
+ * the mise tree.
+ */
+export function ownershipReport({ tuple, inventory }) {
+  const names = Object.keys(npmToolchainMembers(tuple));
+  const present = names.filter((name) => (inventory?.[name] ?? []).length > 0);
+
+  return {
+    expectedOwners: names,
+    ownedByDeno: present,
+    violations: present.map((name) => ({
+      name,
+      versions: inventory[name],
+      owner: "deno",
+      requiredOwner: "mise",
+    })),
+    clean: present.length === 0,
+  };
+}
+
+export function assertToolchainBoundary({ tuple, manifest, inventory }) {
+  const members = npmToolchainMembers(tuple);
+  const problems = [];
+  const summary = [];
+
+  for (const [name, version] of Object.entries(members)) {
+    const declared = manifest?.[name];
+    if (declared !== undefined && declared !== version) {
+      problems.push(
+        `${name} is declared as ${
+          JSON.stringify(declared)
+        } but the toolchain ` +
+          `tuple fixes ${version}; toolchain components are specified exactly`,
+      );
+    }
+
+    const found = inventory?.[name] ?? [];
+    for (const installed of found) {
+      if (installed !== version) {
+        problems.push(
+          `${name} ${installed} is installed in the Deno dependency tree, but ` +
+            `the toolchain tuple fixes ${version}`,
+        );
+      }
+    }
+
+    summary.push({
+      name,
+      version,
+      declared: declared ?? null,
+      copies: found.length,
+    });
+  }
+
+  if (problems.length > 0) {
+    fail(problems.join("; "));
+  }
+
+  return summary;
+}
+
+/** Every version of each named package found anywhere under `nodeModules`. */
+export function installedVersions(nodeModules, names) {
+  const wanted = new Set(names);
+  const found = Object.fromEntries(names.map((name) => [name, []]));
+
+  function readVersion(directory) {
+    try {
+      const manifest = JSON.parse(
+        readFileSync(join(directory, "package.json"), "utf8"),
+      );
+      return typeof manifest.version === "string" ? manifest.version : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function visit(directory, depth) {
+    if (depth > 4) return;
+    let entries;
+    try {
+      entries = [...Deno.readDirSync(directory)];
+    } catch {
+      return;
+    }
+
+    for (const entry of entries) {
+      if (!entry.isDirectory) continue;
+      const child = join(directory, entry.name);
+      if (wanted.has(entry.name)) {
+        const version = readVersion(child);
+        if (version !== null) found[entry.name].push(version);
+      }
+      // Package stores (`.deno/<pkg>@<ver>/node_modules/...`) and nested
+      // `node_modules` trees both have to be walked: a second copy can be
+      // reached either way.
+      visit(child, depth + 1);
+    }
+  }
+
+  visit(nodeModules, 0);
+  return found;
+}
+
 export async function main(
   argv = Deno.args,
   appRoot = Deno.cwd(),
@@ -257,6 +398,20 @@ export async function main(
 
     // 4. Validate before recording anything.
     const packages = validateStaging(staging);
+
+    // The Deno tree must not carry a second copy of a toolchain component at a
+    // version other than the tuple's. The tuple is read from the specification
+    // mise installs from, so both boundaries are checked against one authority.
+    const tuple = readToolchainTuple(appRoot);
+    const members = npmToolchainMembers(tuple);
+    const boundary = assertToolchainBoundary({
+      tuple,
+      manifest: JSON.parse(texts["package.json"]).dependencies ?? {},
+      inventory: installedVersions(
+        join(staging, "node_modules"),
+        Object.keys(members),
+      ),
+    });
     const lock = lockedVersions(texts["deno.lock"]);
     for (const name of REQUIRED_PACKAGES) {
       const record = lock[name];
@@ -318,6 +473,13 @@ export async function main(
 
     io.log(`toolchain: installed ${target}`);
     io.log(`toolchain: deno=${deno} packages=${JSON.stringify(packages)}`);
+    for (const member of boundary) {
+      io.log(
+        `toolchain: boundary ${member.name}@${member.version} ` +
+          `(declared ${member.declared ?? "not a dependency"}, ` +
+          `${member.copies} copy(ies) in the Deno tree, mise owns the tool)`,
+      );
+    }
     io.log(`toolchain: materialisation=${materialisation.digest}`);
     return 0;
   } catch (error) {
