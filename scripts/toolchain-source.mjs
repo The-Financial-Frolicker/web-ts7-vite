@@ -132,16 +132,11 @@ async function verify(
     );
   }
 
-  // Same-machine consistency: the installation must agree with its own record.
-  // The whole-tree fingerprint is deliberately NOT compared with the product's
-  // value — it includes installer state that legitimately differs per machine.
-  if (observed.digest !== identity.materialisation) {
-    problems.push(
-      `the installation does not match its own record: recorded ` +
-        `${identity.materialisation}, observed ${observed.digest}`,
-    );
-  }
-
+  // The whole-tree materialisation digest is recorded and reported above but is
+  // deliberately **not** compared here: it includes installer state that differs
+  // per machine, and the runner has just materialised this tree itself. The
+  // runner-side self-check is deferred to the GitHub provenance workflow so it
+  // cannot silently reappear in ordinary product verification.
   for (const field of ["spec", "resolution"]) {
     if (typeof identity[field] !== "string" || identity[field].length === 0) {
       problems.push(`the installation record has no ${field} identity`);

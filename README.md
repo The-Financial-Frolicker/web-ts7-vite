@@ -1695,6 +1695,44 @@ refused unless the generator working tree is clean (including untracked files),
 the tag is annotated and resolves to the exact commit being released, and the
 installed toolchain matches its own record.
 
+### Digest comparison responsibilities
+
+Materialisation, ordinary development, cross-environment consistency and
+provenance are different claims, and each digest operation belongs to exactly
+one of them:
+
+| Operation | Where it runs | Purpose |
+| --- | --- | --- |
+| `deno task toolchain:install` digests the staging tree and records `spec`, `resolution`, `materialisation`, `implementation` in `toolchain.json` | Any environment that materialises the tree | **Materialisation correctness**: the installer reports what it produced |
+| `deno task product:generate --toolchain-ref` reads that record and publishes `.toolchain-source.json` | The reference workstation (release path) | **Recording**, not auditing: the installer already observed the tree |
+| `scripts/toolchain-source.mjs verify` compares the runner's **recorded and observed `implementation`** against the product's record | GitHub product CI | **Cross-environment consistency** — the one comparison only GitHub can make |
+| Contract fingerprints (`check:contracts`, `contract:refresh` reproduction) | Both | **Declared versus observed agreement**; unrelated to tree immutability |
+
+The whole-tree `materialisation` digest is machine-specific: it includes
+installer state that legitimately differs per machine. It is recorded and
+reported, and it is never compared across environments. Only `implementation`
+is cross-machine comparable.
+
+**Deferred requirement (R3).** The runner-side materialisation self-check — the
+comparison of the runner's observed whole-tree digest against the
+`materialisation` value in that runner's own installation record — is
+**intentionally absent from ordinary product verification**. Because
+materialisation is the installer's responsibility and the runner has just
+materialised its own tree, the check restated a fact the installation had
+already established.
+
+- It is **deferred, not discarded**: when the GitHub provenance workflow becomes
+  a real capability, this check must be reconsidered and restored *there* as
+  provenance evidence, with explicit ownership, purpose and acceptance criteria.
+- Its future owner is the **GitHub provenance workflow**, not product
+  verification.
+- It **must not silently reappear** in ordinary product verification: product
+  verification keeps only the cross-environment `implementation` gates.
+- The future provenance design must keep the distinction between
+  machine-specific `materialisation` identity and cross-machine-comparable
+  `implementation` identity; conflating them would make provenance
+  machine-dependent.
+
 ### Status
 
 The acceptance evidence in this workstream was produced with **disposable

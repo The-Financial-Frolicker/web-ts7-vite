@@ -34,7 +34,6 @@ import {
   SOURCE_FILE,
 } from "./lib/toolchain/provenance.mjs";
 import { generatorInstallationRoot } from "./lib/toolchain/runtime.mjs";
-import { treeDigest } from "./lib/toolchain/tree-digest.mjs";
 
 export const EXIT_OK = 0;
 export const EXIT_USAGE = 1;
@@ -320,7 +319,6 @@ export async function main(argv = Deno.args, io = console) {
         ref: toolchainRef,
         generatorInstallationRoot: generatorInstallationRoot(),
         run: createGitRunner(),
-        digest: treeDigest,
       });
       io.log(
         `[provenance] ${provenance.ref} -> ${provenance.sha} ` +

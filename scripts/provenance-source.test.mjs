@@ -65,11 +65,11 @@ function product(overrides = {}) {
  * imports from it is the digest implementation, so that is the only thing this
  * fixture provides.
  *
- * It reports two values, because `verify` checks two layers: the whole-tree
- * `digest` against the installation's own record, and `implementationDigest`
- * against the product's recorded identity. They are equal on a real machine
- * only when the trees are identical, so the fixture must be able to make them
- * differ.
+ * `verify` compares the cross-machine `implementationDigest` against the
+ * product's recorded identity (C1 and C2). The whole-tree `digest` is only
+ * *reported*: the runner-side materialisation self-check (R3) is deliberately
+ * absent and deferred to the GitHub provenance workflow, so a differing
+ * whole-tree value must not fail verification.
  */
 function generatorCheckout(digest, entries = 3328, implementation = digest) {
   const dir = makeDir("s9-generator-");
@@ -204,6 +204,25 @@ describe("provenance reader (product)", () => {
       ], io);
       assert.equal(code, 1);
       assert.match(io.err.join(" "), /implementation hashes to e{64}/);
+    });
+
+    it("reports the whole-tree digest without comparing it (R3 deferred)", async () => {
+      const io = recorder();
+      const code = await main([
+        "verify",
+        "--root",
+        product(),
+        "--generator",
+        // Whole-tree digest differs from the installation record; the
+        // implementation identity still agrees.
+        generatorCheckout("f".repeat(64), 3328, IMPLEMENTATION),
+        "--generator-root",
+        installation(IDENTITY),
+      ], io);
+      assert.equal(code, 0, io.err.join("; "));
+      // The observation is still reported, so the value remains available to the
+      // future provenance workflow.
+      assert.match(io.out.join("\n"), /observed materialisation f{64}/);
     });
 
     it("rejects an installation with no identity record", async () => {

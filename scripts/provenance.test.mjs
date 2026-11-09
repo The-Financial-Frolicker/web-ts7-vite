@@ -12,6 +12,7 @@ import {
   chmodSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   writeFileSync,
 } from "./lib/fs.mjs";
@@ -21,6 +22,7 @@ import { after, describe, it } from "./lib/test.mjs";
 import {
   GENERATOR_REPOSITORY,
   parseSource,
+  releaseProvenance,
   renderSource,
   requireCleanTree,
   requireHeadIs,
@@ -217,23 +219,19 @@ describe("release prerequisites", () => {
 });
 
 describe("installed toolchain identity", () => {
-  it("accepts a tree that matches its record", async () => {
-    const { root, digest } = await makeToolchain();
-    const { identity, observed } = await requireInstalledIdentity(
-      root,
-      treeDigest,
-    );
+  it("reads a record and takes no tree digest", async () => {
+    const { root, digest, implementation } = await makeToolchain();
+    const identity = requireInstalledIdentity(root);
     assert.equal(identity.materialisation, digest);
-    assert.equal(observed.digest, digest);
+    assert.equal(identity.implementation, implementation);
+    // The identity is read, never re-observed: the release path injects no
+    // digest function at all (R1 and R2 removed).
+    assert.equal(requireInstalledIdentity.length, 1);
   });
 
   it("refuses a missing installation", async () => {
     await rejects(
-      () =>
-        requireInstalledIdentity(
-          path.join(makeDir("s7-empty-"), "tc"),
-          treeDigest,
-        ),
+      () => requireInstalledIdentity(path.join(makeDir("s7-empty-"), "tc")),
       /no valid toolchain identity/,
     );
   });
@@ -242,17 +240,38 @@ describe("installed toolchain identity", () => {
     const root = makeDir("s7-bad-");
     writeFileSync(path.join(root, "toolchain.json"), '{"schema":1}');
     await rejects(
-      () => requireInstalledIdentity(root, treeDigest),
+      () => requireInstalledIdentity(root),
       /records no materialisation/,
     );
   });
 
-  it("refuses a tree that no longer matches the recorded digest", async () => {
-    const { root } = await makeToolchain({ corrupt: true });
-    await rejects(
-      () => requireInstalledIdentity(root, treeDigest),
-      /does not match its own record/,
+  it("refuses a record whose implementation identity is malformed", async () => {
+    const root = makeDir("s7-bad-impl-");
+    writeFileSync(
+      path.join(root, "toolchain.json"),
+      JSON.stringify({
+        schema: 1,
+        materialisation: "c".repeat(64),
+        implementation: "short",
+      }),
     );
+    await rejects(
+      () => requireInstalledIdentity(root),
+      /records no implementation identity/,
+    );
+  });
+
+  it("accepts a record that disagrees with the tree, because the tree is not audited", async () => {
+    // The fixture record deliberately disagrees with the tree on disk. The
+    // release path must still accept it: materialisation correctness belongs to
+    // the installer, and re-hashing an immutable installation on the reference
+    // workstation restated a fact the installation had already established. The
+    // runner-side equivalent is deferred to the provenance workflow (README,
+    // "Digest comparison responsibilities").
+    const { root } = await makeToolchain({ corrupt: true });
+    const identity = requireInstalledIdentity(root);
+    assert.match(identity.materialisation, /^[0-9a-f]{64}$/);
+    assert.match(identity.implementation, /^[0-9a-f]{64}$/);
   });
 });
 
@@ -898,5 +917,56 @@ describe("metadata diagnostic sensitivity and fail-closed traversal", () => {
     }
     assert.match(message, /unsupported filesystem entry fifo/);
     assert.match(message, /"pipe"/);
+  });
+});
+
+describe("release provenance on the reference workstation", () => {
+  it("publishes the recorded identity without digesting the tree", async () => {
+    const repo = makeRepo();
+    const { root: toolchain } = await makeToolchain();
+    let digestCalls = 0;
+    const digest = () => {
+      digestCalls += 1;
+      throw new Error("the release path must not digest the dependency tree");
+    };
+
+    const record = await releaseProvenance({
+      root: repo,
+      ref: "toolchain-2026.11.1",
+      generatorInstallationRoot: toolchain,
+      run: runner(),
+      // An injected digest the release path must never reach.
+      digest,
+    });
+
+    assert.equal(digestCalls, 0, "the local release path took no tree digest");
+
+    const identity = JSON.parse(
+      readFileSync(path.join(toolchain, "toolchain.json"), "utf8"),
+    );
+    const sha = git(repo, "rev-parse", "HEAD").stdout;
+    assert.equal(record.sha, sha);
+    assert.equal(record.materialisation, identity.materialisation);
+    assert.equal(record.implementation, identity.implementation);
+
+    // Byte-identical to the metadata published before R1/R2 were removed: the
+    // values come from the installer's record, never from a fresh observation.
+    assert.equal(
+      renderSource(record),
+      `${
+        JSON.stringify(
+          {
+            repository: GENERATOR_REPOSITORY,
+            ref: "toolchain-2026.11.1",
+            sha,
+            materialisation: identity.materialisation,
+            implementation: identity.implementation,
+          },
+          null,
+          2,
+        )
+      }
+`,
+    );
   });
 });

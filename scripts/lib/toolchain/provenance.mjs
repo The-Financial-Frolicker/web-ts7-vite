@@ -235,13 +235,20 @@ export function requireHeadIs(root, sha, run) {
 }
 
 /**
- * 6–7. The installed toolchain must be complete and its observed tree must equal
- * the digest recorded in its own validated identity record.
+ * 6–7. The installed toolchain must be complete: its identity record must exist
+ * and must carry well-formed materialisation and implementation identities.
+ *
+ * The tree itself is **not** re-hashed here. Materialisation correctness is the
+ * installer's responsibility (it digests the staging tree it has just produced
+ * and writes the record from that observation before the atomic swap), and the
+ * workstation is the reference environment in which that installation is
+ * treated as immutable. Re-hashing it on the same machine would restate a fact
+ * the installation already established, at the cost of walking the whole tree.
+ *
+ * The runner-side self-check that this audit used to provide is deferred to the
+ * GitHub provenance workflow (see README, "Digest comparison responsibilities").
  */
-export async function requireInstalledIdentity(
-  generatorInstallationRoot,
-  digest,
-) {
+export function requireInstalledIdentity(generatorInstallationRoot) {
   const file = join(generatorInstallationRoot, "toolchain.json");
   let identity;
   try {
@@ -260,53 +267,31 @@ export async function requireInstalledIdentity(
     fail(`${file} records no materialisation digest`);
   }
 
-  const observed = await digest(
-    join(generatorInstallationRoot, "node_modules"),
-  );
-  if (observed.digest !== identity.materialisation) {
-    fail(
-      `the installed toolchain does not match its own record: recorded ` +
-        `${identity.materialisation}, observed ${observed.digest}. Re-provision ` +
-        `before emitting release provenance.`,
-    );
-  }
-
-  // The cross-machine identity must also agree with the same observation. The
-  // whole-tree fingerprint above is a same-machine check; this one is the value
-  // a product records and another machine reproduces.
   if (
     typeof identity.implementation !== "string" ||
     !/^[0-9a-f]{64}$/.test(identity.implementation)
   ) {
     fail(`${file} records no implementation identity`);
   }
-  if (observed.implementationDigest !== identity.implementation) {
-    fail(
-      `the installed toolchain does not match its recorded implementation: ` +
-        `recorded ${identity.implementation}, observed ` +
-        `${observed.implementationDigest}. Re-provision before emitting release provenance.`,
-    );
-  }
 
-  return { identity, observed };
+  return identity;
 }
 
 /**
  * Build release provenance, refusing unless every prerequisite holds.
  *
- * Returns the validated metadata record; writing it into the product is the
- * caller's job.
+ * The published record is read from the installation's identity record: the
+ * installer observed the tree when it materialised it, and this task does not
+ * re-observe it. Returns the validated metadata record; writing it into the
+ * product is the caller's job.
  */
-export async function releaseProvenance(
-  { root, ref, generatorInstallationRoot, run, digest },
+export function releaseProvenance(
+  { root, ref, generatorInstallationRoot, run },
 ) {
   requireCleanTree(root, run);
   const sha = resolveReleaseTag(root, ref, run);
   requireHeadIs(root, sha, run);
-  const { identity } = await requireInstalledIdentity(
-    generatorInstallationRoot,
-    digest,
-  );
+  const identity = requireInstalledIdentity(generatorInstallationRoot);
 
   return validateSource({
     repository: GENERATOR_REPOSITORY,
