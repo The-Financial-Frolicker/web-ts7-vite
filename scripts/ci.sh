@@ -25,10 +25,10 @@
 #
 # Two separate lifecycles precede it, both generator-owned:
 #
-#   mise exec -- deno task toolchain:prepare   pinned tool binaries + `.mise.toml`
 #   mise exec -- deno task toolchain:install   the external npm dependency domain
 #
-# The first projects and verifies the mise-managed tools; the second materialises
+# The operator (or CI's mise action) installs the specified tools once; that
+# step is not part of this script. The lifecycle below materialises
 # the toolchain's own manifests and lock into an installation outside this
 # checkout. Ordinary build and development workflows only consume that
 # installation.
@@ -120,9 +120,9 @@ run_generator_only_suites() {
         echo "==> Toolchain discovery tests"
         deno task test:toolchain
     fi
-    if [[ -f "$PROJECT_ROOT/scripts/toolchain-config.test.mjs" ]]; then
-        echo "==> Toolchain configuration tests"
-        deno task test:toolchain-config
+    if [[ -f "$PROJECT_ROOT/scripts/toolchain-specify.test.mjs" ]]; then
+        echo "==> Toolchain specification tests"
+        deno task test:toolchain-specify
     fi
     if [[ -f "$PROJECT_ROOT/scripts/generate-product.test.mjs" ]]; then
         echo "==> Generator regression suite"

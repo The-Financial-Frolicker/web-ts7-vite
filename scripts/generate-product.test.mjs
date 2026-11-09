@@ -286,8 +286,8 @@ describe("product task manifest", () => {
       "check:contracts": "check",
       "contract:refresh": "refresh",
       "test:toolchain": "toolchain",
-      "test:toolchain-config": "toolchain config",
-      "toolchain:prepare": "prepare",
+      "test:toolchain-specify": "toolchain specification",
+      "toolchain:specify": "specify",
       "test:generator": "generator",
       "init:project": "init",
       "test:contracts": "generator suite",
@@ -298,8 +298,8 @@ describe("product task manifest", () => {
     assert.equal("contract:discover" in tasks, false);
     assert.equal("contract:approve" in tasks, false);
     assert.equal("test:toolchain" in tasks, false);
-    assert.equal("test:toolchain-config" in tasks, false);
-    assert.equal("toolchain:prepare" in tasks, false);
+    assert.equal("test:toolchain-specify" in tasks, false);
+    assert.equal("toolchain:specify" in tasks, false);
     assert.equal("toolchain:check" in tasks, false, "the alias must not exist");
     assert.equal("test:generator" in tasks, false);
     assert.equal("init:project" in tasks, false);
@@ -315,17 +315,15 @@ describe("product task manifest", () => {
 describe("generator-only toolchain boundary", () => {
   /** Tasks that exist only where the toolchain is actually managed. */
   const toolchainTasks = [
-    "toolchain:prepare",
-    "test:toolchain-config",
+    "toolchain:specify",
+    "test:toolchain-specify",
   ];
 
   /** Implementation and test files that back those tasks. */
   const toolchainFiles = [
-    "toolchain.toml",
-    "scripts/toolchain-prepare.mjs",
-    "scripts/toolchain-config.test.mjs",
-    "scripts/lib/toolchain/versions.mjs",
-    "scripts/lib/toolchain/resolve.mjs",
+    "scripts/toolchain-specify.mjs",
+    "scripts/toolchain-specify.test.mjs",
+    "scripts/toolchain-invariants.test.mjs",
   ];
 
   it("keeps toolchain management in the generator", () => {
@@ -651,7 +649,7 @@ describe("CI lifecycle: project initialisation", () => {
     "test:boundary",
     "test:toolchain",
     "test:contracts",
-    "test:toolchain-config",
+    "test:toolchain-specify",
     "test:generator",
     "test:vite",
     "test:wrangler-types",
@@ -723,7 +721,7 @@ describe("CI lifecycle: project initialisation", () => {
       const generatorOnly of [
         "test:init",
         "test:toolchain",
-        "test:toolchain-config",
+        "test:toolchain-specify",
         "test:generator",
       ]
     ) {

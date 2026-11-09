@@ -10,7 +10,8 @@ name: Authoritative toolchain
 # tasks.
 #
 # It answers two questions the ordinary CI job cannot:
-#   * does the declared toolchain (`toolchain.toml`) match what is installed;
+#   * does the specified installation (`.mise.toml`, written by
+#     `deno task toolchain:specify`) match what is installed;
 #   * does a canonical refresh on ubuntu-24.04 reproduce the committed lock
 #     byte for byte?
 
@@ -68,12 +69,6 @@ jobs:
       # explicit, frozen download of the locked artefacts.
       - name: Provision the toolchain
         run: mise exec -- deno task toolchain:install -- --allow-download
-
-      - name: Toolchain conformance
-        # Resolves every declaration, compares the installed versions with
-        # `toolchain.toml`, and checks `.mise.toml` against its projection.
-        # Nothing is installed: preparation already happened in the step above.
-        run: mise exec -- deno task toolchain:prepare -- --check
 
       - name: Contract conformance (committed lock)
         run: mise exec -- deno task check:contracts

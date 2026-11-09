@@ -52,13 +52,13 @@ export const GENERATOR_ONLY_TASKS = Object.freeze([
   "product:generate",
   // Toolchain management belongs to the manufacturing system. A product does
   // not manage or re-pin the toolchain that created it: its `.mise.toml` is the
-  // projection it inherited, and `toolchain.toml` plus the resolver are not
+  // projection it inherited; the specification entry point and its suite are
   // copied. Keeping these tasks in a product would point at absent files.
-  // `toolchain:prepare` owns the whole lifecycle; `--check` is its verification
-  // mode, so there is no separate `toolchain:check` task to keep in step.
+  // `toolchain:specify` writes the specification and installation is mise's,
+  // so there is no separate verification task to keep in step.
   "toolchain:install",
-  "toolchain:prepare",
-  "test:toolchain-config",
+  "toolchain:specify",
+  "test:toolchain-specify",
   // The generator's own regression suite generates product trees and has no
   // meaning inside one; it must never enter the product's validation chain.
   "test:generator",

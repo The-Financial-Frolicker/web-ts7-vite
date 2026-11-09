@@ -28,7 +28,9 @@ the shortest path is:
 ```bash
 mise trust
 mise install
-mise exec -- deno task toolchain:prepare
+mise exec -- deno task toolchain:specify -- --deno 2.9.8 --vite 8.3.5 \
+  --wrangler 4.156.0 --emscripten 6.0.13
+mise install
 mise exec -- deno task toolchain:install
 mise exec -- deno task init:project my-app --dry-run
 mise exec -- deno task init:project my-app
@@ -411,12 +413,18 @@ dependencies. Vite, Wrangler, TypeScript and the Cloudflare Vite plugin, with
 their complete transitive tree, live in a separate, externally installed domain.
 
 ```bash
-mise exec -- deno task toolchain:prepare
+mise exec -- deno task toolchain:specify -- --deno <version> --vite <version> \
+  --wrangler <version> --emscripten <version>
+mise install
 mise exec -- deno task toolchain:install
 ```
 
-The first records and verifies the pinned tool binaries and their `.mise.toml`
-projection. The second materialises the toolchain's own
+The first writes the toolchain specification — `.mise.toml` and
+`toolchain/package.json` — from the versions you supply on the command line,
+and installs nothing. `mise install` then establishes that installation once
+(CI does the same through `jdx/mise-action`), and this project never rewrites,
+relocates or copies the installed tools. The second command materialises the
+toolchain's own
 [toolchain/deno.lock](toolchain/deno.lock) into the generator-owned subtree
 `generator/dependencies/` beneath this project root (override the tree with
 `GENERATOR_ROOT`, or name the owning project root with
@@ -700,8 +708,8 @@ of this documentation if it remains useful.
 | `scripts/deploy-dry-run.sh` | Builds, validates artefacts and invokes the Deno dry-run launcher; never deploys |
 | `scripts/contract-refresh.sh` | Contract refresh entry point (generator only): derives the lock from the authorised configuration and the installed toolchain via the authoring CLI; `--print-workerd` prints the resolved runtime path without probing |
 | `scripts/contracts/` | Contract model: scopes and fingerprints, schema and conformance, verification, product CLI (`cli.mjs`), plus generator-only derivation, probing and authoring |
-| `.mise.toml`, `deno.json`, `package.json`, `deno.lock` | Pinned tools (`.mise.toml` is the generated projection), task definitions and the locked dependency graph |
-| `toolchain.toml` | Authoritative desired tool versions; generator-only, because a product never re-pins the toolchain that created it |
+| `.mise.toml`, `deno.json`, `package.json`, `deno.lock` | The mise configuration specification and task definitions; the locked dependency graph lives in `toolchain/` |
+| `scripts/toolchain-specify.mjs` | Writes the toolchain specification from the versions supplied on the command line; it installs nothing |
 | `toolchain-contracts.json` | The committed contract lock: derived facts a product inherits; verification accepts only a conformant lock |
 | `worker-configuration.d.ts` | Generated, tracked Worker `Env` types; never edit by hand |
 
@@ -953,9 +961,8 @@ generator tree is never modified.
 - **Excluded:** derivation and probing (`discover.mjs`, `fixtures.mjs`,
   `workerd-probe.mjs`, `lib/toolchain/vite*.mjs`), authoring (`author-cli.mjs`,
   `contract-refresh.sh`), toolchain
-  management (`toolchain.toml`, `toolchain-prepare.mjs`,
-  `lib/toolchain/{versions,resolve}.mjs`, `toolchain-config.test.mjs` and the
-  `toolchain:prepare` / `test:toolchain-config` tasks), the
+  management (`toolchain-specify.mjs`, its suite and the
+  `toolchain:specify` / `test:toolchain-specify` tasks), the
   generator regression suite (`generate-product.test.mjs`, `test:generator`),
   and the initialiser. Because the list is positive,
   a new generator file does not enter a product until someone adds it and
@@ -1008,72 +1015,42 @@ reviewed with the change that caused it.
 
 #### Toolchain version selection
 
-[`toolchain.toml`](toolchain.toml) is the single authoritative source of desired
-tool versions:
+The toolchain versions are supplied **explicitly on each invocation**, as
+arguments to one task:
 
-```toml
-[tools]
-deno = "2.9.8"
-cmake = "4.4.5"
-ninja = "1.13.2"
-emsdk = "6.0.13"
+```bash
+mise exec -- deno task toolchain:specify -- --deno 2.9.8 --vite 8.3.5 \
+  --wrangler 4.156.0 --emscripten 6.0.13
 ```
 
-- The supported tools are exactly the ones this template manages (deno, cmake,
-  ninja, emsdk). Node and Python stay host-provided and are not listed.
-- A value is either an exact version or `"latest"`. **An omitted tool means
-  `"latest"`**, so a short file is still a complete declaration.
-- `.mise.toml` is a **projection** of the resolved versions, not a second
-  editable list. `deno task toolchain:prepare --write` regenerates it, including
-  the policy notes on host-provided tools, so the comments cannot drift from the
-  policy. Version-specific annotations (for example why a particular cmake
-  release is pinned) live in `toolchain.toml`, beside the version they explain.
-- `toolchain.toml`, the resolver (`scripts/toolchain-prepare.mjs`,
-  `scripts/lib/toolchain/{versions,resolve}.mjs`), its tests and the
-  `toolchain:prepare` / `test:toolchain-config` tasks are **generator-only**. A
-  generated product inherits the `.mise.toml` projection
-  it was built with and has no command that resolves, installs or re-pins the
-  toolchain that created it. It keeps `check:contracts` and `test:contracts`,
-  because enforcing an inherited contract is a product responsibility.
+- The four versions are the **only** version authority. Nothing is read from
+  shell profiles, environment variables, a previous installation, or an implicit
+  `latest`; ranges and tags are refused, and an invocation that omits any of the
+  four tools fails.
+- The task **writes the specification** — [`.mise.toml`](.mise.toml) for the
+  mise-installed tools and [`toolchain/package.json`](toolchain/package.json)
+  for the locked packages — and installs nothing. Writing the specification is
+  not the same as writing into an installed toolchain, which this project never
+  does.
+- CMake and Ninja are build prerequisites the generator pins itself; they are
+  not part of the specified surface. Node and Python stay host-provided.
+- `scripts/toolchain-specify.mjs`, its suite and the `toolchain:specify` /
+  `test:toolchain-specify` tasks are **generator-only**: a generated product
+  inherits the `.mise.toml` it was built with and has no command that resolves or
+  re-pins a toolchain.
 
-`deno task toolchain:prepare` runs the lifecycle in a strict order:
+`mise install` establishes the specified installation **once** — the operator
+runs it, and CI's `jdx/mise-action` does the same from the same file. The
+resulting installation is an invariant of the project: the generator inspects,
+qualifies and executes those tools, and no command in this repository installs,
+upgrades, stages, relocates or copies them afterwards. Tests never install
+anything; they assert against the established installation or use the plan
+output of the dependency installer.
 
-1. parse the configuration (unknown sections, non-string values and duplicate
-   keys are errors);
-2. validate every declaration (unsupported tool, malformed version);
-3. **resolve every tool before installing any** — an explicit version must exist
-   in the backend, and `latest` resolves to the numerically highest available
-   version, never lexicographically;
-4. install the **exact resolved versions** with mise (`mise install
-   deno@2.9.8`), so mise cannot resolve a selection differently later;
-5. verify `mise ls --installed` reports those exact versions.
-
-A request that cannot be resolved fails the run before anything is installed; it
-never falls back to another version, and an invalid explicit version is never
-treated as `latest`. `--dry-run` stops after resolution, and `--check` verifies
-the installed toolchain and the `.mise.toml` projection without installing. The
-projection is compared as a whole file, so a hand-edited comment is drift exactly
-like a changed version; `--check` has no separate task alias — `--check` is its
-mode.
-
-CI runs the check, never the preparation: `mise exec -- deno task
-toolchain:prepare -- --check` in the `validate` job and again in the
-authoritative job below. Installing remains mise's job (`jdx/mise-action`
-installs every pin from `.mise.toml` in one step), so the distinction between
-"prepare the environment" and "verify the environment" is preserved and the
-check cannot change the thing it measures.
-
-Provenance keeps three distinct facts per tool — **requested** (explicit,
-`latest`, or the implicit default), **resolved** (the exact version chosen for
-this run) and **installed** (what was observed afterwards) — and is written to
-`.contracts/toolchain-provenance.json`. If `latest` moves from one release to
-another, that change is visible there; the compatibility contracts are
-unaffected unless the tool is key for them, and Emscripten is not key for the
-three runtime contracts.
-
-The configuration deliberately contains no installation or template-generation
-assumptions, so a future, independent toolchain scanner can write the exact
-versions it observed into this same file. **No such scanner exists yet.**
+`deno task toolchain:install` materialises the locked *packages*
+([`toolchain/deno.lock`](toolchain/deno.lock)) into the generator-owned subtree
+`generator/dependencies/`; it invokes no tool installation at all, which the
+invariant suite asserts with a `mise` stub on `PATH`.
 
 
 
@@ -1172,7 +1149,7 @@ Run these from the project root with dependencies installed. Commands marked
 | `deno task test:wrangler-types` | Wrangler CLI/workerd/esbuild resolution and the explicit type-generation permission profile | Deno |
 | `deno task test:wrangler-dry-run` | Direct Wrangler CLI/esbuild resolution, dry-run profile, argument forwarding and exit propagation | Deno |
 | `deno task test:toolchain` | Installed-package and TypeScript library discovery primitives, including version-pinned resolution | Deno |
-| `deno task test:toolchain-config` | Toolchain configuration: parsing, validation, resolution, installation, verification and the `.mise.toml` projection, with an injected mise (generator only) | Deno |
+| `deno task test:toolchain-specify` | Explicit toolchain specification: argument validation, environment independence, written specification, and the installation/immutability invariants (generator only) | Deno |
 | `deno task test:contracts` | Contract conformance: canonical fingerprints, refresh determinism, drift detection, permission-profile derivation and verification helpers | Deno |
 | `deno task test:generator` | Generator/product boundary: allowlist copying, task rewrite, determinism, generator-only toolchain exclusion and the product's own validation/contract verification (generator only) | Dependencies; generator repository only |
 | `deno task test:no-node` | Node-exclusion tripwire: rejection, exit/argument propagation, legitimate tools, parent isolation and Node-absent operation | Deno |
@@ -1507,7 +1484,6 @@ The workflow runs on two jobs:
   mise's install and download directories, including the Emscripten SDK, under a
   key derived from `.mise.toml`; the post-step save also captures Emscripten's
   compiler cache), verifies the pinned Deno/CMake/Ninja/Emscripten versions,
-  checks the declared toolchain with `deno task toolchain:prepare -- --check`,
   runs `scripts/resolve-python.sh` for the same interpreter the build will use,
   and provisions the toolchain dependency domain with
   `deno task toolchain:install -- --allow-download` into the checkout's own
@@ -1515,7 +1491,7 @@ The workflow runs on two jobs:
   project root, which is how a temporary copy reuses the generator's tree). It then runs formatting, linting,
   both typechecks, the Node dependency-boundary check and tests, Worker runtime
   tests, toolchain discovery and contract conformance tests, the guarded
-  generator-only suites (`test:toolchain-config`, `test:generator`,
+  generator-only suites (`test:toolchain-specify`, `test:generator`,
   `test:provenance`), and the
   Vite, Wrangler, Node-exclusion, provenance-reader, output-boundary and
   CI-workflow suites. The strict contract gate is the
@@ -1536,8 +1512,8 @@ The workflow runs on two jobs:
   not shipped to products) runs on the same triggers, on the platform the
   contract is recorded for. It installs the same pinned toolchain through mise
   (the only installation mechanism), proves `EMSDK` is present and exported,
-  provisions the toolchain dependency domain, then runs
-  `deno task toolchain:prepare -- --check` (declared toolchain versus installed
+  provisions the toolchain dependency domain, then runs the contract
+  conformance check (`.`mise.toml` specification versus installed,
   toolchain), `deno task check:contracts` against the committed lock, and
   finally **verification by re-derivation**: it hashes the committed
   `toolchain-contracts.json`, runs `deno task contract:refresh` on the

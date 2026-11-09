@@ -150,11 +150,9 @@ export const GENERATOR_ONLY = Object.freeze([
   // `.mise.toml` projection and never re-resolves or re-pins the toolchain used
   // to create it, so the authoritative configuration, the resolver and its
   // tests must not travel with it.
-  "toolchain.toml",
-  "scripts/toolchain-prepare.mjs",
-  "scripts/toolchain-config.test.mjs",
-  "scripts/lib/toolchain/versions.mjs",
-  "scripts/lib/toolchain/resolve.mjs",
+  "scripts/toolchain-specify.mjs",
+  "scripts/toolchain-specify.test.mjs",
+  "scripts/toolchain-invariants.test.mjs",
 ]);
 
 /** Fail closed if the two lists ever overlap. */

@@ -57,7 +57,7 @@ export function pinnedDenoVersion(appRoot) {
 
   fail(
     `${join(appRoot, ".mise.toml")} pins no \`deno\` version; run ` +
-      `\`deno task toolchain:prepare --write\``,
+      `\`deno task toolchain:specify -- --deno <version> …\``,
   );
 }
 

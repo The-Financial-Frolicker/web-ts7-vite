@@ -390,7 +390,7 @@ describe("product job sequencing", () => {
         "product:generate",
         "init:project",
         "test:generator",
-        "toolchain:prepare",
+        "toolchain:specify",
       ]
     ) {
       assert.ok(
