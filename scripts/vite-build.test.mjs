@@ -61,6 +61,34 @@ describe("Deno-owned Vite invocation", () => {
     );
   });
 
+  it("grants every resolved copy of the native bindings", () => {
+    const invocation = resolveViteInvocation(generatorInstallationRoot);
+    const args = buildViteArgs(invocation);
+    const grants = args
+      .filter((argument) => argument.startsWith("--allow-ffi="))
+      .map((argument) => argument.slice("--allow-ffi=".length));
+
+    assert.deepEqual(grants, invocation.ffi);
+    assert.ok(grants.includes(invocation.rolldown), grants.join(", "));
+    assert.ok(grants.includes(invocation.lightningcss), grants.join(", "));
+
+    // The Cloudflare plugin resolves its own Vite peer, which loads that
+    // installation's copies of the same two binding packages. Granting only the
+    // view's copies fails the build with "Requires ffi access to ...", so this
+    // asserts the plugin installation contributes both.
+    const pluginInstallation = Deno.realPathSync(
+      path.join(generatorInstallationRoot, "plugin-installation"),
+    );
+    const fromPlugin = grants.filter((grant) =>
+      grant.startsWith(`${pluginInstallation}/`)
+    );
+    assert.equal(
+      fromPlugin.length,
+      2,
+      `the plugin installation's two bindings must be granted: ${grants}`,
+    );
+  });
+
   it("keeps the restricted local profile as the default", () => {
     const invocation = resolveViteInvocation(generatorInstallationRoot);
     const args = buildViteArgs(invocation);

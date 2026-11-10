@@ -131,6 +131,26 @@ describe("Deno-owned Vite server launcher", () => {
     );
   });
 
+  it("grants the plugin installation's copies of the native bindings", () => {
+    const invocation = resolveViteServerInvocation(
+      generatorInstallationRoot,
+      projectRoot,
+    );
+    const args = buildViteServerArgs(invocation, "dev", SERVER_PORTS.dev);
+    const grants = args
+      .filter((argument) => argument.startsWith("--allow-ffi="))
+      .map((argument) => argument.slice("--allow-ffi=".length));
+
+    // Development and preview load the Cloudflare plugin too, so the server
+    // profile declares exactly the bindings the resolution resolved — including
+    // the plugin installation's own copies — and no fewer.
+    assert.deepEqual(grants, invocation.ffi);
+    assert.ok(
+      invocation.ffi.length > 2,
+      `the plugin installation must contribute its copies: ${invocation.ffi}`,
+    );
+  });
+
   it("grants every path-scoped permission on a resolved real path", () => {
     const invocation = resolveViteServerInvocation(
       generatorInstallationRoot,

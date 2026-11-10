@@ -121,6 +121,17 @@ export const GENERATOR_SUBROOT = "generator";
  * certificate that records what was installed.
  */
 export const GENERATOR_TOOLCHAIN = "toolchain";
+/**
+ * Sibling of the view that exposes the installation providing the Cloudflare
+ * plugin.
+ *
+ * The plugin resolves its own Vite peer, and that peer resolves the plugin
+ * installation's copies of the native bindings. A consumer that must declare
+ * those paths can only do so through the view, so the view carries one symlink
+ * to the installation. It is resolution infrastructure: no identity covers it,
+ * because the installation itself is already certified by content.
+ */
+export const PLUGIN_INSTALLATION_LINK = "plugin-installation";
 export const GENERATOR_STAGING_PREFIX = ".staging-";
 export const GENERATOR_PREVIOUS = ".previous";
 export const APPLICATION_SUBROOT = "application";

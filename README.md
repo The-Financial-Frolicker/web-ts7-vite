@@ -133,22 +133,34 @@ claim that the application needs Node.
 
 Vite runs under one of two named permission profiles. `local` is the default and
 the only profile a developer machine uses: read, write, env and sys, plus
-path-scoped FFI for the Rolldown and lightningcss bindings, and no run or net
-permission. `ci-runner` grants `--allow-all` to the separate Vite child process
-only: an ephemeral GitHub-hosted runner is trusted CI code, and Deno's sandbox
-currently refuses Vite's Linux platform detection when it probes special procfs
-paths such as `/proc/sys/fs/binfmt_misc/WSLInterop` under scoped permissions
+path-scoped FFI for **each resolved copy** of the Rolldown and lightningcss
+bindings, and no run or net permission. Two copies are resolved, not one: the
+view's bindings come from the certified Vite installation, and the Cloudflare
+plugin — which is resolved from its own mise installation — resolves its own Vite
+peer and therefore that installation's copies of the same two binding packages.
+Both are declared, by resolved path, and nothing else is; without them the build
+fails with `Requires ffi access to ...`. An ordinary `deno task build` therefore
+works with the default profile and no environment override.
+
+`ci-runner` grants `--allow-all` to the separate Vite child process only: an
+ephemeral GitHub-hosted runner is trusted CI code, and Deno's sandbox currently
+refuses Vite's Linux platform detection when it probes special procfs paths such
+as `/proc/sys/fs/binfmt_misc/WSLInterop` under scoped permissions
 ([denoland/deno#37062](https://github.com/denoland/deno/issues/37062)), failing
-the build with `NotCapable`. The launcher invocation in
-`scripts/build.sh` stays read-only in both cases, and the profile is always
-named explicitly — `scripts/ci.sh` sets `VITE_PERMISSION_PROFILE=ci-runner` for
-both builds it performs in its throwaway copy (the initial build and the rebuild
-inside `deploy:dry-run`), and nothing infers a profile from `CI` or any other
-ambient variable. Both profiles are recorded in the permission contract, so
-changing either one changes the launcher-permissions fingerprint and requires a
-refresh and review. The broader profile is a temporary
-workaround: remove it once the upstream issue is fixed and the build passes with
-the restricted local profile.
+the build with `NotCapable`. That is a read-path restriction, not a native-binding
+one. The launcher invocation in `scripts/build.sh` stays read-only in both cases,
+and the profile is always named explicitly — `scripts/ci.sh` sets
+`VITE_PERMISSION_PROFILE=ci-runner` for both builds it performs in its throwaway
+copy (the initial build and the rebuild inside `deploy:dry-run`), and nothing
+infers a profile from `CI` or any other ambient variable. Both profiles are
+recorded in the permission contract, so changing either one changes the
+launcher-permissions fingerprint and requires a refresh and review. The broader
+profile is a temporary workaround: remove it once the upstream issue is fixed and
+the build passes with the restricted local profile.
+
+The two profiles are equivalent where it matters: on the same tree, the default
+local profile and the explicit CI profile produce byte-identical `dist` output
+from the same certified toolchain.
 
 TypeScript is different in kind. Its semantic checker is a **native Go
 executable**; the `tsc` npm entry point is a launcher that resolves that
@@ -440,7 +452,12 @@ owning project root with `GENERATOR_PROJECT_ROOT`), staged in a sibling
 directory inside the same subtree and swapped into place, with `toolchain.json`
 written last as its readiness record. The view is one symlink per package into
 the mise installation — resolution infrastructure for Deno's Node-API loader,
-never a package installation. Anything that resolves outside `generator/` is
+never a package installation. It carries one further link,
+`plugin-installation`, naming the mise installation that provides the Cloudflare
+plugin: that installation's Vite peer resolves its own copies of the native
+bindings, and exposing the installation through the view is what lets the Vite
+launcher declare those grants with the read access the view already implies.
+Anything that resolves outside `generator/` is
 rejected before the view touches the filesystem, and a link that points outside
 the certified closure is refused rather than certified.
 

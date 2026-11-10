@@ -84,6 +84,16 @@ export function describePermissionProfiles(
     runner: join(generatorInstallationRoot, "scripts", "vite-runner.mjs"),
     rolldown: "<rolldown>",
     lightningcss: "<lightningcss>",
+    // The plugin's own installation resolves its own copies of the same two
+    // native bindings, so the build and server profiles declare two further
+    // path-scoped grants. The probe imports Vite only, so it keeps just the
+    // view's two.
+    ffi: [
+      "<rolldown>",
+      "<lightningcss>",
+      "<plugin-rolldown>",
+      "<plugin-lightningcss>",
+    ],
   };
 
   const wranglerTypesArgs = buildWranglerTypesArgs({
@@ -142,6 +152,12 @@ export function describePermissionProfiles(
             appRoot: root,
             rolldown: "<rolldown>",
             lightningcss: "<lightningcss>",
+            ffi: [
+              "<rolldown>",
+              "<lightningcss>",
+              "<plugin-rolldown>",
+              "<plugin-lightningcss>",
+            ],
             workerd: "<workerd>",
           },
           mode,

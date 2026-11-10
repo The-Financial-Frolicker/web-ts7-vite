@@ -618,6 +618,9 @@ describe("declared permission profiles", () => {
   it("records every launcher, including the CI and edge profiles", () => {
     const profiles = describePermissionProfiles(root);
 
+    // The build loads the view's copies of the two native bindings *and* the
+    // copies the Cloudflare plugin's own installation resolves, so four
+    // path-scoped grants are declared and nothing else.
     assert.deepEqual(profiles["vite-build"], [
       "--allow-read",
       "--allow-write",
@@ -625,6 +628,8 @@ describe("declared permission profiles", () => {
       "--allow-sys",
       "--allow-ffi=<rolldown>",
       "--allow-ffi=<lightningcss>",
+      "--allow-ffi=<plugin-rolldown>",
+      "--allow-ffi=<plugin-lightningcss>",
     ]);
     assert.deepEqual(profiles["vite-build-ci-runner"], ["--allow-all"]);
     assert.ok(profiles["wrangler-types"].length > 0);

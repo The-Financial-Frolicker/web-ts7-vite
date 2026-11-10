@@ -30,6 +30,7 @@ import {
   generatorProjectRoot,
   generatorStagingPath,
   generatorSubrootPath,
+  PLUGIN_INSTALLATION_LINK,
   TOOLCHAIN_RECORD,
 } from "./lib/toolchain/runtime.mjs";
 import {
@@ -41,6 +42,7 @@ import {
   createResolutionView,
   implementationDigest,
   miseDataDirectory,
+  miseNpmInstallation,
   nativeBinding,
   toolClosure,
   unionClosure,
@@ -210,6 +212,23 @@ export function validateView(viewRoot, packages, bindings) {
     } catch (error) {
       fail(`native binding for ${binding.owner} is missing: ${error.message}`);
     }
+  }
+
+  // The installation that provides the Cloudflare plugin must be reachable
+  // through the view, and must be the same mise-owned tree as everything else.
+  let pluginInstallation;
+  try {
+    pluginInstallation = Deno.realPathSync(
+      join(viewRoot, PLUGIN_INSTALLATION_LINK),
+    );
+  } catch (error) {
+    fail(`the view does not expose the plugin installation: ${error.message}`);
+  }
+  if (!pluginInstallation.startsWith(`${data}/`)) {
+    fail(
+      `the plugin installation resolves outside the mise installation ` +
+        `(${pluginInstallation})`,
+    );
   }
 }
 
@@ -461,6 +480,18 @@ export async function main(
     for (const file of RUNNER_FILES) {
       copyTree(join(runnerDirectory, file), join(staging, "scripts", file));
     }
+    // The Cloudflare plugin resolves its own Vite peer, so its installation
+    // carries its own copies of the native bindings. Exposing that installation
+    // through the view is what lets a launcher declare those grants with the read
+    // access the view already implies.
+    Deno.symlinkSync(
+      miseNpmInstallation(
+        "@cloudflare/vite-plugin",
+        declared["@cloudflare/vite-plugin"],
+        env,
+      ),
+      join(staging, PLUGIN_INSTALLATION_LINK),
+    );
 
     // 4. Validate before recording anything.
     validateView(staging, packages, bindings);

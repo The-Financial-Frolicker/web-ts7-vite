@@ -27,7 +27,7 @@
 
 import { join } from "./lib/path.mjs";
 import { runtimePolicy } from "./lib/toolchain/runtime.mjs";
-import { resolveViteInvocation } from "./vite-build.mjs";
+import { ffiGrants, resolveViteInvocation } from "./vite-build.mjs";
 import { resolveWorkerd } from "./wrangler-types.mjs";
 
 /** Modes this launcher accepts, and the runner mode each one selects. */
@@ -95,6 +95,9 @@ export function resolveViteServerInvocation(
     appRoot: Deno.realPathSync(appRoot),
     rolldown: vite.rolldown,
     lightningcss: vite.lightningcss,
+    // The plugin's own installation may resolve further copies of the same two
+    // native bindings; dev and preview load the plugin too, so they are granted.
+    ffi: vite.ffi,
     workerd: resolveWorkerd(generatorInstallationRoot),
   };
 }
@@ -117,8 +120,7 @@ export function buildViteServerArgs(invocation, mode, port) {
     // Loopback listener plus the wildcard bind Vite's port probe performs.
     `--allow-net=127.0.0.1,localhost,0.0.0.0:${port},[::]:${port}`,
     `--allow-run=${invocation.workerd}`,
-    `--allow-ffi=${invocation.rolldown}`,
-    `--allow-ffi=${invocation.lightningcss}`,
+    ...ffiGrants(invocation).map((binding) => `--allow-ffi=${binding}`),
     "--cached-only",
     "--no-lock",
     invocation.runner,

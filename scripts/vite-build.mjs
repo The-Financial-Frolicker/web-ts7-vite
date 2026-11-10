@@ -9,8 +9,8 @@
  *
  *   local (default)
  *       The profile every developer machine uses: read, write, env and sys,
- *       plus path-scoped FFI access to the two native bindings. It receives no
- *       run or net permission.
+ *       plus path-scoped FFI access to each resolved copy of the two native
+ *       bindings. It receives no run or net permission.
  *
  *   ci-runner
  *       `--allow-all`, for the throwaway build on an ephemeral trusted CI
@@ -28,7 +28,10 @@
  */
 
 import { dirname, join } from "./lib/path.mjs";
-import { runtimePolicy } from "./lib/toolchain/runtime.mjs";
+import {
+  PLUGIN_INSTALLATION_LINK,
+  runtimePolicy,
+} from "./lib/toolchain/runtime.mjs";
 
 /** Named permission profiles for the separate Vite process. */
 export const VITE_PERMISSION_PROFILES = Object.freeze(["local", "ci-runner"]);
@@ -58,22 +61,34 @@ function readJson(file, label) {
   }
 }
 
+/**
+ * Package-store layouts that can sit beside `node_modules` in an installation.
+ *
+ * Deno's store is `.deno`; mise's npm backend materialises its installations in a
+ * `.mise` store. Both are read-only inputs to resolution, so this is the only
+ * place either name is stated.
+ */
+const PACKAGE_STORES = Object.freeze([".deno", ".mise"]);
+
 /** Return installed package candidates without relying on store hashes. */
 function packageCandidates(root, name) {
   const candidates = [
     join(root, "node_modules", name, "package.json"),
   ];
-  const store = join(root, "node_modules", ".deno");
 
-  try {
-    for (const entry of Deno.readDirSync(store)) {
-      if (!entry.isDirectory) continue;
-      candidates.push(
-        join(store, entry.name, "node_modules", name, "package.json"),
-      );
+  for (const storeName of PACKAGE_STORES) {
+    const store = join(root, "node_modules", storeName);
+
+    try {
+      for (const entry of Deno.readDirSync(store)) {
+        if (!entry.isDirectory) continue;
+        candidates.push(
+          join(store, entry.name, "node_modules", name, "package.json"),
+        );
+      }
+    } catch {
+      // This layout is not in use here; the flat package above may still exist.
     }
-  } catch {
-    // A non-Deno layout may still provide the flat package above.
   }
 
   return candidates;
@@ -190,7 +205,40 @@ function resolveBinding(root, packageName) {
   }
 }
 
-/** Resolve the Vite CLI and both required native bindings. */
+/**
+ * Native bindings that the Vite plugin's own installation carries.
+ *
+ * The Cloudflare plugin is resolved from its own mise installation, and its
+ * `vite` peer resolves that installation's copies of Rolldown and Lightning CSS.
+ * A build therefore loads those physical copies as well as the ones the view
+ * resolves, and both must be granted. The installation is reached through the
+ * link the toolchain installer leaves in the view, so this needs no read access
+ * beyond what the view already implies; a view without one (an older
+ * installation, or a single-copy layout) simply contributes nothing.
+ */
+function installationBindings(root, suffix) {
+  const installation = join(root, PLUGIN_INSTALLATION_LINK);
+
+  const bindings = [];
+  for (
+    const name of [`@rolldown/binding-${suffix}`, `lightningcss-${suffix}`]
+  ) {
+    try {
+      bindings.push(resolveBinding(installation, name));
+    } catch {
+      // This installation does not carry that binding; there is none to grant.
+    }
+  }
+  return bindings;
+}
+
+/**
+ * Resolve the Vite CLI and every native binding the build child may load.
+ *
+ * `ffi` is the complete, deduplicated grant list: the copies the view resolves
+ * first, then any copy the plugin's own installation resolves. Nothing outside
+ * these resolved files is granted.
+ */
 export function resolveViteInvocation(root = Deno.cwd()) {
   const suffix = platformSuffix();
   const rolldown = resolveBinding(
@@ -202,6 +250,11 @@ export function resolveViteInvocation(root = Deno.cwd()) {
     `lightningcss-${suffix}`,
   );
 
+  const ffi = [rolldown, lightningcss];
+  for (const binding of installationBindings(root, suffix)) {
+    if (!ffi.includes(binding)) ffi.push(binding);
+  }
+
   return {
     viteBin: resolveViteBin(root),
     // The toolchain-owned runner is what the build child executes: it owns the
@@ -209,7 +262,13 @@ export function resolveViteInvocation(root = Deno.cwd()) {
     runner: Deno.realPathSync(join(root, "scripts", "vite-runner.mjs")),
     rolldown,
     lightningcss,
+    ffi,
   };
+}
+
+/** Every resolved native binding the child may load, in declaration order. */
+export function ffiGrants(invocation) {
+  return invocation.ffi ?? [invocation.rolldown, invocation.lightningcss];
 }
 
 /**
@@ -226,8 +285,9 @@ function permissionFlags(profile, invocation) {
         "--allow-write",
         "--allow-env",
         "--allow-sys",
-        `--allow-ffi=${invocation.rolldown}`,
-        `--allow-ffi=${invocation.lightningcss}`,
+        // One grant per resolved copy: the view's binding and any copy the
+        // plugin's own installation resolves. Nothing else is loadable.
+        ...ffiGrants(invocation).map((binding) => `--allow-ffi=${binding}`),
       ];
     case "ci-runner":
       return ["--allow-all"];
@@ -274,8 +334,8 @@ export function describeViteProfile(profile, invocation) {
   switch (profile) {
     case "local":
       return "Vite build (profile local): read/write/env/sys + " +
-        `FFI=${invocation.rolldown}, FFI=${invocation.lightningcss}; ` +
-        "no run or net permission";
+        ffiGrants(invocation).map((binding) => `FFI=${binding}`).join(", ") +
+        "; no run or net permission";
     case "ci-runner":
       return "Vite build (profile ci-runner): --allow-all for this separate " +
         "child process only; ephemeral CI runner, local profile unchanged";

@@ -1,7 +1,7 @@
 {
   "contracts": {
-    "launcher-permissions@sha256:03d7606763c8412dbdc16029e3a6a59d2c08fcd0f1a14e40ee92b750a65666a2": {
-      "fingerprint": "sha256:03d7606763c8412dbdc16029e3a6a59d2c08fcd0f1a14e40ee92b750a65666a2",
+    "launcher-permissions@sha256:9071bac3725c1bcebe49c3d597e14d3469b9a9c0b9226a27ef3e06388aa8ff22": {
+      "fingerprint": "sha256:9071bac3725c1bcebe49c3d597e14d3469b9a9c0b9226a27ef3e06388aa8ff22",
       "fingerprintInputs": {
         "launchers": {
           "edge-verify": [
@@ -16,7 +16,9 @@
             "--allow-env",
             "--allow-sys",
             "--allow-ffi=<rolldown>",
-            "--allow-ffi=<lightningcss>"
+            "--allow-ffi=<lightningcss>",
+            "--allow-ffi=<plugin-rolldown>",
+            "--allow-ffi=<plugin-lightningcss>"
           ],
           "vite-build-ci-runner": [
             "--allow-all"
@@ -29,7 +31,9 @@
             "--allow-net=127.0.0.1,localhost,0.0.0.0:5173,[::]:5173",
             "--allow-run=<workerd>",
             "--allow-ffi=<rolldown>",
-            "--allow-ffi=<lightningcss>"
+            "--allow-ffi=<lightningcss>",
+            "--allow-ffi=<plugin-rolldown>",
+            "--allow-ffi=<plugin-lightningcss>"
           ],
           "vite-preview": [
             "--allow-read",
@@ -39,7 +43,9 @@
             "--allow-net=127.0.0.1,localhost,0.0.0.0:4173,[::]:4173",
             "--allow-run=<workerd>",
             "--allow-ffi=<rolldown>",
-            "--allow-ffi=<lightningcss>"
+            "--allow-ffi=<lightningcss>",
+            "--allow-ffi=<plugin-rolldown>",
+            "--allow-ffi=<plugin-lightningcss>"
           ],
           "vite-probe": [
             "--allow-read",
@@ -103,7 +109,9 @@
             "--allow-env",
             "--allow-sys",
             "--allow-ffi=<rolldown>",
-            "--allow-ffi=<lightningcss>"
+            "--allow-ffi=<lightningcss>",
+            "--allow-ffi=<plugin-rolldown>",
+            "--allow-ffi=<plugin-lightningcss>"
           ]
         },
         "launcher.vite-build-ci-runner": {
@@ -126,7 +134,9 @@
             "--allow-net=127.0.0.1,localhost,0.0.0.0:5173,[::]:5173",
             "--allow-run=<workerd>",
             "--allow-ffi=<rolldown>",
-            "--allow-ffi=<lightningcss>"
+            "--allow-ffi=<lightningcss>",
+            "--allow-ffi=<plugin-rolldown>",
+            "--allow-ffi=<plugin-lightningcss>"
           ]
         },
         "launcher.vite-preview": {
@@ -141,7 +151,9 @@
             "--allow-net=127.0.0.1,localhost,0.0.0.0:4173,[::]:4173",
             "--allow-run=<workerd>",
             "--allow-ffi=<rolldown>",
-            "--allow-ffi=<lightningcss>"
+            "--allow-ffi=<lightningcss>",
+            "--allow-ffi=<plugin-rolldown>",
+            "--allow-ffi=<plugin-lightningcss>"
           ]
         },
         "launcher.vite-probe": {
