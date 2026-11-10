@@ -386,7 +386,13 @@ describe("generator regression suite boundary", () => {
     const productPkg = readJson(product, "package.json");
 
     assert.equal("test:generator" in generatorDeno.tasks, true);
-    assert.match(generatorDeno.tasks.validate, /deno task test:generator/);
+    // The regression suite lives in the toolchain qualification phase, which is
+    // the first half of the generator's `validate`.
+    assert.match(
+      generatorDeno.tasks["toolchain:qualify"],
+      /deno task test:generator/,
+    );
+    assert.match(generatorDeno.tasks.validate, /deno task toolchain:qualify/);
 
     assert.equal("test:generator" in productDeno.tasks, false);
     assert.equal("test:generator" in productPkg.scripts, false);
@@ -576,7 +582,15 @@ describe("CI lifecycle: project initialisation", () => {
     "task check:contracts",
     "task test:wasm",
     "task test:wasm:published",
+  ];
+
+  /** Steps that belong to the deployment phase and must not run in the build. */
+  const deploymentStages = [
     "task deploy:dry-run",
+    "task deploy:artefact",
+    "task deploy:artefact:dry-run",
+    "task test:deployment",
+    "task deployment:install",
   ];
 
   it("initialises the throwaway copy in the generator build stage", () => {
@@ -595,6 +609,15 @@ describe("CI lifecycle: project initialisation", () => {
     );
     for (const stage of requiredStages) {
       assert.equal(calls.includes(stage), true, `missing stage ${stage}`);
+    }
+    // The build stage is the toolchain phase: it must not reach into the
+    // deployment closure.
+    for (const stage of deploymentStages) {
+      assert.equal(
+        calls.includes(stage),
+        false,
+        `the build stage must not run ${stage}: ${calls.join(", ")}`,
+      );
     }
     // The strict gate is the final step, so every build check above runs first.
     assert.equal(
@@ -653,9 +676,11 @@ describe("CI lifecycle: project initialisation", () => {
     "test:generator",
     "test:vite",
     "test:wrangler-types",
-    "test:wrangler-dry-run",
     "test:no-node",
   ];
+
+  /** Suites that resolve the deployment installation; never the static stage. */
+  const deploymentSuites = ["test:wrangler-dry-run", "test:deployment"];
 
   it("runs every generator static suite before the contract gate", () => {
     const stub = makeTempDir("s95-ci-static-");
@@ -670,6 +695,13 @@ describe("CI lifecycle: project initialisation", () => {
         calls.includes(`task ${task}`),
         true,
         `static suite ${task} did not run: ${calls.join(", ")}`,
+      );
+    }
+    for (const suite of deploymentSuites) {
+      assert.equal(
+        calls.includes(`task ${suite}`),
+        false,
+        `the toolchain phase must not run ${suite}: ${calls.join(", ")}`,
       );
     }
     // Exactly one gate, and it is last: a failing bootstrap verdict can no
@@ -707,7 +739,6 @@ describe("CI lifecycle: project initialisation", () => {
         "test:contracts",
         "test:vite",
         "test:wrangler-types",
-        "test:wrangler-dry-run",
         "test:no-node",
       ]
     ) {

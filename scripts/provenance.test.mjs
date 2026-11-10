@@ -97,40 +97,58 @@ function makeRepo(
 }
 
 async function makeToolchain({ corrupt = false } = {}) {
+  // A view over a package store: schema 2 observes the packages the view
+  // resolves, so the fixture is a symlink into a real package directory.
   const root = makeDir("s7-tc-");
-  const nodeModules = path.join(root, "node_modules");
-  mkdirSync(path.join(nodeModules, "vite"), { recursive: true });
+  const store = makeDir("s7-store-");
+  const pkg = path.join(store, "vite");
+  mkdirSync(pkg, { recursive: true });
   writeFileSync(
-    path.join(nodeModules, "vite", "package.json"),
-    '{"name":"vite"}\n',
+    path.join(pkg, "package.json"),
+    '{"name":"vite","version":"8.3.5"}\n',
   );
-  const tree = await treeDigest(nodeModules);
-  const digest = tree.digest;
-  const implementation = tree.implementationDigest;
+  writeFileSync(path.join(pkg, "index.js"), "export default 1;\n");
+
+  const nodeModules = path.join(root, "node_modules");
+  mkdirSync(nodeModules, { recursive: true });
+  Deno.symlinkSync(pkg, path.join(nodeModules, "vite"));
+
+  const { implementationDigest, packagesFromView } = await import(
+    new URL("./lib/toolchain/mise.mjs", import.meta.url).href
+  );
+  const observed = await implementationDigest(packagesFromView(nodeModules));
+  const implementation = corrupt ? "d".repeat(64) : observed.digest;
+
   writeFileSync(
     path.join(root, "toolchain.json"),
     JSON.stringify(
       {
-        schema: 1,
+        schema: 2,
+        role: "toolchain",
+        owner: "mise",
         deno: "2.9.8",
         spec: "a".repeat(64),
         resolution: "b".repeat(64),
-        materialisation: corrupt ? "c".repeat(64) : digest,
-        implementation: corrupt ? "d".repeat(64) : implementation,
-        packages: { vite: "8.3.5" },
+        implementation,
+        resolved: [{ name: "vite", version: "8.3.5" }],
       },
       null,
       2,
     ),
   );
-  return { root, digest, implementation };
+
+  return {
+    root,
+    digest: observed.digest,
+    implementation,
+    resolution: "b".repeat(64),
+  };
 }
 
 const VALID = {
   repository: GENERATOR_REPOSITORY,
   ref: "toolchain-2026.11.1",
   sha: "a".repeat(40),
-  materialisation: "b".repeat(64),
   implementation: "c".repeat(64),
 };
 
@@ -154,7 +172,7 @@ describe("provenance metadata schema", () => {
       /40-character/,
     );
     assert.throws(
-      () => validateSource({ ...VALID, materialisation: "b".repeat(63) }),
+      () => validateSource({ ...VALID, implementation: "b".repeat(63) }),
       /64-character/,
     );
   });
@@ -220,10 +238,14 @@ describe("release prerequisites", () => {
 
 describe("installed toolchain identity", () => {
   it("reads a record and takes no tree digest", async () => {
-    const { root, digest, implementation } = await makeToolchain();
+    const { root, implementation, resolution } = await makeToolchain();
     const identity = requireInstalledIdentity(root);
-    assert.equal(identity.materialisation, digest);
     assert.equal(identity.implementation, implementation);
+    assert.equal(identity.resolution, resolution);
+    // Schema 2 records the implementation content and the view structure; there
+    // is no copied tree, so there is no materialisation digest to read.
+    // No copied tree exists, so the record has no materialisation field.
+    assert.equal(identity.materialisation, undefined);
     // The identity is read, never re-observed: the release path injects no
     // digest function at all (R1 and R2 removed).
     assert.equal(requireInstalledIdentity.length, 1);
@@ -236,12 +258,12 @@ describe("installed toolchain identity", () => {
     );
   });
 
-  it("refuses a record without a materialisation digest", async () => {
+  it("refuses a record without a resolution identity", async () => {
     const root = makeDir("s7-bad-");
-    writeFileSync(path.join(root, "toolchain.json"), '{"schema":1}');
+    writeFileSync(path.join(root, "toolchain.json"), '{"schema":2}');
     await rejects(
       () => requireInstalledIdentity(root),
-      /records no materialisation/,
+      /records no resolution identity/,
     );
   });
 
@@ -250,8 +272,9 @@ describe("installed toolchain identity", () => {
     writeFileSync(
       path.join(root, "toolchain.json"),
       JSON.stringify({
-        schema: 1,
-        materialisation: "c".repeat(64),
+        schema: 2,
+        spec: "c".repeat(64),
+        resolution: "c".repeat(64),
         implementation: "short",
       }),
     );
@@ -270,8 +293,10 @@ describe("installed toolchain identity", () => {
     // "Digest comparison responsibilities").
     const { root } = await makeToolchain({ corrupt: true });
     const identity = requireInstalledIdentity(root);
-    assert.match(identity.materialisation, /^[0-9a-f]{64}$/);
+    assert.match(identity.resolution, /^[0-9a-f]{64}$/);
     assert.match(identity.implementation, /^[0-9a-f]{64}$/);
+    // No copied tree exists, so the record has no materialisation field.
+    assert.equal(identity.materialisation, undefined);
   });
 });
 
@@ -292,10 +317,18 @@ describe("product CI gate", () => {
     mkdirSync(path.join(root, "scripts", "lib", "toolchain"), {
       recursive: true,
     });
-    Deno.copyFileSync(
-      path.join(Deno.cwd(), "scripts/lib/toolchain/tree-digest.mjs"),
-      path.join(root, "scripts/lib/toolchain/tree-digest.mjs"),
-    );
+    // The verifier imports the generator's own digest implementation. It lives
+    // in `mise.mjs` (implementation identity is a digest of the resolved
+    // packages), with the filesystem and path helpers it imports beside it.
+    for (const relative of ["mise.mjs", "../fs.mjs", "../path.mjs"]) {
+      const source = path.join(Deno.cwd(), "scripts/lib/toolchain", relative);
+      const target = path.join(root, "scripts/lib/toolchain", relative);
+      Deno.copyFileSync(
+        source,
+        Deno.realPathSync(path.dirname(target)) + "/" +
+          path.basename(target),
+      );
+    }
     return root;
   }
 
@@ -310,21 +343,24 @@ describe("product CI gate", () => {
     };
   }
 
-  const recordFor = (digest, implementation) => ({
+  const recordFor = (implementation) => ({
     ...VALID,
-    materialisation: digest,
     implementation,
   });
 
   it("reads a valid record as shell-evaluable assignments", async () => {
-    const product = makeProduct(recordFor("b".repeat(64), "c".repeat(64)));
+    const product = makeProduct(recordFor("c".repeat(64)));
     const { io, lines } = capture();
     assert.equal(await sourceMain(["read", "--root", product], io), 0);
-    assert.ok(lines.includes(`TC_SHA=${VALID.sha}`), lines.join("\n"));
-    assert.ok(
-      lines.includes(`TC_MATERIALISATION=${"b".repeat(64)}`),
-      lines.join("\n"),
-    );
+    // The consumer interface is the generator identity triad. The published
+    // implementation is verified against the installed toolchain by `verify`,
+    // and the machine-specific resolution view is never published, so no
+    // materialisation assignment exists.
+    assert.deepEqual(lines, [
+      `TC_REPOSITORY=${VALID.repository}`,
+      `TC_REF=${VALID.ref}`,
+      `TC_SHA=${VALID.sha}`,
+    ]);
   });
 
   it("fails on missing, malformed or foreign metadata", async () => {
@@ -335,7 +371,7 @@ describe("product CI gate", () => {
         [
           "foreign",
           {
-            ...recordFor("b".repeat(64), "c".repeat(64)),
+            ...recordFor("c".repeat(64)),
             repository: "evil/fork",
           },
           /approved generator/,
@@ -351,7 +387,7 @@ describe("product CI gate", () => {
 
   it("verifies an installation that matches the record, and fails otherwise", async () => {
     const generator = generatorCheckout();
-    const { root: toolchain, digest, implementation } = await makeToolchain();
+    const { root: toolchain, implementation } = await makeToolchain();
 
     const ok = capture();
     assert.equal(
@@ -359,7 +395,7 @@ describe("product CI gate", () => {
         [
           "verify",
           "--root",
-          makeProduct(recordFor(digest, implementation)),
+          makeProduct(recordFor(implementation)),
           "--generator",
           generator,
           "--generator-root",
@@ -381,7 +417,7 @@ describe("product CI gate", () => {
         [
           "verify",
           "--root",
-          makeProduct(recordFor(digest, "d".repeat(64))),
+          makeProduct(recordFor("d".repeat(64))),
           "--generator",
           generator,
           "--generator-root",
@@ -399,7 +435,7 @@ describe("product CI gate", () => {
         [
           "verify",
           "--root",
-          makeProduct(recordFor(digest, implementation)),
+          makeProduct(recordFor(implementation)),
           "--generator",
           generator,
           "--generator-root",
@@ -527,7 +563,7 @@ describe("product CI gate", () => {
       );
       assert.ok(
         before.digest !== after.digest,
-        "the materialisation identity must move",
+        "the published identity must move",
       );
     });
 
@@ -946,7 +982,14 @@ describe("release provenance on the reference workstation", () => {
     );
     const sha = git(repo, "rev-parse", "HEAD").stdout;
     assert.equal(record.sha, sha);
-    assert.equal(record.materialisation, identity.materialisation);
+    // Both product fields carry the portable implementation identity; the
+    // machine-specific view digest is never published.
+    assert.equal(record.implementation, identity.implementation);
+    assert.equal(record.materialisation, undefined);
+    assert.ok(
+      identity.resolution !== identity.implementation,
+      "the machine-specific view digest is separate from the content identity",
+    );
     assert.equal(record.implementation, identity.implementation);
 
     // Byte-identical to the metadata published before R1/R2 were removed: the
@@ -959,7 +1002,6 @@ describe("release provenance on the reference workstation", () => {
             repository: GENERATOR_REPOSITORY,
             ref: "toolchain-2026.11.1",
             sha,
-            materialisation: identity.materialisation,
             implementation: identity.implementation,
           },
           null,

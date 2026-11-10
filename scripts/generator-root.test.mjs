@@ -24,10 +24,10 @@ import os from "./lib/os.mjs";
 import { join } from "./lib/path.mjs";
 import { after, describe, it } from "./lib/test.mjs";
 import {
-  GENERATOR_DEPENDENCIES,
   GENERATOR_PREVIOUS,
   GENERATOR_STAGING_PREFIX,
   GENERATOR_SUBROOT,
+  GENERATOR_TOOLCHAIN,
   generatorInstallationRoot,
   generatorInstallationRootPath,
   generatorPreviousPath,
@@ -84,11 +84,11 @@ function expectRejected(fn, label) {
 }
 
 describe("generator-owned installation roots", () => {
-  it("defaults to <project root>/generator/dependencies", () => {
+  it("defaults to <project root>/generator/toolchain", () => {
     const root = makeProject();
     assert.equal(
       generatorInstallationRootPath(root, fakeEnv()),
-      join(root, GENERATOR_SUBROOT, GENERATOR_DEPENDENCIES),
+      join(root, GENERATOR_SUBROOT, GENERATOR_TOOLCHAIN),
     );
     assert.equal(
       generatorSubrootPath(root, fakeEnv()),
@@ -107,7 +107,7 @@ describe("generator-owned installation roots", () => {
 
     assert.equal(
       plan.target,
-      join(root, GENERATOR_SUBROOT, GENERATOR_DEPENDENCIES),
+      join(root, GENERATOR_SUBROOT, GENERATOR_TOOLCHAIN),
     );
     assert.equal(
       plan.staging,
@@ -134,7 +134,7 @@ describe("generator-owned installation roots", () => {
     const fromCopy = generatorInstallationRootPath(copy, env);
     assert.equal(
       fromCopy,
-      join(generator, GENERATOR_SUBROOT, GENERATOR_DEPENDENCIES),
+      join(generator, GENERATOR_SUBROOT, GENERATOR_TOOLCHAIN),
     );
     assert.ok(!isContained(fromCopy, copy), "the copy must not own a tree");
     assert.equal(generatorInstallationRootPath(generator, env), fromCopy);
@@ -158,7 +158,7 @@ describe("generator-owned installation roots", () => {
       "outside the project": join(root, "..", "elsewhere", "dependencies"),
       "the application-owned root": join(root, "application", "dependencies"),
       "the subroot itself": join(root, GENERATOR_SUBROOT),
-      "a relative path": "generator/dependencies",
+      "a relative path": "generator/toolchain",
       "an empty path": "",
     };
 
@@ -196,7 +196,7 @@ describe("generator-owned installation roots", () => {
     const outside = makeProject();
     const subroot = join(root, GENERATOR_SUBROOT);
     mkdirSync(subroot, { recursive: true });
-    symlinkSync(outside, join(subroot, GENERATOR_DEPENDENCIES));
+    symlinkSync(outside, join(subroot, GENERATOR_TOOLCHAIN));
 
     expectRejected(
       () => generatorInstallationRootPath(root, fakeEnv()),
@@ -234,7 +234,7 @@ describe("generator-owned installation roots", () => {
     });
     assert.equal(
       plan.target,
-      join(root, GENERATOR_SUBROOT, GENERATOR_DEPENDENCIES),
+      join(root, GENERATOR_SUBROOT, GENERATOR_TOOLCHAIN),
     );
     assert.deepEqual(
       [...Deno.readDirSync(root)].map((entry) => entry.name).sort(),
@@ -265,7 +265,7 @@ describe("generator-owned installation roots", () => {
     const root = makeProject();
     assert.throws(
       () => generatorInstallationRoot(root, fakeEnv()),
-      /generator installation is not installed at .*dependencies/,
+      /generator installation is not installed at .*toolchain/,
     );
   });
 });

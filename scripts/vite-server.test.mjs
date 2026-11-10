@@ -23,11 +23,11 @@ import { buildViteArgs, resolveViteInvocation } from "./vite-build.mjs";
 
 const projectRoot = Deno.cwd();
 // The toolchain is installed outside the application tree; resolution uses it.
-// The generator owns its Deno dependency tree inside its own subroot.
+// The generator owns the mise-backed resolution view inside its own subroot.
 const generatorInstallationRoot = path.join(
   projectRoot,
   "generator",
-  "dependencies",
+  "toolchain",
 );
 
 function fakeEnv(entries = {}) {

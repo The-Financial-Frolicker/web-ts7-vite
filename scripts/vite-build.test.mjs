@@ -24,7 +24,7 @@ const projectRoot = Deno.cwd();
 const generatorInstallationRoot = path.join(
   projectRoot,
   "generator",
-  "dependencies",
+  "toolchain",
 );
 const buildScript = path.join(projectRoot, "scripts", "build.sh");
 const ciScript = path.join(projectRoot, "scripts", "ci.sh");
@@ -214,30 +214,32 @@ describe("Deno-owned Vite invocation", () => {
     assert.doesNotMatch(text, /VITE_PERMISSION_PROFILE=ci-runner/);
   });
 
-  it("selects ci-runner for both CI Vite builds and nothing else", () => {
+  it("selects ci-runner once, for the only Vite build the CI stage performs", () => {
     const script = readFileSync(ciScript, "utf8");
     const dryRun = readFileSync(dryRunScript, "utf8");
 
-    // The CI stage builds twice: the initial build, then the rebuild performed
-    // by deploy:dry-run. Both are Vite invocations and need the same profile.
+    // The CI build stage now builds exactly once. The deployment dry run moved to
+    // the deployment phase, so it is neither a second Vite invocation nor a
+    // reason to select the broader profile there.
     assert.match(script, /VITE_PERMISSION_PROFILE=ci-runner deno task build/);
-    assert.match(
-      script,
-      /VITE_PERMISSION_PROFILE=ci-runner deno task deploy:dry-run/,
-    );
     assert.equal(
       script.match(/VITE_PERMISSION_PROFILE=/g)?.length,
-      2,
-      "the CI profile is selected for the two CI builds only",
+      1,
+      "the CI profile is selected for the build the stage performs",
+    );
+    assert.doesNotMatch(
+      script,
+      /deno task deploy:dry-run|deno task deploy:artefact/,
+      "the build stage must not run a deployment step",
     );
     assert.doesNotMatch(script, /--allow-all/);
 
-    // Keep the second override honest: it exists because the dry-run wrapper
-    // rebuilds the application.
+    // The combined convenience path still rebuilds, which is why a caller may
+    // override its profile; that is a developer path, not the CI stage's.
     assert.match(
       dryRun,
       /^deno task build$/m,
-      "deploy-dry-run.sh must rebuild, which is why CI overrides its profile",
+      "deploy-dry-run.sh must rebuild: it is the combined convenience path",
     );
   });
 

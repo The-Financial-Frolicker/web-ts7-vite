@@ -8,6 +8,7 @@
 
 [tools]
 deno = "2.9.8"
+"npm:@cloudflare/vite-plugin" = "1.66.0"
 "npm:vite" = "8.3.5"
 "npm:wrangler" = "4.156.0"
 emsdk = "6.0.13"

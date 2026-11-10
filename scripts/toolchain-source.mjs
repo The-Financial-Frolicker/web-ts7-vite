@@ -7,9 +7,9 @@
  *   deno run … scripts/toolchain-source.mjs verify --generator DIR [--root DIR]
  *       Require the installed toolchain to be exactly the recorded one:
  *         * the installation's own record exists and is complete;
- *         * its recorded materialisation equals the product's recorded digest;
- *         * the observed tree digest (computed with the generator's own digest
- *           implementation) equals that digest too.
+ *         * its recorded implementation equals the product's recorded digest;
+ *         * the observed implementation digest (computed with the generator's
+ *           own digest implementation) equals that digest too.
  *
  * Nothing here provisions, resolves or installs. It fails closed, so a product
  * workflow can gate every later task on a single successful verification.
@@ -40,14 +40,13 @@ export function read(productRoot, io, argvFormatGitHub) {
   const record = readSource(productRoot);
 
   if (argvFormatGitHub) {
-    // Structured output: exactly these four records, and nothing else, form the
-    // interface later workflow steps consume. Each value is re-checked for line
-    // separators, so no value can terminate a record or start a second one.
+    // Structured output: exactly these three records, and nothing else, form
+    // the interface later workflow steps consume. Each value is re-checked for
+    // line separators, so no value can terminate a record or start a second one.
     const records = [
       ["tc_repository", record.repository],
       ["tc_ref", record.ref],
       ["tc_sha", record.sha],
-      ["tc_materialisation", record.materialisation],
     ];
     const lines = records.map(([key, value]) => {
       if (/[\r\n]/.test(value)) {
@@ -62,7 +61,6 @@ export function read(productRoot, io, argvFormatGitHub) {
   io.log(`TC_REPOSITORY=${record.repository}`);
   io.log(`TC_REF=${record.ref}`);
   io.log(`TC_SHA=${record.sha}`);
-  io.log(`TC_MATERIALISATION=${record.materialisation}`);
 }
 
 /**
@@ -82,16 +80,20 @@ async function verify(
 
   // The digest algorithm belongs to the generator; import it from the checkout
   // the workflow pinned rather than duplicating it in the product.
+  // The digest implementation belongs to the generator; import it from the
+  // verified checkout rather than duplicating it here. The observation walks the
+  // resolution view and digests the package contents it resolves — not the view
+  // directory, whose symlink targets are machine-specific.
   const digestUrl = `file://${
     join(
       generatorCheckout,
       "scripts",
       "lib",
       "toolchain",
-      "tree-digest.mjs",
+      "mise.mjs",
     )
   }`;
-  const { treeDigest } = await import(digestUrl);
+  const { implementationDigest, packagesFromView } = await import(digestUrl);
 
   const identityPath = join(generatorInstallationRoot, "toolchain.json");
   let identity;
@@ -101,20 +103,18 @@ async function verify(
     fail(`no toolchain identity at ${identityPath} (${error.message})`);
   }
 
-  const observed = await treeDigest(
-    join(generatorInstallationRoot, "node_modules"),
+  const observed = await implementationDigest(
+    packagesFromView(join(generatorInstallationRoot, "node_modules")),
   );
 
   io.log(`provenance: ref=${expected.ref} sha=${expected.sha}`);
   io.log(`provenance: expected implementation ${expected.implementation}`);
-  io.log(`provenance: expected materialisation ${expected.materialisation}`);
+
   io.log(`installation: recorded implementation ${identity.implementation}`);
-  io.log(`installation: recorded materialisation ${identity.materialisation}`);
   io.log(
-    `installation: observed implementation ${observed.implementationDigest} ` +
-      `(${observed.implementationEntries} entries, ${observed.metadataFiles} metadata files)`,
+    `installation: observed implementation ${observed.digest} ` +
+      `(${observed.packages} packages, ${observed.files} files, ${observed.bytes} bytes)`,
   );
-  io.log(`installation: observed materialisation ${observed.digest}`);
 
   const problems = [];
 
@@ -125,18 +125,17 @@ async function verify(
         `the product expects ${expected.implementation}`,
     );
   }
-  if (observed.implementationDigest !== expected.implementation) {
+  if (observed.digest !== expected.implementation) {
     problems.push(
       `the installed dependency implementation hashes to ` +
-        `${observed.implementationDigest}, the product expects ${expected.implementation}`,
+        `${observed.digest}, the product expects ${expected.implementation}`,
     );
   }
 
-  // The whole-tree materialisation digest is recorded and reported above but is
-  // deliberately **not** compared here: it includes installer state that differs
-  // per machine, and the runner has just materialised this tree itself. The
-  // runner-side self-check is deferred to the GitHub provenance workflow so it
-  // cannot silently reappear in ordinary product verification.
+  // The recorded `resolution` identity is deliberately **not** compared here:
+  // it describes the machine-specific view (symlink targets into mise's store),
+  // and the runner has just built its own view. Only the portable, content-based
+  // implementation digest crosses the machine boundary.
   for (const field of ["spec", "resolution"]) {
     if (typeof identity[field] !== "string" || identity[field].length === 0) {
       problems.push(`the installation record has no ${field} identity`);

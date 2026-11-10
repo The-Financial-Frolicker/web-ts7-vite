@@ -92,7 +92,7 @@ export const PRODUCT_VALIDATE = Object.freeze([
   "test:ci-workflow",
   "test:vite",
   "test:wrangler-types",
-  "test:wrangler-dry-run",
+  "test:deployment",
   "test:no-node",
   "check:contracts",
 ]);
@@ -323,7 +323,7 @@ export async function main(argv = Deno.args, io = console) {
       });
       io.log(
         `[provenance] ${provenance.ref} -> ${provenance.sha} ` +
-          `materialisation ${provenance.materialisation}`,
+          `implementation ${provenance.implementation}`,
       );
     }
 

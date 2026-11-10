@@ -24,7 +24,6 @@ const VALID = Object.freeze({
   repository: GENERATOR_REPOSITORY,
   ref: "toolchain-2026.11.1",
   sha: "a".repeat(40),
-  materialisation: "b".repeat(64),
   implementation: "c".repeat(64),
 });
 
@@ -32,7 +31,6 @@ const EXPECTED = [
   `tc_repository=${VALID.repository}`,
   `tc_ref=${VALID.ref}`,
   `tc_sha=${VALID.sha}`,
-  `tc_materialisation=${VALID.materialisation}`,
 ];
 
 /** Write a metadata fixture and run the real CLI against it. */
@@ -64,7 +62,7 @@ const omit = (key) =>
   Object.fromEntries(Object.entries(VALID).filter(([name]) => name !== key));
 
 describe("structured output (read --format=github)", () => {
-  it("emits exactly the four records later steps consume", () => {
+  it("emits exactly the three records later steps consume", () => {
     const { code, out } = emit(VALID);
     assert.equal(code, 0);
     assert.deepEqual(out, EXPECTED);
@@ -77,7 +75,6 @@ describe("structured output (read --format=github)", () => {
       `TC_REPOSITORY=${VALID.repository}`,
       `TC_REF=${VALID.ref}`,
       `TC_SHA=${VALID.sha}`,
-      `TC_MATERIALISATION=${VALID.materialisation}`,
     ]);
   });
 });
@@ -98,7 +95,7 @@ describe("hostile metadata cannot cross the output boundary", () => {
   ];
 
   it("rejects hostile values in every field with no output at all", () => {
-    for (const key of ["repository", "ref", "sha", "materialisation"]) {
+    for (const key of ["repository", "ref", "sha"]) {
       for (const payload of payloads) {
         const { code, out, err } = emit(withField(key, payload));
         assert.equal(code, 1, `${key}=${JSON.stringify(payload)} was accepted`);
@@ -121,7 +118,7 @@ describe("hostile metadata cannot cross the output boundary", () => {
       ["old tag format", withField("ref", "toolchain-2026.11")],
       ["zero sequence", withField("ref", "toolchain-2026.11.0")],
       ["short sha", withField("sha", "abc1234")],
-      ["short digest", withField("materialisation", "b".repeat(63))],
+      ["short digest", withField("implementation", "b".repeat(63))],
       ["non-string sha", withField("sha", 40)],
       ["null record", "null"],
       ["array record", "[]"],

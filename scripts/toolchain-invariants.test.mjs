@@ -161,27 +161,39 @@ describe("the dependency installer installs no tools and mutates nothing", () =>
     const planned = plan({ PATH: `${stub}:${Deno.env.get("PATH") ?? ""}` });
 
     assert.equal(existsSync(marker), false, "mise must not be invoked");
-    assert.match(planned.target, /generator\/dependencies$/);
+    assert.match(planned.target, /generator\/toolchain$/);
     assert.equal(existsSync(planned.staging), false, "no staging is created");
     assert.equal(existsSync(planned.previous), false, "no swap is performed");
   });
 
   it("leaves the installed toolchain byte-identical across inspections", () => {
+    // The installation is the record plus the view's links. Planning is pure, so
+    // neither may move.
     const first = plan();
-    const files = ["toolchain.json", "package.json", "deno.json", "deno.lock"];
-    const before = files.map((name) =>
-      Deno.readFileSync(path.join(first.target, name))
-    );
+    const nodeModules = path.join(first.target, "node_modules");
+    const snapshot = () => ({
+      record: Deno.readFileSync(path.join(first.target, "toolchain.json")),
+      links: [...Deno.readDirSync(nodeModules)]
+        .map((entry) =>
+          `${entry.name}:${
+            entry.isSymlink
+              ? Deno.readLinkSync(path.join(nodeModules, entry.name))
+              : "directory"
+          }`
+        )
+        .sort(),
+    });
+    const before = snapshot();
 
     const second = plan();
     assert.equal(second.target, first.target);
 
-    files.forEach((name, index) => {
-      assert.deepEqual(
-        Deno.readFileSync(path.join(second.target, name)),
-        before[index],
-        `${name} must be untouched`,
-      );
-    });
+    const after = snapshot();
+    assert.deepEqual(
+      after.record,
+      before.record,
+      "toolchain.json must be untouched",
+    );
+    assert.deepEqual(after.links, before.links, "the view must be untouched");
   });
 });

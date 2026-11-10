@@ -1,17 +1,24 @@
 /**
- * Deliberate toolchain provisioning for this laptop.
+ * The toolchain installation: mise owns the packages, this operation owns the
+ * resolution view and the certificate.
  *
- *   deno task toolchain:install                  materialise from the committed lock
- *   deno task toolchain:install --seed-from DIR   adopt an already-materialised tree
- *   deno task toolchain:install --print           report the resolved target only
+ *   deno task toolchain:install            materialise the view and certify it
+ *   deno task toolchain:install --print    report the plan only
  *
- * The operation is staged and then swapped into place, so an application never
- * sees a half-provisioned installation. `toolchain.json` is written last, inside
- * the staging directory: its presence is the readiness boundary and it records
- * the specification, resolution and materialisation identities.
+ * mise installs and owns Deno, Vite, Wrangler, Emscripten, TypeScript, CMake,
+ * Ninja and the Cloudflare Vite plugin, with their complete closures. Nothing is
+ * copied and nothing is installed here. Deno's Node-API loader needs a
+ * `node_modules` topology it can walk, so this operation materialises a *view*:
+ * one symlink per package, every target inside the mise installation.
  *
- * There is one current installation. Nothing here keeps history or a cache; an
- * old tree is removed after a successful swap.
+ * The view is resolution infrastructure, not ownership. `toolchain.json` records
+ * the four-member tuple, what mise declares, what was actually resolved, a
+ * content-based portable implementation digest of the installed packages, and a
+ * digest of the view's structure — so the certificate survives a move between
+ * machines and still detects a view that no longer represents the installation.
+ *
+ * The Deno dependency tree is no longer part of the toolchain. An application
+ * that declares libraries of its own would get one; this one declares none.
  */
 
 import { join } from "./lib/path.mjs";
@@ -23,27 +30,52 @@ import {
   generatorProjectRoot,
   generatorStagingPath,
   generatorSubrootPath,
+  TOOLCHAIN_RECORD,
 } from "./lib/toolchain/runtime.mjs";
-import { MISE_TOOL_ID, readToolchainTuple } from "./contracts/toolchain.mjs";
 import {
-  digestOfFiles,
-  fileDigest,
-  treeDigest,
-} from "./lib/toolchain/tree-digest.mjs";
+  MISE_TOOL_ID,
+  readMisePins,
+  readToolchainTuple,
+} from "./contracts/toolchain.mjs";
+import {
+  createResolutionView,
+  implementationDigest,
+  miseDataDirectory,
+  nativeBinding,
+  toolClosure,
+  unionClosure,
+  viewDigest,
+} from "./lib/toolchain/mise.mjs";
+import { fileDigest } from "./lib/toolchain/tree-digest.mjs";
 
-export const TOOLCHAIN_SOURCE = "toolchain";
-const SOURCE_FILES = Object.freeze(["package.json", "deno.json", "deno.lock"]);
-const REQUIRED_PACKAGES = Object.freeze([
-  "vite",
-  "wrangler",
-  "typescript",
-  "@cloudflare/vite-plugin",
+/** The view root, beside the deployment tree: `<generator subroot>/toolchain`. */
+export const TOOLCHAIN_VIEW = "toolchain";
+
+/**
+ * The npm tools whose closures the view must resolve, with the closure depth
+ * each one needs. Depth is per tool because it is a property of the dependency
+ * graph, not a house style: Wrangler reaches `@img/sharp-*` five levels down.
+ */
+export const NPM_TOOLS = Object.freeze([
+  { name: "vite", depth: 3, bindings: ["rolldown", "lightningcss"] },
+  { name: "typescript", depth: 3, bindings: [] },
+  { name: "wrangler", depth: 5, bindings: [] },
+  { name: "@cloudflare/vite-plugin", depth: 4, bindings: [] },
 ]);
-const REQUIRED_FILES = Object.freeze([
+
+/** Paths that must resolve through the view for the qualified tools to run. */
+export const REQUIRED_ENTRIES = Object.freeze([
   "node_modules/vite/bin/vite.js",
   "node_modules/wrangler/wrangler-dist/cli.js",
-  "scripts/vite-runner.mjs",
+  "node_modules/@cloudflare/vite-plugin/dist/index.mjs",
 ]);
+
+/** The Vite child's runner: toolchain-owned code, copied beside the view. */
+export const RUNNER_FILES = Object.freeze([
+  "vite-runner.mjs",
+  "vite-probe.mjs",
+]);
+export const RUNNER_SOURCE = "toolchain";
 
 function fail(message) {
   throw new Error(`toolchain:install: ${message}`);
@@ -74,16 +106,6 @@ export function copyTree(source, target) {
   }
   Deno.copyFileSync(source, target);
   Deno.chmodSync(target, (stat.mode ?? 0o644) & 0o7777);
-}
-
-/** Move a directory when possible, copy otherwise. */
-function moveTree(source, target) {
-  try {
-    Deno.renameSync(source, target);
-  } catch {
-    copyTree(source, target);
-    Deno.removeSync(source, { recursive: true });
-  }
 }
 
 /** Locate a package inside a materialised tree. */
@@ -127,34 +149,74 @@ export function lockedVersions(lockText) {
 }
 
 /** Validate the staged tree and return the installed package versions. */
-export function validateStaging(staging) {
-  const nodeModules = join(staging, "node_modules");
-
-  const installed = {};
-  for (const name of REQUIRED_PACKAGES) {
-    const dir = findInstalledPackage(nodeModules, name);
-    installed[name] =
-      JSON.parse(readFileSync(join(dir, "package.json"), "utf8"))
-        .version;
-  }
-
-  for (const relative of REQUIRED_FILES) {
-    const path = join(staging, relative);
+/**
+ * Validate the materialised view before it is recorded.
+ *
+ * Four questions, all about the view actually representing the certified tools:
+ * the entry points the launchers execute resolve; every required tool is linked;
+ * every link points inside the mise installation; and the native bindings the
+ * Vite child loads are present as real files.
+ */
+export function validateView(viewRoot, packages, bindings) {
+  for (const relative of REQUIRED_ENTRIES) {
+    const path = join(viewRoot, relative);
+    let stat;
     try {
-      if (!Deno.statSync(path).isFile) fail(`${relative} is not a file`);
+      stat = Deno.statSync(path);
     } catch (error) {
-      fail(`staged toolchain is incomplete: ${error.message}`);
+      fail(`the view does not resolve ${relative}: ${error.message}`);
+    }
+    if (!stat.isFile) {
+      fail(`${relative} resolves to something that is not a file`);
     }
   }
 
-  return installed;
+  const nodeModules = join(viewRoot, "node_modules");
+  for (const tool of NPM_TOOLS) {
+    let stat;
+    try {
+      stat = Deno.statSync(join(nodeModules, ...tool.name.split("/")));
+    } catch {
+      fail(`the view does not resolve npm:${tool.name}`);
+    }
+    if (!stat.isDirectory) {
+      fail(`npm:${tool.name} does not resolve to a directory`);
+    }
+  }
+
+  // No package may come from anywhere but mise: every resolved directory must
+  // live inside the mise installation tree.
+  const data = Deno.realPathSync(miseDataDirectory());
+  for (const entry of packages) {
+    let directory;
+    try {
+      directory = Deno.realPathSync(entry.directory);
+    } catch (error) {
+      fail(`cannot resolve ${entry.name}@${entry.version}: ${error.message}`);
+    }
+    if (!directory.startsWith(`${data}/`)) {
+      fail(
+        `${entry.name}@${entry.version} resolves outside the mise installation ` +
+          `(${directory}); the view may only resolve mise-owned packages`,
+      );
+    }
+  }
+
+  for (const binding of bindings) {
+    try {
+      if (!Deno.statSync(binding.addon).isFile) {
+        fail(`${binding.package} has no .node file`);
+      }
+    } catch (error) {
+      fail(`native binding for ${binding.owner} is missing: ${error.message}`);
+    }
+  }
 }
 
 /**
  * Resolve every path the installation will touch, with containment enforced.
  *
  * Pure: it creates nothing, so a rejected override fails before any mutation.
- * Every returned path is inside the generator-owned subroot.
  */
 export function planInstallation({
   projectRoot = Deno.cwd(),
@@ -163,6 +225,8 @@ export function planInstallation({
 } = {}) {
   const generatorProject = generatorProjectRoot(projectRoot, env);
   const subroot = generatorSubrootPath(projectRoot, env);
+  // Resolved through the shared policy so the override is still containment-
+  // checked and still refuses the application-owned subtree.
   const target = generatorInstallationRootPath(projectRoot, env);
   const staging = generatorStagingPath(projectRoot, env, pid);
   const previous = generatorPreviousPath(projectRoot, env);
@@ -328,6 +392,30 @@ export function installedVersions(nodeModules, names) {
   return found;
 }
 
+/**
+ * The declared npm tools, as `.mise.toml` pins them.
+ *
+ * `.mise.toml` is the authority for installed versions; a tool the project needs
+ * but the specification does not declare is a specification defect, not a thing
+ * to resolve from somewhere else.
+ */
+export function declaredTools(pins) {
+  const declared = {};
+  for (const tool of NPM_TOOLS) {
+    const id = `npm:${tool.name}`;
+    const version = pins[id];
+    if (typeof version !== "string" || !/^\d+\.\d+\.\d+/.test(version)) {
+      fail(
+        `.mise.toml declares no exact ${id} version; the toolchain ` +
+          `specification is incomplete`,
+      );
+    }
+    declared[tool.name] = version;
+  }
+  return declared;
+}
+
+/** CLI entry point; returns an exit code. */
 export async function main(
   argv = Deno.args,
   appRoot = Deno.cwd(),
@@ -335,131 +423,104 @@ export async function main(
   io = console,
 ) {
   try {
-    const seedIndex = argv.indexOf("--seed-from");
-    const seedFrom = seedIndex === -1 ? undefined : argv[seedIndex + 1];
-
-    // Every path is resolved and containment-checked before anything is
-    // created, so an escaping override fails closed with no filesystem effect.
     const plan = planInstallation({ projectRoot: appRoot, env });
     const { target, staging, previous } = plan;
 
     if (argv.includes("--print")) {
-      io.log(
-        JSON.stringify({ ...plan, seedFrom: seedFrom ?? null }, null, 2),
-      );
+      io.log(JSON.stringify(plan, null, 2));
       return 0;
     }
 
-    // 1. Definitions and pins.
+    // 1. What is declared, and which Deno must be running.
     const deno = assertDenoVersion(appRoot);
-    const sourceDir = join(appRoot, TOOLCHAIN_SOURCE);
-    const texts = {};
-    for (const name of SOURCE_FILES) {
-      texts[name] = readFileSync(join(sourceDir, name), "utf8");
+    const tuple = readToolchainTuple(appRoot);
+    const pins = readMisePins(appRoot);
+    const declared = declaredTools(pins);
+
+    // 2. Resolve the closures from the mise installations. A tool mise has not
+    //    installed fails here, with the command that installs it; nothing falls
+    //    back to a Deno tree.
+    const closures = NPM_TOOLS.map((tool) =>
+      toolClosure(tool.name, declared[tool.name], env, tool.depth)
+    );
+    const packages = unionClosure(closures);
+
+    const bindings = [];
+    for (const tool of NPM_TOOLS) {
+      for (const owner of tool.bindings) {
+        bindings.push(nativeBinding(packages, owner));
+      }
     }
 
-    // 2. Staging: a sibling of the dependency tree, inside the same subroot, so
-    // the final rename stays on one filesystem.
+    // 3. Stage the view: symlinks only, next to the tree it will replace.
     removeIfPresent(staging);
     Deno.mkdirSync(staging, { recursive: true });
-    for (const name of SOURCE_FILES) {
-      Deno.writeTextFileSync(join(staging, name), texts[name]);
-    }
-    copyTree(join(sourceDir, "scripts"), join(staging, "scripts"));
-
-    // 3. Materialise: from an existing tree (first migration) or from the lock.
-    if (seedFrom !== undefined) {
-      moveTree(seedFrom, join(staging, "node_modules"));
-    } else {
-      // A laptop normally has the ledger's packages in Deno's cache already, so
-      // provisioning is `--cached-only` and cannot touch the network. A clean CI
-      // runner has no such cache; `--allow-download` permits fetching the exact
-      // locked artefacts. Resolution stays frozen either way: nothing is
-      // discovered, upgraded or re-pinned.
-      const allowDownload = argv.includes("--allow-download");
-      const result = new Deno.Command(Deno.execPath(), {
-        args: [
-          "install",
-          "--frozen",
-          ...(allowDownload ? [] : ["--cached-only"]),
-        ],
-        cwd: staging,
-        stdout: "inherit",
-        stderr: "inherit",
-        stdin: "null",
-      }).outputSync();
-      if (result.code !== 0) {
-        fail(
-          "`deno install --frozen` failed in staging; the locked artefacts are " +
-            "not available. Provisioning never resolves or upgrades.",
-        );
-      }
+    const view = createResolutionView(staging, packages);
+    const runnerDirectory = join(appRoot, RUNNER_SOURCE, "scripts");
+    Deno.mkdirSync(join(staging, "scripts"), { recursive: true });
+    for (const file of RUNNER_FILES) {
+      copyTree(join(runnerDirectory, file), join(staging, "scripts", file));
     }
 
     // 4. Validate before recording anything.
-    const packages = validateStaging(staging);
+    validateView(staging, packages, bindings);
 
-    // The Deno tree must not carry a second copy of a toolchain component at a
-    // version other than the tuple's. The tuple is read from the specification
-    // mise installs from, so both boundaries are checked against one authority.
-    const tuple = readToolchainTuple(appRoot);
-    const members = npmToolchainMembers(tuple);
-    const boundary = assertToolchainBoundary({
-      tuple,
-      manifest: JSON.parse(texts["package.json"]).dependencies ?? {},
-      inventory: installedVersions(
-        join(staging, "node_modules"),
-        Object.keys(members),
-      ),
-    });
-    const lock = lockedVersions(texts["deno.lock"]);
-    for (const name of REQUIRED_PACKAGES) {
-      const record = lock[name];
-      if (record === undefined) continue;
-      // A lock specifier can record a peer-resolved identity such as
-      // `1.66.0_vite@8.3.5_wrangler@4.156.0`; only the version prefix is
-      // comparable with an installed package version.
-      const resolved = record.split("_")[0];
-      if (resolved !== packages[name]) {
-        fail(
-          `${name} resolved ${packages[name]} but the lock records ${resolved}`,
-        );
-      }
+    // 5. Identity, written last. Three separate evidence categories:
+    //    what is declared, what resolved, and what the bytes actually are.
+    const implementation = await implementationDigest(packages);
+    const structure = await viewDigest(view.links, packages);
+    if (structure.unresolved > 0) {
+      fail(
+        `${structure.unresolved} view link(s) do not resolve to a certified ` +
+          `package; the view no longer represents the installation`,
+      );
     }
-
-    // 5. Identity, written last.
-    const materialisation = await treeDigest(join(staging, "node_modules"));
     const identity = {
-      schema: 1,
+      schema: 2,
+      role: "toolchain",
+      owner: "mise",
       deno,
       platform: `${Deno.build.os}-${Deno.build.arch}`,
-      spec: await digestOfFiles([
-        {
-          name: "package.json",
-          digest: await fileDigest(join(staging, "package.json")),
-        },
-        {
-          name: "deno.json",
-          digest: await fileDigest(join(staging, "deno.json")),
-        },
-      ]),
-      resolution: await fileDigest(join(staging, "deno.lock")),
-      materialisation: materialisation.digest,
-      // Cross-machine: the installed implementation without installer state.
-      implementation: materialisation.implementationDigest,
-      // Installer state, reported so a machine difference stays visible.
-      metadata: {
-        files: materialisation.metadataFiles,
-        digest: materialisation.metadataDigest,
+      // 1. The certified identity: exactly four members, exact versions.
+      tuple,
+      // Additional mise-managed build prerequisites, never tuple members.
+      prerequisites: {
+        typescript: pins["npm:typescript"] ?? null,
+        cmake: pins.cmake ?? null,
+        ninja: pins.ninja ?? null,
       },
-      packages,
+      // 2. Declared packages, as `.mise.toml` pins them.
+      spec: await fileDigest(join(appRoot, ".mise.toml")),
+      declared,
+      // 3. Resolved packages, as discovered in the installed closures.
+      resolved: packages
+        .map((entry) => ({ name: entry.name, version: entry.version }))
+        .sort((a, b) => (a.name < b.name ? -1 : 1)),
+      // 4. Content-based implementation identity of those packages.
+      implementation: implementation.digest,
+      // 5. Platform bindings, by identity rather than by absolute path.
+      bindings: bindings.map((binding) => ({
+        owner: binding.owner,
+        package: binding.package,
+        version: binding.version,
+        file: binding.addon.slice(binding.addon.lastIndexOf("/") + 1),
+      })),
+      // 6. View evidence: the link structure that carries the resolution, and
+      //    the digest a consumer recomputes to prove the view still matches.
+      view: { root: TOOLCHAIN_VIEW, links: structure.links },
+      resolution: structure.digest,
+      metadata: {
+        packages: implementation.packages,
+        files: implementation.files,
+        bytes: implementation.bytes,
+      },
     };
     Deno.writeTextFileSync(
-      join(staging, "toolchain.json"),
+      join(staging, TOOLCHAIN_RECORD),
       `${JSON.stringify(identity, null, 2)}\n`,
     );
 
-    // 6. Swap: one installation, no history, all inside the generator subroot.
+    // 6. Swap: one view, no history, inside the generator subroot.
     removeIfPresent(previous);
     let hadPrevious = false;
     try {
@@ -471,16 +532,22 @@ export async function main(
     Deno.renameSync(staging, target);
     if (hadPrevious) removeIfPresent(previous);
 
-    io.log(`toolchain: installed ${target}`);
-    io.log(`toolchain: deno=${deno} packages=${JSON.stringify(packages)}`);
-    for (const member of boundary) {
+    io.log(`toolchain: installed ${target} (mise-owned view)`);
+    io.log(
+      `toolchain: tuple deno=${tuple.deno} vite=${tuple.vite} ` +
+        `wrangler=${tuple.wrangler} emscripten=${tuple.emscripten}`,
+    );
+    io.log(
+      `toolchain: resolved ${packages.length} packages, ` +
+        `${implementation.files} files, from mise`,
+    );
+    for (const binding of identity.bindings) {
       io.log(
-        `toolchain: boundary ${member.name}@${member.version} ` +
-          `(declared ${member.declared ?? "not a dependency"}, ` +
-          `${member.copies} copy(ies) in the Deno tree, mise owns the tool)`,
+        `toolchain: binding ${binding.owner} -> ${binding.package}@${binding.version}`,
       );
     }
-    io.log(`toolchain: materialisation=${materialisation.digest}`);
+    io.log(`toolchain: implementation=${implementation.digest}`);
+    io.log(`toolchain: view=${structure.digest} (${structure.links} links)`);
     return 0;
   } catch (error) {
     io.error(`toolchain: provisioning failed: ${error.message}`);

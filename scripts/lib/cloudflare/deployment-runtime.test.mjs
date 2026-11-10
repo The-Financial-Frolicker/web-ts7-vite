@@ -14,6 +14,7 @@ import {
   compareDeploymentRuntimes,
   DeploymentRuntimeError,
 } from "./deployment-runtime.mjs";
+import { deploymentInstallationRoot } from "../toolchain/runtime.mjs";
 
 const roots = [];
 after(() => {
@@ -256,8 +257,11 @@ describe("deployment runtime resolution", () => {
 
 describe("the real dependency tree", () => {
   it("has compatible Wrangler and plugin runtimes", () => {
+    // The deployment installation, resolved exactly as the launchers resolve it.
+    // This assertion used to read `generator/toolchain` (the toolchain tree):
+    // the deployment phase must depend on its own closure, not the build's.
     const result = assertDeploymentRuntime({
-      nodeModules: path.join(Deno.cwd(), "generator", "dependencies"),
+      nodeModules: deploymentInstallationRoot(Deno.cwd()),
     });
     assert.match(result.workerdVersion, /^\d+\./);
     assert.match(result.binary, /bin\/workerd$/);

@@ -26,12 +26,11 @@ import {
 
 import {
   assertToolchainBoundary,
-  installedVersions,
   npmToolchainMembers,
   ownershipReport,
 } from "./toolchain-install.mjs";
-import { readToolchainTuple } from "./contracts/toolchain.mjs";
-import { readFileSync } from "./lib/fs.mjs";
+import { readMisePins, readToolchainTuple } from "./contracts/toolchain.mjs";
+import { packagesFromView } from "./lib/toolchain/mise.mjs";
 
 const temporaryRoots = [];
 
@@ -285,15 +284,29 @@ describe("the mise/Deno toolchain boundary", () => {
     const root = Deno.cwd();
     const real = readToolchainTuple(root);
     const members = npmToolchainMembers(real);
+
+    // The tuple boundary is now checked where the tools are actually installed:
+    // the view over the mise closures, against the versions `.mise.toml` pins.
+    const pins = readMisePins(root);
+    const declared = Object.fromEntries(
+      Object.entries(pins).map(([id, version]) => [
+        id.replace(/^npm:/, ""),
+        version,
+      ]),
+    );
     const summary = assertToolchainBoundary({
       tuple: real,
-      manifest: JSON.parse(
-        readFileSync(path.join(root, "toolchain", "package.json"), "utf8"),
-      ).dependencies ?? {},
-      inventory: installedVersions(
-        path.join(root, "generator", "dependencies", "node_modules"),
-        Object.keys(members),
-      ),
+      manifest: declared,
+      // The view's entries are symlinks, so the inventory is read through the
+      // packages they resolve to (the same observation verification performs).
+      inventory: packagesFromView(
+        path.join(root, "generator", "toolchain", "node_modules"),
+      )
+        .filter((entry) => Object.hasOwn(members, entry.name))
+        .reduce((found, entry) => {
+          found[entry.name] = [...(found[entry.name] ?? []), entry.version];
+          return found;
+        }, Object.fromEntries(Object.keys(members).map((n) => [n, []]))),
     });
 
     assert.deepEqual(summary.map((entry) => entry.name), ["vite", "wrangler"]);
@@ -303,7 +316,10 @@ describe("the mise/Deno toolchain boundary", () => {
         entry.version,
         `${entry.name} declared exactly`,
       );
-      assert.ok(entry.copies >= 1, `${entry.name} is present in the Deno tree`);
+      assert.ok(
+        entry.copies >= 1,
+        `${entry.name} resolves through the mise-backed view`,
+      );
     }
   });
 });

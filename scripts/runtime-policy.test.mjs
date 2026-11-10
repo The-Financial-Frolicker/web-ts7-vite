@@ -15,8 +15,8 @@ import { join } from "./lib/path.mjs";
 import { describe, it } from "./lib/test.mjs";
 import {
   assertDenoVersion,
-  GENERATOR_DEPENDENCIES,
   GENERATOR_SUBROOT,
+  GENERATOR_TOOLCHAIN,
   generatorInstallationRoot,
   generatorInstallationRootPath,
   generatorSubrootPath,
@@ -105,17 +105,28 @@ describe("installed generator dependencies", () => {
       join(
         Deno.realPathSync(projectRoot),
         GENERATOR_SUBROOT,
-        GENERATOR_DEPENDENCIES,
+        GENERATOR_TOOLCHAIN,
       ),
     );
   });
 
   it("record an identity whose Deno matches this runtime", () => {
     const identity = installedIdentity(generatorInstallationRoot(projectRoot));
-    assert.equal(identity.schema, 1);
+    // Schema 2: mise owns the packages; the record carries the resolved
+    // inventory and a content digest rather than a copy of the tree.
+    assert.equal(identity.schema, 2);
+    assert.equal(identity.owner, "mise");
     assert.equal(identity.deno, Deno.version.deno);
-    assert.match(identity.materialisation, /^[0-9a-f]{64}$/);
-    assert.equal(identity.packages.vite, "8.3.5");
+    assert.match(identity.implementation, /^[0-9a-f]{64}$/);
+    assert.match(identity.resolution, /^[0-9a-f]{64}$/);
+    assert.equal(identity.declared.vite, "8.3.5");
+    assert.equal(identity.materialisation, undefined);
+    assert.ok(
+      identity.resolved.some((entry) =>
+        entry.name === "vite" && entry.version === "8.3.5"
+      ),
+      "the resolved inventory must carry the qualified Vite",
+    );
   });
 
   it("stay out of the project root", () => {
@@ -124,7 +135,7 @@ describe("installed generator dependencies", () => {
     assert.ok(isContained(root, generatorSubrootPath(projectRoot)), root);
     assert.equal(
       readFileSync(join(root, "toolchain.json"), "utf8").includes(
-        '"schema": 1',
+        '"schema": 2',
       ),
       true,
     );

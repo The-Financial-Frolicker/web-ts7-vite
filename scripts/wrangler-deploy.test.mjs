@@ -108,7 +108,7 @@ function makeDeploymentRoot({ plugin = true, mismatch = false } = {}) {
   const root = Deno.realPathSync(
     Deno.makeTempDirSync({ prefix: "deploy-launcher-" }),
   );
-  const installation = `${root}/generator/dependencies`;
+  const installation = `${root}/generator/toolchain`;
   const platform = fixturePlatformPackage();
 
   const write = (relative, contents) =>

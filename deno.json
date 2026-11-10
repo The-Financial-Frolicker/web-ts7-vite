@@ -2,12 +2,14 @@
   "fmt": {
     "exclude": [
       "worker-configuration.d.ts",
-      "README.md"
+      "README.md",
+      "application"
     ]
   },
   "lint": {
     "exclude": [
-      "worker-configuration.d.ts"
+      "worker-configuration.d.ts",
+      "application"
     ]
   },
   "tasks": {
@@ -27,6 +29,7 @@
     "types": "bash scripts/deno-no-node.sh bash scripts/worker-types.sh",
     "check:contracts": "bash scripts/deno-no-node.sh bash scripts/check-contracts.sh",
     "toolchain:install": "bash scripts/deno-no-node.sh deno run --allow-read --allow-write --allow-run --allow-env scripts/toolchain-install.mjs",
+    "deployment:install": "bash scripts/deno-no-node.sh deno run --allow-read --allow-write --allow-run --allow-env scripts/deployment-install.mjs",
     "status:contracts": "bash scripts/deno-no-node.sh deno run --allow-read=. --allow-env scripts/contracts/cli.mjs status",
     "contract:refresh": "bash scripts/deno-no-node.sh bash scripts/contract-refresh.sh",
     "product:generate": "bash scripts/deno-no-node.sh deno run --allow-read --allow-write --allow-env --allow-run=git scripts/generate-product.mjs",
@@ -45,13 +48,16 @@
     "test:provenance": "bash scripts/deno-no-node.sh deno test --allow-read --allow-write --allow-run=git,mkfifo --allow-env scripts/provenance.test.mjs",
     "test:provenance-source": "bash scripts/deno-no-node.sh deno test --allow-read --allow-write --allow-env scripts/provenance-source.test.mjs",
     "test:generator": "bash scripts/deno-no-node.sh deno test --allow-read --allow-write --allow-run --allow-env scripts/generate-product.test.mjs",
-    "test:vite": "bash scripts/deno-no-node.sh deno test --allow-read --allow-write --allow-env scripts/vite-build.test.mjs scripts/vite-server.test.mjs scripts/wrangler-deploy.test.mjs scripts/runtime-policy.test.mjs",
+    "test:vite": "bash scripts/deno-no-node.sh deno test --allow-read --allow-write --allow-env scripts/vite-build.test.mjs scripts/vite-server.test.mjs scripts/runtime-policy.test.mjs",
     "test:wrangler-types": "bash scripts/deno-no-node.sh deno test --allow-read --allow-env scripts/wrangler-types.test.mjs",
-    "test:wrangler-dry-run": "bash scripts/deno-no-node.sh deno test --allow-read --allow-write --allow-env=HOME,XDG_CONFIG_HOME,XDG_DATA_HOME,GENERATOR_ROOT,GENERATOR_PROJECT_ROOT scripts/wrangler-dry-run.test.mjs",
+    "test:wrangler-dry-run": "bash scripts/deno-no-node.sh deno test --allow-read --allow-write --allow-env=HOME,XDG_CONFIG_HOME,XDG_DATA_HOME,GENERATOR_PROJECT_ROOT,DEPLOYMENT_ROOT scripts/wrangler-dry-run.test.mjs",
+    "test:deployment": "bash scripts/deno-no-node.sh deno test --allow-read --allow-write --allow-env scripts/lib/cloudflare/deployment-runtime.test.mjs scripts/wrangler-deploy.test.mjs scripts/wrangler-dry-run.test.mjs scripts/deployment-install.test.mjs",
     "test:no-node": "bash scripts/deno-no-node.sh deno test --allow-read --allow-write --allow-run --allow-env scripts/deno-no-node.test.mjs",
     "test:wasm": "bash scripts/deno-no-node.sh deno test --allow-read wasm/harness.test.ts",
     "test:wasm:published": "bash scripts/deno-no-node.sh deno test --allow-read wasm/published.test.ts",
-    "validate": "bash scripts/deno-no-node.sh bash -c 'deno task fmt:check && deno task lint && deno task check:client && deno task check:worker && deno task check:node-boundary && deno task test:init && deno task test:worker && deno task test:scripts && deno task test:deploy && deno task test:artefact && deno task test:boundary && deno task test:toolchain && deno task test:toolchain-specify && deno task test:contracts && deno task test:generator && deno task test:provenance && deno task test:provenance-source && deno task test:github-output && deno task test:ci-workflow && deno task test:vite && deno task test:wrangler-types && deno task test:wrangler-dry-run && deno task test:no-node && deno task test:edge && deno task check:contracts'",
+    "toolchain:qualify": "bash scripts/deno-no-node.sh bash -c 'deno task fmt:check && deno task lint && deno task check:client && deno task check:worker && deno task check:node-boundary && deno task test:init && deno task test:worker && deno task test:scripts && deno task test:deploy && deno task test:artefact && deno task test:boundary && deno task test:toolchain && deno task test:toolchain-specify && deno task test:contracts && deno task test:generator && deno task test:provenance && deno task test:provenance-source && deno task test:github-output && deno task test:ci-workflow && deno task test:vite && deno task test:wrangler-types && deno task test:no-node && deno task test:edge'",
+    "deployment:qualify": "bash scripts/deno-no-node.sh bash -c 'deno task test:deployment && deno task artefact:verify && deno task deploy:artefact:dry-run'",
+    "validate": "bash scripts/deno-no-node.sh bash -c 'deno task toolchain:qualify && deno task deployment:qualify && deno task check:contracts'",
     "ci": "bash scripts/deno-no-node.sh bash scripts/ci.sh",
     "deploy": "bash scripts/deploy.sh",
     "deploy:dry-run": "bash scripts/deno-no-node.sh bash scripts/deploy-dry-run.sh",

@@ -7,8 +7,8 @@
  */
 
 import assert from "./lib/assert.mjs";
-import path from "./lib/path.mjs";
 import { describe, it } from "./lib/test.mjs";
+import { generatorInstallationRootPath } from "./lib/toolchain/runtime.mjs";
 import {
   buildWranglerTypesArgs,
   findPackage,
@@ -18,14 +18,11 @@ import {
   resolveWranglerTypesInvocation,
 } from "./wrangler-types.mjs";
 
-// Toolchain packages live in the installed toolchain, outside the application.
-// The generator owns its Deno dependency tree inside its own subroot.
+// Toolchain packages are mise-owned; the generator resolves them through its
+// view. `GENERATOR_ROOT` is honoured, so the suites follow the same policy the
+// launchers use rather than a hard-coded path.
 const projectRoot = Deno.cwd();
-const generatorInstallationRoot = path.join(
-  projectRoot,
-  "generator",
-  "dependencies",
-);
+const generatorInstallationRoot = generatorInstallationRootPath(projectRoot);
 
 describe("Deno-owned Wrangler type generation", () => {
   it("resolves the installed Wrangler CLI main entry", () => {

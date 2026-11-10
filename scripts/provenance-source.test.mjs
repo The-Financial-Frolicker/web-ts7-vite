@@ -49,7 +49,6 @@ function product(overrides = {}) {
     repository: REPOSITORY,
     ref: "toolchain-2026.11.1",
     sha: "8836f76adf636e33af14bf5bd7b761afb53a30bd",
-    materialisation: MATERIALISATION,
     implementation: IMPLEMENTATION,
     ...overrides,
   };
@@ -67,7 +66,7 @@ function product(overrides = {}) {
  *
  * `verify` compares the cross-machine `implementationDigest` against the
  * product's recorded identity (C1 and C2). The whole-tree `digest` is only
- * *reported*: the runner-side materialisation self-check (R3) is deliberately
+ * of the view's structure: the runner-side self-check (R3) is deliberately
  * absent and deferred to the GitHub provenance workflow, so a differing
  * whole-tree value must not fail verification.
  */
@@ -75,14 +74,25 @@ function generatorCheckout(digest, entries = 3328, implementation = digest) {
   const dir = makeDir("s9-generator-");
   const module = path.join(dir, "scripts", "lib", "toolchain");
   mkdirSync(module, { recursive: true });
+  // The verifier imports the generator's digest implementation; the fixture
+  // supplies a stub with the same interface so the comparison logic is what is
+  // under test, not this machine's installation.
   writeFileSync(
-    path.join(module, "tree-digest.mjs"),
-    `export async function treeDigest(root) {\n` +
-      `  return { digest: ${JSON.stringify(digest)}, entries: ${entries},\n` +
-      `    implementationDigest: ${
-        JSON.stringify(implementation)
-      }, metadataFiles: 0, metadataDigest: "0".repeat(64), root };\n` +
-      `}\n`,
+    path.join(module, "mise.mjs"),
+    `export function packagesFromView() {
+` +
+      `  return [{ name: "stub", version: "0.0.0", directory: "/stub" }];
+` +
+      `}
+` +
+      `export async function implementationDigest() {
+` +
+      `  return { digest: ${JSON.stringify(implementation)}, packages: 1,
+` +
+      `    files: ${entries}, bytes: 0 };
+` +
+      `}
+`,
   );
   return dir;
 }
@@ -104,12 +114,11 @@ const IDENTITY = Object.freeze({
   spec: "2a2c3f273f6daab2dc28f729db9e76fc828ab1e61c7e9cc43038cb9760edc52e",
   resolution:
     "2acd5901681996673c660c44c51c0c5a148757b5f07b3113486d091b0e8b3068",
-  materialisation: MATERIALISATION,
   implementation: IMPLEMENTATION,
 });
 
 describe("provenance reader (product)", () => {
-  it("emits the four shell assignments a workflow consumes", async () => {
+  it("emits the shell assignments a workflow consumes", async () => {
     const io = recorder();
     const code = await main(["read", "--root", product()], io);
     assert.equal(code, 0);
@@ -117,11 +126,10 @@ describe("provenance reader (product)", () => {
       `TC_REPOSITORY=${REPOSITORY}`,
       "TC_REF=toolchain-2026.11.1",
       "TC_SHA=8836f76adf636e33af14bf5bd7b761afb53a30bd",
-      `TC_MATERIALISATION=${MATERIALISATION}`,
     ]);
   });
 
-  it("emits exactly four structured records for GitHub Actions", async () => {
+  it("emits exactly three structured records for GitHub Actions", async () => {
     const io = recorder();
     const code = await main(
       ["read", "--format=github", "--root", product()],
@@ -132,7 +140,6 @@ describe("provenance reader (product)", () => {
       `tc_repository=${REPOSITORY}`,
       "tc_ref=toolchain-2026.11.1",
       "tc_sha=8836f76adf636e33af14bf5bd7b761afb53a30bd",
-      `tc_materialisation=${MATERIALISATION}`,
     ]);
   });
 
@@ -206,7 +213,7 @@ describe("provenance reader (product)", () => {
       assert.match(io.err.join(" "), /implementation hashes to e{64}/);
     });
 
-    it("reports the whole-tree digest without comparing it (R3 deferred)", async () => {
+    it("reports the observed implementation and never the machine-specific view", async () => {
       const io = recorder();
       const code = await main([
         "verify",
@@ -220,9 +227,14 @@ describe("provenance reader (product)", () => {
         installation(IDENTITY),
       ], io);
       assert.equal(code, 0, io.err.join("; "));
-      // The observation is still reported, so the value remains available to the
-      // future provenance workflow.
-      assert.match(io.out.join("\n"), /observed materialisation f{64}/);
+      // The comparison is on implementation content, and the observation is
+      // reported. There is no whole-tree digest any more: the resolution view is
+      // machine-specific and never enters the gate.
+      assert.match(
+        io.out.join("\n"),
+        /observed implementation 27548ae[0-9a-f]*/,
+      );
+      assert.doesNotMatch(io.out.join("\n"), /observed materialisation/);
     });
 
     it("rejects an installation with no identity record", async () => {

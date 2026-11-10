@@ -21,7 +21,7 @@ const workflow = readFileSync(
 // the source of truth, but it is tested in a shell step: GitHub rejects
 // `hashFiles()` inside a job-level `if:`, so the decision cannot live there.
 const ROLE = "needs.classify.outputs.generator";
-const MARKER_FILE = "toolchain/deno.lock";
+const MARKER_FILE = "toolchain/scripts/vite-runner.mjs";
 
 /**
  * Reject duplicate mapping keys in block-style YAML.
@@ -327,7 +327,7 @@ describe("product job sequencing", () => {
     );
   });
 
-  it("verifies materialisation before any product task", () => {
+  it("verifies the implementation identity before any product task", () => {
     const verify = body.indexOf("--generator");
     const firstTask = body.indexOf("deno task check:client");
     assert.ok(
@@ -354,7 +354,7 @@ describe("product job sequencing", () => {
       "the installation must live outside the product checkout",
     );
     assert.ok(
-      body.includes("GENERATOR_PROJECT_ROOT/generator/dependencies"),
+      body.includes("GENERATOR_PROJECT_ROOT/generator/toolchain"),
       "the verifier must receive the generator-owned installation root",
     );
     assert.ok(
@@ -607,12 +607,12 @@ describe("product job sequencing", () => {
     const mixed = [
       "jobs:",
       "  validate:",
-      "    if: hashFiles('toolchain/deno.lock') != ''",
+      "    if: hashFiles('toolchain/scripts/vite-runner.mjs') != ''",
       "    env:",
       "      GENERATOR_PROJECT_ROOT: ${{ runner.temp }}/generator",
       "    steps:",
       "      - name: legitimate step",
-      "        if: hashFiles('toolchain/deno.lock') != ''",
+      "        if: hashFiles('toolchain/scripts/vite-runner.mjs') != ''",
       "        env:",
       "          GENERATOR_PROJECT_ROOT: ${{ runner.temp }}/generator",
       "        run: echo ok",
@@ -675,7 +675,6 @@ describe("product job sequencing", () => {
           "check:client",
           "check:worker",
           "build",
-          "deploy:dry-run",
         ]
       ) {
         assert.ok(
@@ -683,6 +682,12 @@ describe("product job sequencing", () => {
           `the step must still run ${task}`,
         );
       }
+      // The deployment phase is not part of the build job: its diagnostics need
+      // the deployment installation, which this job does not provision.
+      assert.ok(
+        !step.includes("deno task deploy"),
+        "the build job must not run a deployment task",
+      );
     });
 
     it("carries the grant in the profile, never on the command line", () => {
@@ -725,22 +730,20 @@ describe("product job sequencing", () => {
       );
     });
 
-    it("reports compact materialisation diagnostics", () => {
+    it("reports compact identity diagnostics and compares them with the record", () => {
       assert.ok(
-        step.includes("files=${tree.files}"),
-        "the entry counters must be reported",
+        step.includes("packages=${observed.packages}") &&
+          step.includes("files=${observed.files}") &&
+          step.includes("bytes=${observed.bytes}"),
+        "the resolved package counters must be reported",
       );
       assert.ok(
-        step.includes("mode-column sha256="),
-        "the mode column must be reported",
+        step.includes("identity: implementation sha256="),
+        "the observed implementation digest must be reported",
       );
       assert.ok(
-        step.includes("path-column sha256="),
-        "the path column must be reported",
-      );
-      assert.ok(
-        step.includes("path-mode-column sha256="),
-        "the path-to-mode binding must be reported",
+        step.includes("observed.digest !== record.implementation"),
+        "the observation must be compared with the recorded identity",
       );
     });
   });
@@ -812,7 +815,7 @@ describe("workflow context scope (every published workflow)", () => {
       "  build:",
       "    steps:",
       "      - name: step",
-      "        if: hashFiles('toolchain/deno.lock') != ''",
+      "        if: hashFiles('toolchain/scripts/vite-runner.mjs') != ''",
       "        env:",
       "          GENERATOR_PROJECT_ROOT: ${{ runner.temp }}/generator",
       "        run: echo ok",
@@ -850,7 +853,7 @@ describe("workflow context scope (every published workflow)", () => {
     const fixture = [
       "jobs:",
       "  build:",
-      "    if: hashFiles('toolchain/deno.lock') != ''",
+      "    if: hashFiles('toolchain/scripts/vite-runner.mjs') != ''",
       "    steps:",
       "      - name: step",
       "        run: echo ok",
@@ -938,7 +941,13 @@ describe("build/deployment separation in ci.yml", () => {
     const body = bodyOf(workflow, "deployment");
     assert.ok(body.includes("uses: actions/download-artifact"), body);
     assert.ok(body.includes("deno task artefact:verify"), body);
-    assert.ok(body.includes("deno task deploy:artefact:dry-run"), body);
+    assert.ok(body.includes("deno task deployment:qualify"), body);
+    // The deployment job provisions its own closure and never the toolchain's.
+    assert.ok(body.includes("deno task deployment:install"), body);
+    assert.ok(
+      !body.includes("deno task toolchain:install"),
+      "the deployment job must not install the build toolchain",
+    );
   });
 
   it("makes the deployment job depend on the build job", () => {

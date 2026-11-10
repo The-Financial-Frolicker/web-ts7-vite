@@ -70,49 +70,45 @@ while (( $# > 0 )); do
     esac
 done
 
-# Generator-owned dependency installation. The rule matches
+# Deployment dependency installation. The rule matches
 # scripts/lib/toolchain/runtime.mjs: the tree must resolve inside
-# <GENERATOR_PROJECT_ROOT>/generator, and a temporary deployment tree names the
-# owning installation root through GENERATOR_PROJECT_ROOT so it reuses one
-# installation instead of creating its own.
+# <GENERATOR_PROJECT_ROOT>/generator, and the deployment tree is a sibling of the
+# toolchain tree (`generator/deployment` vs `generator/toolchain`). Nothing
+# here reads or requires the toolchain installation.
 if [[ -z "${GENERATOR_PROJECT_ROOT+set}" ]]; then
     GENERATOR_PROJECT_ROOT="$PROJECT_ROOT"
 elif [[ -z "$GENERATOR_PROJECT_ROOT" ]]; then
     echo "ERROR: GENERATOR_PROJECT_ROOT is set but empty" >&2
     exit 1
 fi
-if [[ -z "${GENERATOR_ROOT+set}" ]]; then
-    GENERATOR_ROOT="$GENERATOR_PROJECT_ROOT/generator/dependencies"
-elif [[ -z "$GENERATOR_ROOT" ]]; then
-    echo "ERROR: GENERATOR_ROOT is set but empty" >&2
-    exit 1
-fi
-case "$GENERATOR_ROOT" in
+GENERATOR_PROJECT_ROOT="$(readlink -m "$GENERATOR_PROJECT_ROOT")"
+GENERATOR_SUBROOT="$GENERATOR_PROJECT_ROOT/generator"
+DEPLOYMENT_ROOT="${DEPLOYMENT_ROOT:-$GENERATOR_SUBROOT/deployment}"
+case "$DEPLOYMENT_ROOT" in
     /*) ;;
     *)
-        echo "ERROR: GENERATOR_ROOT must be an absolute path: $GENERATOR_ROOT" >&2
+        echo "ERROR: DEPLOYMENT_ROOT must be an absolute path: $DEPLOYMENT_ROOT" >&2
         exit 1
         ;;
 esac
-GENERATOR_PROJECT_ROOT="$(readlink -m "$GENERATOR_PROJECT_ROOT")"
-GENERATOR_ROOT="$(readlink -m "$GENERATOR_ROOT")"
-case "$GENERATOR_ROOT/" in
-    "$GENERATOR_PROJECT_ROOT/generator/"*) ;;
+DEPLOYMENT_ROOT="$(readlink -m "$DEPLOYMENT_ROOT")"
+case "$DEPLOYMENT_ROOT/" in
+    "$GENERATOR_SUBROOT/"*) ;;
     *)
-        echo "ERROR: generator installation root $GENERATOR_ROOT is outside $GENERATOR_PROJECT_ROOT/generator" >&2
+        echo "ERROR: deployment installation root $DEPLOYMENT_ROOT is outside $GENERATOR_SUBROOT" >&2
         exit 1
         ;;
 esac
 
 # The resolver canonicalises the owning project root as well as the tree, so a
-# deployment tree grants read on the installation it reuses.
-GENERATOR_READ_PATHS="$PROJECT_ROOT,$GENERATOR_ROOT"
+# deployment tree grants read on the installation it uses.
+DEPLOYMENT_READ_PATHS="$PROJECT_ROOT,$DEPLOYMENT_ROOT"
 if [[ "$GENERATOR_PROJECT_ROOT" != "$PROJECT_ROOT" ]]; then
-    GENERATOR_READ_PATHS="$GENERATOR_READ_PATHS,$GENERATOR_PROJECT_ROOT"
+    DEPLOYMENT_READ_PATHS="$DEPLOYMENT_READ_PATHS,$GENERATOR_PROJECT_ROOT"
 fi
-if [[ -z "$GENERATOR_ROOT" || ! -f "$GENERATOR_ROOT/toolchain.json" ]]; then
-    echo "ERROR: the toolchain is not installed." >&2
-    echo "       Provision it with: deno task toolchain:install" >&2
+if [[ ! -f "$DEPLOYMENT_ROOT/deployment.json" ]]; then
+    echo "ERROR: the deployment dependencies are not installed." >&2
+    echo "       Provision them with: deno task deployment:install" >&2
     exit 1
 fi
 
@@ -130,7 +126,7 @@ fi
 
 echo "Verifying the artefact hand-off..."
 deno run \
-    --allow-read="$GENERATOR_READ_PATHS" \
+    --allow-read="$DEPLOYMENT_READ_PATHS" \
     --allow-env \
     scripts/artefact.mjs verify
 
@@ -147,7 +143,7 @@ fi
 
 echo "Running Wrangler dry-run..."
 deno run \
-    --allow-read="$GENERATOR_READ_PATHS" \
-    --allow-env=HOME,XDG_CONFIG_HOME,XDG_DATA_HOME,GENERATOR_ROOT,GENERATOR_PROJECT_ROOT \
+    --allow-read="$DEPLOYMENT_READ_PATHS" \
+    --allow-env=HOME,XDG_CONFIG_HOME,XDG_DATA_HOME,GENERATOR_PROJECT_ROOT,DEPLOYMENT_ROOT \
     --allow-run="$DENO_BIN" \
     scripts/wrangler-dry-run.mjs "${EXTRA_ARGS[@]}" "$@"

@@ -66,7 +66,7 @@ require_dependencies() {
         exit 1
     fi
     if [[ -z "${GENERATOR_ROOT+set}" ]]; then
-        GENERATOR_ROOT="$GENERATOR_PROJECT_ROOT/generator/dependencies"
+        GENERATOR_ROOT="$GENERATOR_PROJECT_ROOT/generator/toolchain"
     elif [[ -z "$GENERATOR_ROOT" ]]; then
         echo "ERROR: GENERATOR_ROOT is set but empty" >&2
         exit 1
@@ -153,8 +153,12 @@ run_static_checks() {
     deno task test:vite
     echo "==> Wrangler type-generation tests"
     deno task test:wrangler-types
-    echo "==> Wrangler dry-run tests"
-    deno task test:wrangler-dry-run
+    # The Wrangler dry-run and deployment-policy suites deliberately do not run
+    # here. They resolve the deployment installation (`generator/deployment`), not
+    # the toolchain installation, and the deployment phase owns them:
+    # `deno task deployment:install` then `deno task test:deployment` (or
+    # `deno task deployment:qualify`). This stage is the toolchain phase, and it
+    # must be able to pass without the deployment closure being installed at all.
     echo "==> Node-exclusion wrapper tests"
     deno task test:no-node
     # Consumes the committed contract; it never discovers or approves one. This
@@ -232,11 +236,11 @@ run_build_checks() {
     echo "==> Published-artifact smoke test (dist/client, Deno)"
     deno task test:wasm:published
 
-    echo "==> Wrangler deployment dry run (Vite profile: ci-runner; no credentials required)"
-    # deploy-dry-run.sh runs `deno task build` again, so the second CI build
-    # needs the same temporary override (denoland/deno#37062); both go away
-    # together once the upstream issue is fixed.
-    VITE_PERMISSION_PROFILE=ci-runner deno task deploy:dry-run
+    # The Wrangler dry run deliberately does not run here any more. It resolves
+    # the deployment installation and the artefact, which is the deployment
+    # phase's job (`deploy:artefact:dry-run` against a handed-off artefact), not
+    # the build's. Keeping it here would make the build toolchain depend on the
+    # deployment closure.
 
     # The generated configuration is part of what the contract governs: the
     # build must not silently change compatibility settings relative to the

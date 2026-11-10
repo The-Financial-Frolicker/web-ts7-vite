@@ -212,8 +212,8 @@ jobs:
       - name: Install the pinned Deno only
         run: mise install deno
 
-      - name: Install npm dependencies
-        run: mise exec -- deno task toolchain:install -- --allow-download
+      - name: Install the deployment dependency closure
+        run: mise exec -- deno task deployment:install -- --allow-download
 
       - name: Require Cloudflare credentials
         # Fail closed with the actual prerequisite: a skipped acceptance run is

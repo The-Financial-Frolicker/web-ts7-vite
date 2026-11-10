@@ -4,7 +4,7 @@
  * A product's toolchain claim has two independent halves, and both are required:
  *
  *   generator implementation identity  → repository + immutable tag + full SHA
- *   accepted dependency identity       → the materialisation digest
+ *   accepted dependency identity       → the implementation digest
  *
  * A matching commit with the wrong dependency tree is not the accepted toolchain;
  * a matching tree produced by an unidentified or moving revision is not
@@ -32,10 +32,11 @@ export const SOURCE_FIELDS = Object.freeze([
   "repository",
   "ref",
   "sha",
-  "materialisation",
-  // Cross-machine identity: the installed dependency implementation, excluding
-  // installer state (G8/G8a). `materialisation` is the whole-tree fingerprint,
-  // which legitimately differs between machines.
+  // The portable identity of the accepted implementation: a content digest of
+  // the packages mise installed. The toolchain is no longer copied into a Deno
+  // tree, so there is no installed-tree fingerprint to record beside it; the
+  // machine-specific view digest stays in the installation record and is never
+  // published here.
   "implementation",
 ]);
 
@@ -62,7 +63,7 @@ export function validateSource(value) {
     }
   }
 
-  const { repository, ref, sha, materialisation, implementation } = value;
+  const { repository, ref, sha, implementation } = value;
 
   if (repository !== GENERATOR_REPOSITORY) {
     fail(
@@ -78,12 +79,6 @@ export function validateSource(value) {
   }
   if (typeof sha !== "string" || !/^[0-9a-f]{40}$/.test(sha)) {
     fail(`${SOURCE_FILE} sha must be a full 40-character commit SHA`);
-  }
-  if (
-    typeof materialisation !== "string" ||
-    !/^[0-9a-f]{64}$/.test(materialisation)
-  ) {
-    fail(`${SOURCE_FILE} materialisation must be a 64-character sha256 digest`);
   }
   if (
     typeof implementation !== "string" ||
@@ -236,7 +231,8 @@ export function requireHeadIs(root, sha, run) {
 
 /**
  * 6–7. The installed toolchain must be complete: its identity record must exist
- * and must carry well-formed materialisation and implementation identities.
+ * and must carry well-formed specification, resolution and implementation
+ * identities.
  *
  * The tree itself is **not** re-hashed here. Materialisation correctness is the
  * installer's responsibility (it digests the staging tree it has just produced
@@ -260,11 +256,17 @@ export function requireInstalledIdentity(generatorInstallationRoot) {
     );
   }
 
+  // Schema 2 records the mise-owned toolchain: `implementation` is a content
+  // digest of the installed packages, `resolution` the structure of the view
+  // that resolves them, and `spec` the declaration they were installed from.
+  // There is no copied tree, so there is no materialisation digest.
   if (
-    typeof identity.materialisation !== "string" ||
-    !/^[0-9a-f]{64}$/.test(identity.materialisation)
+    typeof identity.resolution !== "string" || identity.resolution.length === 0
   ) {
-    fail(`${file} records no materialisation digest`);
+    fail(`${file} records no resolution identity`);
+  }
+  if (typeof identity.spec !== "string" || identity.spec.length === 0) {
+    fail(`${file} records no specification identity`);
   }
 
   if (
@@ -293,11 +295,14 @@ export function releaseProvenance(
   requireHeadIs(root, sha, run);
   const identity = requireInstalledIdentity(generatorInstallationRoot);
 
+  // The installation records one content identity: there is no copied tree, so
+  // there is no installed-tree state to record beside it. A value derived from
+  // the machine-specific resolution view would not be portable and is never
+  // published.
   return validateSource({
     repository: GENERATOR_REPOSITORY,
     ref,
     sha,
-    materialisation: identity.materialisation,
     implementation: identity.implementation,
   });
 }

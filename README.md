@@ -427,25 +427,69 @@ mise install
 mise exec -- deno task toolchain:install
 ```
 
-The first writes the toolchain specification — `.mise.toml` and
-`toolchain/package.json` — from the versions you supply on the command line,
-and installs nothing. `mise install` then establishes that installation once
-(CI does the same through `jdx/mise-action`), and this project never rewrites,
-relocates or copies the installed tools. The second command materialises the
-toolchain's own
-[toolchain/deno.lock](toolchain/deno.lock) into the generator-owned subtree
-`generator/dependencies/` beneath this project root (override the tree with
-`GENERATOR_ROOT`, or name the owning project root with
-`GENERATOR_PROJECT_ROOT`), staged in a sibling directory inside the same
-subtree and then swapped into place, and writes `toolchain.json` last as its
-readiness record. Anything that resolves outside `generator/` is rejected
-before the installation touches the filesystem. `--frozen` inside that install means a lock that disagrees with the
-manifests fails instead of resolving; the first provision needs registry access,
-afterwards the artefacts are cached.
+The first writes the toolchain specification — [`.mise.toml`](.mise.toml) — from
+the versions you supply on the command line, and installs nothing. `mise install`
+then establishes that installation once (CI does the same through
+`jdx/mise-action`), and this project never rewrites, relocates or copies the
+installed tools. `.mise.toml` is the **only** specification: the toolchain is
+mise-owned, so there is no Deno manifest and no Deno lockfile for it.
+
+The second command materialises the **resolution view**: `generator/toolchain/`
+beneath this project root (override the tree with `GENERATOR_ROOT`, or name the
+owning project root with `GENERATOR_PROJECT_ROOT`), staged in a sibling
+directory inside the same subtree and swapped into place, with `toolchain.json`
+written last as its readiness record. The view is one symlink per package into
+the mise installation — resolution infrastructure for Deno's Node-API loader,
+never a package installation. Anything that resolves outside `generator/` is
+rejected before the view touches the filesystem, and a link that points outside
+the certified closure is refused rather than certified.
 
 Ordinary builds, typechecks, development, preview and deployment never install,
 resolve or update anything; they consume the installed toolchain and fail with an
 explicit message if it is absent or incomplete.
+
+### Provision the deployment dependency domain
+
+Deployment needs Wrangler, esbuild and the two workerd graphs B5 compares — and
+nothing else. It does not need Vite, TypeScript, Emscripten, CMake or Ninja, so it
+does not install them. The deployment closure is a second installation with its own
+specification, its own tree and its own record:
+
+```bash
+mise exec -- deno task deployment:install
+```
+
+`deployment/package.json` declares exactly the deployment packages, pinned:
+
+| Domain | Owner | Closure | Resolution / installation |
+| --- | --- | --- | --- |
+| Toolchain | **mise** (`.mise.toml`) | Deno, Vite, Wrangler, Emscripten, TypeScript, CMake, Ninja and the Cloudflare Vite plugin, with their transitive closures | `generator/toolchain/` — a symlink **view** plus `toolchain.json`; no package is installed there |
+| Application | Deno | application libraries only — this application declares none, so no such tree exists | — |
+| Deployment | Deno (`deployment/`) | Wrangler and the Cloudflare Vite plugin, with their transitive closures | `generator/deployment/` — `deployment.json` |
+
+The two operations are siblings, not one installer with exclusions: both read a
+declared specification, stage inside the same generator-owned subroot
+(`.staging-<pid>` / `.staging-deployment-<pid>`), validate the staged tree, write
+a content-based identity record last and swap the tree into place atomically. An
+override (`GENERATOR_ROOT`, `DEPLOYMENT_ROOT`) is containment-checked identically,
+and neither operation can target the other's tree — the planner refuses it.
+
+The plugin is a deployment dependency because B5 compares the workerd the
+*Wrangler* graph selects with the workerd the *plugin* graph selects; the check
+cannot resolve without that manifest. Vite arrives with the plugin as its peer
+dependency. It is not declared by the deployment specification, nothing on the
+deployment path imports it, and the installer records the closure it actually
+produced so the difference stays visible.
+
+`deployment:install` refuses a staged tree that would not satisfy B5 (it runs the
+same policy the deployment boundary runs), refuses a closure carrying TypeScript,
+and refuses a declared version that drifts from the toolchain tuple — so a
+deployment can never run a different Wrangler than the qualified build pinned.
+
+The deployment launchers resolve this tree and only this tree:
+`wrangler-deploy.mjs` and `wrangler-dry-run.mjs` use `deploymentRuntimePolicy`,
+which reads `generator/deployment/deployment.json`. A build-only environment has
+no deployment tree at all, and a deployment environment has no toolchain tree.
 
 Deno may report that npm lifecycle scripts were ignored, notably for
 `workerd`. On the supported Ubuntu platforms the pinned platform-specific
@@ -717,6 +761,8 @@ of this documentation if it remains useful.
 | `scripts/artefact.mjs` | The build → deployment hand-off: `pack` writes `artefact-manifest.json` beside a copy of `dist/`, `verify` re-hashes a received payload and refuses a truncated, altered or substituted tree |
 | `scripts/deploy-artefact.sh` | Deploys an existing hand-off: verify, `check:deploy`, then the Deno Wrangler launcher; never builds. `--name` supplies the deployment identity |
 | `scripts/deploy-artefact-dry-run.sh` | The same checks and the Deno dry-run launcher against an existing hand-off; no upload, no credentials |
+| `scripts/deployment-install.mjs` | The deployment installer: stages `deployment/` from its lock into `generator/deployment`, validates the closure against B5 and the toolchain tuple, and records `deployment.json` |
+| `deployment/` | The deployment dependency specification (`package.json`, `deno.json`, `deno.lock`): Wrangler and the Cloudflare Vite plugin, and nothing else |
 | `scripts/contract-refresh.sh` | Contract refresh entry point (generator only): derives the lock from the authorised configuration and the installed toolchain via the authoring CLI; `--print-workerd` prints the resolved runtime path without probing |
 | `scripts/contracts/` | Contract model: scopes and fingerprints, schema and conformance, verification, product CLI (`cli.mjs`), plus generator-only derivation, probing and authoring |
 | `.mise.toml`, `deno.json`, `package.json`, `deno.lock` | The mise configuration specification and task definitions; the locked dependency graph lives in `toolchain/` |
@@ -1038,11 +1084,10 @@ mise exec -- deno task toolchain:specify -- --deno 2.9.8 --vite 8.3.5 \
   shell profiles, environment variables, a previous installation, or an implicit
   `latest`; ranges and tags are refused, and an invocation that omits any of the
   four tools fails.
-- The task **writes the specification** — [`.mise.toml`](.mise.toml) for the
-  mise-installed tools and [`toolchain/package.json`](toolchain/package.json)
-  for the locked packages — and installs nothing. Writing the specification is
-  not the same as writing into an installed toolchain, which this project never
-  does.
+- The task **writes the specification** — [`.mise.toml`](.mise.toml), the single
+  authority for every installed version — and installs nothing. Writing the
+  specification is not the same as writing into an installed toolchain, which
+  this project never does.
 - CMake and Ninja are build prerequisites the generator pins itself; they are
   not part of the specified surface. Node and Python stay host-provided.
 - `scripts/toolchain-specify.mjs`, its suite and the `toolchain:specify` /
@@ -1058,10 +1103,12 @@ upgrades, stages, relocates or copies them afterwards. Tests never install
 anything; they assert against the established installation or use the plan
 output of the dependency installer.
 
-`deno task toolchain:install` materialises the locked *packages*
-([`toolchain/deno.lock`](toolchain/deno.lock)) into the generator-owned subtree
-`generator/dependencies/`; it invokes no tool installation at all, which the
-invariant suite asserts with a `mise` stub on `PATH`.
+`deno task toolchain:install` materialises the *resolution view* in the
+generator-owned subtree `generator/toolchain/`: symlinks into the mise
+installation, a content certificate in `toolchain.json`, and the toolchain-owned
+Vite runner. It resolves packages from mise and copies no package bytes; it
+invokes no tool installation at all, which the invariant suite asserts with a
+`mise` stub on `PATH`.
 
 
 
@@ -1158,7 +1205,7 @@ Run these from the project root with dependencies installed. Commands marked
 | `deno task test:boundary` | Configuration invariants, including negative canaries and Worker typecheck coverage | Deno |
 | `deno task test:vite` | Vite CLI/native-binding resolution, both named permission profiles and the Bash wiring that selects one | Deno |
 | `deno task test:wrangler-types` | Wrangler CLI/workerd/esbuild resolution and the explicit type-generation permission profile | Deno |
-| `deno task test:wrangler-dry-run` | Direct Wrangler CLI/esbuild resolution, dry-run profile, argument forwarding and exit propagation | Deno |
+| `deno task test:wrangler-dry-run` | Direct Wrangler CLI/esbuild resolution from the deployment installation, dry-run profile, argument forwarding and exit propagation | `deployment:install` |
 | `deno task test:toolchain` | Installed-package and TypeScript library discovery primitives, including version-pinned resolution | Deno |
 | `deno task test:toolchain-specify` | Explicit toolchain specification: argument validation, environment independence, written specification, and the installation/immutability invariants (generator only) | Deno |
 | `deno task test:contracts` | Contract conformance: canonical fingerprints, refresh determinism, drift detection, permission-profile derivation and verification helpers | Deno |
@@ -1178,7 +1225,11 @@ Run these from the project root with dependencies installed. Commands marked
 | `deno task deploy:artefact` | Verify the hand-off, check the artefacts, run the B5 runtime check and deploy; never builds. `--name` supplies the Worker name | A hand-off, dependencies, credentials |
 | `deno task deploy:artefact:dry-run` | The same checks and the Deno dry run against a hand-off; no credentials, no upload | A hand-off, dependencies |
 | `deno task deploy:dry-run` | Build, artefact check and Deno-owned `wrangler deploy --dry-run` | Initialised project, dependencies |
-| `deno task validate` | `fmt:check`, `lint`, client/Worker typechecks, the Node boundary check and every Deno test suite, then contract enforcement (the acceptance gate, last) | Dependencies; works on the template |
+| `deno task deployment:install` | Materialises `deployment/deno.lock` into `generator/deployment`, validates the closure (B5 over both graphs, no build-only packages, tuple-consistent Wrangler) and writes `deployment.json` last | Deno; registry access on first provision |
+| `deno task test:deployment` | Deployment integration tests: the deployment runtime policy, the deploy launcher profile, the dry-run launcher, and the deployment installer | `deployment:install` |
+| `deno task toolchain:qualify` | The toolchain phase: formatting, lint, typechecks, the Node boundary, every generator and product suite, and the edge-acceptance logic tests. Runs with no deployment closure installed | `toolchain:install` only |
+| `deno task deployment:qualify` | The deployment phase: `test:deployment`, hand-off verification, the artefact check, B5 and the Wrangler dry run. Runs with no toolchain closure installed | `deployment:install` and a hand-off |
+| `deno task validate` | Both phases in order (`toolchain:qualify`, `deployment:qualify`) and then contract enforcement, which stays the last, fatal gate | Both installations and a hand-off |
 | `deno task ci` | `scripts/ci.sh all` (static checks plus isolated build validation) | Dependencies; works on the template |
 
 Deno tasks are canonical and are the only task surface. There are no npm script
@@ -1567,10 +1618,10 @@ The workflow runs on two jobs:
   key derived from `.mise.toml`; the post-step save also captures Emscripten's
   compiler cache), verifies the pinned Deno/CMake/Ninja/Emscripten versions,
   runs `scripts/resolve-python.sh` for the same interpreter the build will use,
-  and provisions the toolchain dependency domain with
-  `deno task toolchain:install -- --allow-download` into the checkout's own
-  `generator/dependencies` subtree (`GENERATOR_PROJECT_ROOT` names the owning
-  project root, which is how a temporary copy reuses the generator's tree). It then runs formatting, linting,
+  and provisions the toolchain **resolution view** with
+  `deno task toolchain:install` in the checkout's own `generator/toolchain`
+  subtree (`GENERATOR_PROJECT_ROOT` names the owning project root, which is how a
+  temporary copy reuses the generator's view). It then runs formatting, linting,
   both typechecks, the Node dependency-boundary check and tests, Worker runtime
   tests, toolchain discovery and contract conformance tests, the guarded
   generator-only suites (`test:toolchain-specify`, `test:generator`,
@@ -1701,14 +1752,14 @@ differs from the currently resolved one, `scripts/build-wasm.sh` removes and
 reconfigures `build-wasm/`. This is intentional; it prevents a stale SDK from
 being reused. `dist/` is also recreated on every full build.
 
-### `toolchain:install` fails on a lock mismatch
+### `toolchain:install` fails because mise is missing a tool
 
-The committed [toolchain/deno.lock](toolchain/deno.lock) and
-[toolchain/package.json](toolchain/package.json) disagree. Update the lockfile
-intentionally (for example with `mise exec -- deno install` in `toolchain/`),
-review the change to that lock, and commit it with the toolchain change. Do not
-bypass `--frozen` in CI, and do not let an application dependency change reach
-this lock: the two domains are independent.
+The view resolves every declared tool from the mise installation, so a tool the
+specification names but mise has not installed stops the operation with the exact
+missing `npm:<name>@<version>` and its installation directory. Run
+`mise install` from the generator root; the project never resolves, upgrades or
+replaces a version on its own. A version that drifts from `.mise.toml` is a
+specification change, reviewed and committed like any other.
 
 ### WSL: permission, executable-bit or symlink errors
 
@@ -1752,10 +1803,10 @@ release before any product task runs.
 ### What a product records
 
 `.toolchain-source.json` holds four fields: the fixed generator `repository`,
-the `ref`, the full `sha`, and the `materialisation` digest of the dependency
-tree that was accepted. Both halves are required: a correct commit with the
-wrong dependency tree is not the accepted toolchain, and a matching tree from an
-unidentified revision is not provenance.
+the `ref`, the full `sha`, and the `implementation` digest of the toolchain that
+was accepted. Both halves are required: a correct commit with the wrong
+dependency implementation is not the accepted toolchain, and a matching tree from
+an unidentified revision is not provenance.
 
 ### What product CI verifies
 
@@ -1764,12 +1815,12 @@ unidentified revision is not provenance.
 2. The recorded generator release is checked out and its commit SHA compared
    with the recorded SHA, and the ref is confirmed to be an annotated tag that
    resolves to that commit.
-3. The toolchain is provisioned by that verified checkout, into an installation
-   outside the product checkout, with a frozen lockfile.
+3. The toolchain is provisioned by that verified checkout, from its mise-declared
+   pins, into an installation outside the product checkout.
 4. The product-shipped verifier requires three identities to agree: the
    product's recorded digest, the installation's recorded digest, and the
    digest the verified generator's own implementation computes over the actual
-   installed tree.
+   resolved packages.
 
 Missing, malformed, foreign, moveable or inconsistent provenance fails closed:
 no provisioning and no product task runs. Release-qualified generation is
@@ -1785,23 +1836,25 @@ one of them:
 
 | Operation | Where it runs | Purpose |
 | --- | --- | --- |
-| `deno task toolchain:install` digests the staging tree and records `spec`, `resolution`, `materialisation`, `implementation` in `toolchain.json` | Any environment that materialises the tree | **Materialisation correctness**: the installer reports what it produced |
-| `deno task product:generate --toolchain-ref` reads that record and publishes `.toolchain-source.json` | The reference workstation (release path) | **Recording**, not auditing: the installer already observed the tree |
-| `scripts/toolchain-source.mjs verify` compares the runner's **recorded and observed `implementation`** against the product's record | GitHub product CI | **Cross-environment consistency** — the one comparison only GitHub can make |
-| Contract fingerprints (`check:contracts`, `contract:refresh` reproduction) | Both | **Declared versus observed agreement**; unrelated to tree immutability |
+| `deno task toolchain:install` records the tuple, the declared package set, the resolved package inventory, the native bindings, a content `implementation` digest and a `resolution` digest of the view in `toolchain.json` | Any environment that materialises the view | **Installation correctness**: the installer records what mise installed and how the view resolves it |
+| `deno task product:generate --toolchain-ref` reads that record and publishes `.toolchain-source.json` | The reference workstation (release path) | **Recording**, not auditing: the installer already observed the installation |
+| `scripts/toolchain-source.mjs verify` observes the runner's view independently — it re-resolves every package the view points at and recomputes the content digest — and compares it with the product's record | GitHub product CI | **Cross-environment consistency** — the one comparison only GitHub can make |
+| Contract fingerprints (`check:contracts`, `contract:refresh` reproduction) | Both | **Declared versus observed agreement**; unrelated to view structure |
 
-The whole-tree `materialisation` digest is machine-specific: it includes
-installer state that legitimately differs per machine. It is recorded and
-reported, and it is never compared across environments. Only `implementation`
-is cross-machine comparable.
+The content `implementation` digest is portable: it hashes package names,
+versions, file contents, executable bits and the symlink relationships *between
+resolved packages*, and never an absolute path, home directory or store layout.
+The `resolution` digest describes the view's link structure and is deliberately
+machine-specific — it is recorded as view evidence and is never compared across
+environments.
 
-**Deferred requirement (R3).** The runner-side materialisation self-check — the
-comparison of the runner's observed whole-tree digest against the
-`materialisation` value in that runner's own installation record — is
-**intentionally absent from ordinary product verification**. Because
-materialisation is the installer's responsibility and the runner has just
-materialised its own tree, the check restated a fact the installation had
-already established.
+**Deferred requirement (R3).** A runner-side check of the view's *structure*
+against the record is **intentionally absent from ordinary product
+verification**: the view is machine-specific by construction, so comparing it
+across environments would compare paths, not implementations. It is **deferred,
+not discarded**: if a GitHub provenance workflow later needs view evidence, it
+must be defined there with explicit ownership, purpose and acceptance criteria,
+and it must not silently reappear in product verification.
 
 - It is **deferred, not discarded**: when the GitHub provenance workflow becomes
   a real capability, this check must be reconsidered and restored *there* as
@@ -1811,7 +1864,7 @@ already established.
 - It **must not silently reappear** in ordinary product verification: product
   verification keeps only the cross-environment `implementation` gates.
 - The future provenance design must keep the distinction between
-  machine-specific `materialisation` identity and cross-machine-comparable
+  machine-specific `resolution` identity and cross-machine-comparable
   `implementation` identity; conflating them would make provenance
   machine-dependent.
 

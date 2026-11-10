@@ -9,7 +9,8 @@
  * installation, or an implicit "latest" resolution.
  *
  * This task writes the specification — the mise configuration (`.mise.toml`)
- * and the toolchain manifest (`toolchain/package.json`) — and installs nothing.
+ * — and installs nothing. mise is the only specification: the packages are
+ * installed by mise, so there is no Deno manifest and no lockfile.
  * Writing the specification is what the invariants require; mutating an
  * *installed* toolchain is what they prohibit. `mise install` and, when the
  * manifest changes, Deno's own re-lock remain native steps performed once by
@@ -25,8 +26,6 @@ import { MISE_TOOL_ID, SPECIFIED_TOOLS } from "./contracts/toolchain.mjs";
 export { MISE_TOOL_ID, SPECIFIED_TOOLS };
 
 export const MISE_FILE = ".mise.toml";
-export const TOOLCHAIN_DIR = "toolchain";
-export const TOOLCHAIN_PACKAGE = "package.json";
 
 /**
  * Build prerequisites this generator pins itself.
@@ -55,19 +54,15 @@ export const BUILD_TOOL_PINS = Object.freeze({
  *
  * `@cloudflare/vite-plugin` is deliberately absent. It is deployment
  * integration, owned by the Deno application dependency domain
- * (`toolchain/package.json`, written by `renderToolchainPackage` below) together
+ * together
  * with its own dependency closure. That closure may legitimately contain private
  * copies of packages the build toolchain also uses; that is ordinary package
  * isolation inside an application-owned tree and does not affect toolchain
  * ownership, the certified closure or its independence.
  */
 export const TOOLCHAIN_LIBRARIES = Object.freeze({
-  typescript: "7.0.2",
-});
-
-export const ENGINE_PACKAGES = Object.freeze({
-  typescript: "~7.0.2",
   "@cloudflare/vite-plugin": "1.66.0",
+  typescript: "7.0.2",
 });
 
 /** Exact `X.Y.Z`; ranges, tags and implicit resolution are not accepted. */
@@ -182,27 +177,6 @@ export function renderMiseToml(specification) {
   return lines.join("\n");
 }
 
-/** The toolchain manifest for these versions (lock input, not a live tree). */
-export function renderToolchainPackage(specification) {
-  return `${
-    JSON.stringify(
-      {
-        name: "web-ts7-vite-toolchain",
-        private: true,
-        type: "module",
-        dependencies: {
-          "@cloudflare/vite-plugin": ENGINE_PACKAGES["@cloudflare/vite-plugin"],
-          typescript: ENGINE_PACKAGES.typescript,
-          vite: specification.vite,
-          wrangler: specification.wrangler,
-        },
-      },
-      null,
-      2,
-    )
-  }\n`;
-}
-
 /**
  * The mise command that decides whether a supplied version can be installed.
  *
@@ -298,12 +272,10 @@ export function assertAvailable(specification, run = createMiseRunner()) {
  * it; an unchanged specification writes nothing.
  */
 export function applySpecification({ root, specification }) {
+  // One specification: `.mise.toml`. The toolchain is installed by mise, so
+  // there is no Deno manifest and no lockfile to keep in step.
   const targets = [
     { file: MISE_FILE, text: renderMiseToml(specification) },
-    {
-      file: path.join(TOOLCHAIN_DIR, TOOLCHAIN_PACKAGE),
-      text: renderToolchainPackage(specification),
-    },
   ];
 
   const changed = [];

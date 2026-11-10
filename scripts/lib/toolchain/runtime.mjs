@@ -74,14 +74,14 @@ export function assertDenoVersion(appRoot, running = Deno.version.deno) {
 }
 
 /** Require a real, canonical directory at `path`. */
-function realDirectory(path, label) {
+function realDirectory(path, label, provisionHint = "toolchain:install") {
   let stat;
   try {
     stat = Deno.lstatSync(path);
   } catch (error) {
     fail(
       `${label} is not installed at ${path} (${error.message}). Provision it ` +
-        `with \`deno task toolchain:install\`.`,
+        `with \`deno task ${provisionHint}\`.`,
     );
   }
 
@@ -103,7 +103,8 @@ function realDirectory(path, label) {
  * The generator owns exactly one subtree of its project root:
  *
  *   <generator project root>/generator/                  the permitted subtree
- *   <generator project root>/generator/dependencies/     the Deno project tree
+ *   <generator project root>/generator/toolchain/        the mise-backed view
+ *   <generator project root>/generator/deployment/       the deployment closure
  *   <generator project root>/generator/.staging-<pid>/   staging
  *   <generator project root>/generator/.previous/        the replaced tree
  *
@@ -114,12 +115,41 @@ function realDirectory(path, label) {
  * same containment check as the default, so it is not a route around ownership.
  */
 export const GENERATOR_SUBROOT = "generator";
-export const GENERATOR_DEPENDENCIES = "dependencies";
+/**
+ * The toolchain view: resolution infrastructure over the mise-owned installation.
+ * mise owns the packages; this directory holds symlinks into them and the
+ * certificate that records what was installed.
+ */
+export const GENERATOR_TOOLCHAIN = "toolchain";
 export const GENERATOR_STAGING_PREFIX = ".staging-";
 export const GENERATOR_PREVIOUS = ".previous";
 export const APPLICATION_SUBROOT = "application";
 export const GENERATOR_PROJECT_ROOT_VARIABLE = "GENERATOR_PROJECT_ROOT";
 export const GENERATOR_ROOT_VARIABLE = "GENERATOR_ROOT";
+
+/**
+ * The second installation: the deployment dependency closure.
+ *
+ * A sibling of the toolchain tree inside the same generator-owned subroot, with
+ * its own specification, staging, replaced tree and record. Nothing here changes
+ * how the toolchain tree is resolved; the two roots are independent siblings and
+ * installing one never touches the other.
+ *
+ *   <generator project root>/generator/deployment/                 the tree
+ *   <generator project root>/generator/.staging-deployment-<pid>/  staging
+ *   <generator project root>/generator/.previous-deployment/       the replaced tree
+ *
+ * `DEPLOYMENT_ROOT` overrides the tree under the same containment rule as
+ * `GENERATOR_ROOT`, so an override is not a route around ownership.
+ */
+export const GENERATOR_DEPLOYMENT = "deployment";
+export const DEPLOYMENT_ROOT_VARIABLE = "DEPLOYMENT_ROOT";
+export const DEPLOYMENT_STAGING_PREFIX = ".staging-deployment-";
+export const DEPLOYMENT_PREVIOUS = ".previous-deployment";
+
+/** The record that marks an installation complete, per installation role. */
+export const TOOLCHAIN_RECORD = "toolchain.json";
+export const DEPLOYMENT_RECORD = "deployment.json";
 
 /** The real project root that owns the installation. */
 export function generatorProjectRoot(projectRoot = Deno.cwd(), env = Deno.env) {
@@ -177,11 +207,15 @@ function ownedInstallationPath(
 }
 
 /**
- * The generator's Deno dependency tree.
+ * The generator's toolchain view.
  *
  * The default is a child of the generator-owned subroot; an override must be a
  * strict child of the same subroot, so the tree can never be the subroot itself
  * (staging and the replaced tree are its siblings) and never another product's.
+ *
+ * `GENERATOR_ROOT` keeps naming "the dependency tree this process resolves
+ * from". It is the toolchain view now, because the toolchain is no longer
+ * installed into a Deno tree.
  */
 export function generatorInstallationRootPath(
   projectRoot = Deno.cwd(),
@@ -190,7 +224,7 @@ export function generatorInstallationRootPath(
   const subroot = generatorSubrootPath(projectRoot, env);
   const override = env.get(GENERATOR_ROOT_VARIABLE);
   const candidate = override === undefined
-    ? join(subroot, GENERATOR_DEPENDENCIES)
+    ? join(subroot, GENERATOR_TOOLCHAIN)
     : absolutePath(override, GENERATOR_ROOT_VARIABLE);
 
   return ownedInstallationPath(
@@ -244,16 +278,92 @@ export function generatorInstallationRoot(
   );
 }
 
-/** The installation record, written last by provisioning. */
-export function installedIdentity(root) {
-  const path = join(root, "toolchain.json");
+/**
+ * The deployment dependency tree, under the same ownership rules.
+ *
+ * A strict child of the generator-owned subroot, never that subroot itself, and
+ * never the application's. Installing it is a separate operation from installing
+ * the toolchain; resolving one never resolves the other.
+ */
+export function deploymentInstallationRootPath(
+  projectRoot = Deno.cwd(),
+  env = Deno.env,
+) {
+  const subroot = generatorSubrootPath(projectRoot, env);
+  const override = env.get(DEPLOYMENT_ROOT_VARIABLE);
+  return ownedInstallationPath(
+    override === undefined
+      ? join(subroot, GENERATOR_DEPLOYMENT)
+      : absolutePath(override, DEPLOYMENT_ROOT_VARIABLE),
+    projectRoot,
+    env,
+    `the ${DEPLOYMENT_ROOT_VARIABLE} installation root`,
+    true,
+  );
+}
+
+/** Staging directory for the deployment tree: a sibling, inside the subroot. */
+export function deploymentStagingPath(
+  projectRoot = Deno.cwd(),
+  env = Deno.env,
+  pid = Deno.pid,
+) {
+  const subroot = generatorSubrootPath(projectRoot, env);
+  return ownedInstallationPath(
+    join(subroot, `${DEPLOYMENT_STAGING_PREFIX}${pid}`),
+    projectRoot,
+    env,
+    "the deployment staging directory",
+    true,
+  );
+}
+
+/** The replaced deployment tree: a sibling, inside the subroot. */
+export function deploymentPreviousPath(
+  projectRoot = Deno.cwd(),
+  env = Deno.env,
+) {
+  const subroot = generatorSubrootPath(projectRoot, env);
+  return ownedInstallationPath(
+    join(subroot, DEPLOYMENT_PREVIOUS),
+    projectRoot,
+    env,
+    "the previous deployment installation path",
+    true,
+  );
+}
+
+/** The installed deployment tree, required to exist as a real directory. */
+export function deploymentInstallationRoot(
+  projectRoot = Deno.cwd(),
+  env = Deno.env,
+) {
+  return realDirectory(
+    deploymentInstallationRootPath(projectRoot, env),
+    "deployment installation",
+    "deployment:install",
+  );
+}
+
+/**
+ * The installation record, written last by provisioning.
+ *
+ * Each installation role writes its own record inside its own tree, so "is this
+ * tree complete?" is answered by the tree itself and never by a directory name.
+ */
+export function installedIdentity(root, record = TOOLCHAIN_RECORD) {
+  const path = join(root, record);
+  const provision = record === DEPLOYMENT_RECORD
+    ? "deployment:install"
+    : "toolchain:install";
+
   let text;
   try {
     text = readFileSync(path, "utf8");
   } catch (error) {
     fail(
       `${root} is not a complete generator installation (${error.message}). ` +
-        `A refresh may have failed; re-run \`deno task toolchain:install\`.`,
+        `A refresh may have failed; re-run \`deno task ${provision}\`.`,
     );
   }
 
@@ -287,4 +397,33 @@ export function runtimePolicy(
   }
 
   return { deno, generatorInstallationRoot: root, identity };
+}
+
+/**
+ * The deployment counterpart: the same pin assertion, the same record check,
+ * resolved against the deployment tree instead of the toolchain tree.
+ *
+ * Deployment is the only phase that resolves Wrangler, esbuild and the two
+ * workerd graphs, so it is the only phase that requires this installation. A
+ * build-only environment can satisfy `runtimePolicy` and still have no
+ * deployment tree at all.
+ */
+export function deploymentRuntimePolicy(
+  projectRoot = Deno.cwd(),
+  running = Deno.version.deno,
+  env = Deno.env,
+) {
+  const deno = assertDenoVersion(projectRoot, running);
+  const root = deploymentInstallationRoot(projectRoot, env);
+  const identity = installedIdentity(root, DEPLOYMENT_RECORD);
+
+  if (identity.deno !== deno) {
+    fail(
+      `the installed deployment dependencies were provisioned for Deno ` +
+        `${identity.deno}, but this process is Deno ${deno}. Re-provision with ` +
+        `\`deno task deployment:install\`.`,
+    );
+  }
+
+  return { deno, deploymentInstallationRoot: root, identity };
 }

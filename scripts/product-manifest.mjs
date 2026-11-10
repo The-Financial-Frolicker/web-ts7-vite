@@ -54,6 +54,14 @@ export const PRODUCT_MANIFEST = Object.freeze({
     "scripts/deploy-artefact-dry-run.sh",
     "scripts/artefact.mjs",
     "scripts/artefact.test.mjs",
+    // The deployment installation is application-scoped (Deno owns the
+    // deployment dependency tree), so a product provisions its own from this
+    // specification rather than borrowing the generator's toolchain closure.
+    "scripts/deployment-install.mjs",
+    "scripts/deployment-install.test.mjs",
+    "deployment/package.json",
+    "deployment/deno.json",
+    "deployment/deno.lock",
     "scripts/deno-no-node.sh",
     "scripts/resolve-python.sh",
     "scripts/worker-types.sh",

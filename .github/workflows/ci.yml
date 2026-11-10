@@ -24,7 +24,9 @@ env:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Repository-role discriminator: the generator owns `toolchain/deno.lock`.
+  # Repository-role discriminator: the generator owns the toolchain-owned Vite
+  # runner. A product never ships it (it resolves through the generator's
+  # installation), so its presence still identifies the generator role.
   # A generated product never ships it, so exactly one role path can run.
   #
   # The role is decided here, in a step, because `hashFiles()` is only available
@@ -52,12 +54,12 @@ jobs:
         id: marker
         run: |
           set -euo pipefail
-          if [ -f toolchain/deno.lock ]; then
+          if [ -f toolchain/scripts/vite-runner.mjs ]; then
             echo "generator=true" >> "$GITHUB_OUTPUT"
-            echo "role: generator (toolchain/deno.lock present)"
+            echo "role: generator (toolchain/scripts/vite-runner.mjs present)"
           else
             echo "generator=false" >> "$GITHUB_OUTPUT"
-            echo "role: product (toolchain/deno.lock absent)"
+            echo "role: product (toolchain/scripts/vite-runner.mjs absent)"
           fi
 
   validate:
@@ -101,59 +103,65 @@ jobs:
         run: bash scripts/resolve-python.sh
 
       # The toolchain is provisioned through the same generator-owned lifecycle a
-      # developer runs. `--frozen` keeps resolution locked (nothing is discovered,
-      # upgraded or re-pinned); `--allow-download` exists only because a clean
-      # runner has no Deno package cache. The materialisation is verified and its
-      # identity recorded before any application workflow runs.
+      # developer runs. Resolution is locked to the pins in `.mise.toml`: nothing
+      # is discovered, upgraded or re-pinned. `--allow-download` exists only
+      # because a clean runner has no Deno package cache. The identity is recorded
+      # and verified before any application workflow runs.
       - name: Provision the toolchain
         if: hashFiles('scripts/toolchain-install.mjs') != ''
         run: mise exec -- deno task toolchain:install -- --allow-download
 
       - name: Record and verify the toolchain identity
-        # `GENERATOR_ROOT` is the generator-owned dependency installation that the
-        # provisioning step above materialised (P19). The step names it directly
+        # `GENERATOR_ROOT` is the mise-backed resolution view the provisioning
+        # step above created: symlinks into mise's own installation, plus the
+        # certificate recording what was installed. The step names it directly
         # rather than re-deriving a path of its own.
         env:
-          GENERATOR_ROOT: ${{ github.workspace }}/generator/dependencies
+          GENERATOR_ROOT: ${{ github.workspace }}/generator/toolchain
         run: |
           set -euo pipefail
           tc="$GENERATOR_ROOT"
           echo "::group::toolchain identity"
           cat "$tc/toolchain.json"
-          sha256sum "$tc/package.json" "$tc/deno.json" "$tc/deno.lock"
           echo "::endgroup::"
-          for pkg in vite wrangler typescript @cloudflare/vite-plugin; do
+          # Every certified package must resolve through the view. A link that
+          # dangles is an incomplete toolchain, not a warning.
+          for pkg in vite wrangler typescript workerd @cloudflare/vite-plugin; do
             test -e "$tc/node_modules/$pkg" || { echo "missing package: $pkg"; exit 1; }
           done
-          test -x "$tc"/node_modules/.deno/@cloudflare+workerd-linux-64@*/node_modules/@cloudflare/workerd-linux-64/bin/workerd
+          # The native runtime is executed, so it must be executable through the
+          # view into mise's own installation.
+          test -x "$tc"/node_modules/@cloudflare/workerd-linux-64/bin/workerd
           # A native shared library is loaded, not executed: it needs to be a
           # readable regular file. `test -x` would fail on a legitimate 0644
           # binding, and did.
-          test -f "$tc"/node_modules/.deno/@rolldown+binding-linux-x64-gnu@*/node_modules/@rolldown/binding-linux-x64-gnu/*.node
-          test -r "$tc"/node_modules/.deno/@rolldown+binding-linux-x64-gnu@*/node_modules/@rolldown/binding-linux-x64-gnu/*.node
-          # Compact materialisation diagnostics, so a hosted run that disagrees
-          # with a laptop can be narrowed down without printing thousands of
-          # paths: counters, plus hashes of the mode and path columns alone.
-          deno eval --allow-read="$tc","$GITHUB_WORKSPACE" '
-            const { treeDigest } = await import(
-              `${Deno.cwd()}/scripts/lib/toolchain/tree-digest.mjs`
+          test -f "$tc"/node_modules/@rolldown/binding-linux-x64-gnu/*.node
+          test -r "$tc"/node_modules/@rolldown/binding-linux-x64-gnu/*.node
+          # The portable identity is a content digest of the packages the view
+          # resolves, never of the view itself: its symlink targets are
+          # machine-specific. Recomputing it here proves the view still describes
+          # the installation the record was written from, and that a hosted run
+          # and a laptop agree on a single identity.
+          deno eval --allow-read --allow-env '
+            const { implementationDigest, packagesFromView } = await import(
+              `${Deno.cwd()}/scripts/lib/toolchain/mise.mjs`
             );
-            const tree = await treeDigest(Deno.args[0]);
-            console.log(
-              `diagnostics: entries=${tree.entries} files=${tree.files} dirs=${tree.dirs} symlinks=${tree.symlinks} bytes=${tree.bytes}`,
-            );
-            console.log(`diagnostics: mode-column sha256=${tree.modeDigest}`);
-            console.log(`diagnostics: path-column sha256=${tree.pathDigest}`);
-            console.log(
-              `diagnostics: path-mode-column sha256=${tree.pathModeDigest}`,
-            );
-            console.log(
-              `identity: implementation sha256=${tree.implementationDigest} entries=${tree.implementationEntries}`,
+            const root = Deno.args[0];
+            const packages = packagesFromView(`${root}/node_modules`);
+            const observed = await implementationDigest(packages);
+            const record = JSON.parse(
+              Deno.readTextFileSync(`${root}/toolchain.json`),
             );
             console.log(
-              `identity: metadata files=${tree.metadataFiles} sha256=${tree.metadataDigest}`,
+              `diagnostics: packages=${observed.packages} files=${observed.files} bytes=${observed.bytes}`,
             );
-          ' "$tc/node_modules"
+            console.log(`identity: implementation sha256=${observed.digest}`);
+            if (observed.digest !== record.implementation) {
+              throw new Error(
+                `the view hashes to ${observed.digest}, the record says ${record.implementation}`,
+              );
+            }
+          ' "$tc"
           echo "toolchain identity verified"
 
       - name: Formatting check
@@ -236,9 +244,9 @@ jobs:
       - name: Wrangler type-generation tests
         run: mise exec -- deno task test:wrangler-types
 
-      - name: Wrangler dry-run tests
-        run: mise exec -- deno task test:wrangler-dry-run
-
+      # The Wrangler dry-run and deployment-policy suites belong to the
+      # deployment phase: they resolve `generator/deployment`, which this job
+      # deliberately does not install. They run in the `deployment` job.
       - name: Node-exclusion wrapper tests
         run: mise exec -- deno task test:no-node
 
@@ -341,8 +349,10 @@ jobs:
           mise exec -- deno task check:client
           mise exec -- deno task check:worker
           mise exec -- deno task build
-          mise exec -- deno task deploy:dry-run
-          echo "generated product validated independently"
+          # The deployment dry run is not part of this step: it resolves the
+          # deployment installation, which the build job does not own. The
+          # product's build independence is what this step proves.
+          echo "generated product built independently"
 
   # ---------------------------------------------------------------------------
   # Build → deployment hand-off (generator).
@@ -475,8 +485,8 @@ jobs:
         run: mise install deno
 
       - name: Provision the deployment dependency closure
-        if: hashFiles('scripts/toolchain-install.mjs') != ''
-        run: mise exec -- deno task toolchain:install -- --allow-download
+        if: hashFiles('scripts/deployment-install.mjs') != ''
+        run: mise exec -- deno task deployment:install -- --allow-download
 
       - name: Download the hand-off from the build job
         uses: actions/download-artifact@v4
@@ -496,15 +506,15 @@ jobs:
       - name: Verify the hand-off
         run: mise exec -- deno task artefact:verify
 
-      - name: Deployment validation (artefact, B5 runtime check, Wrangler dry run)
-        run: mise exec -- deno task deploy:artefact:dry-run
+      - name: Deployment validation (deployment tests, artefact, B5, Wrangler dry run)
+        run: mise exec -- deno task deployment:qualify
 
   # ---------------------------------------------------------------------------
   # Generated product path.
   #
   # A generated product ships no `toolchain/` directory, which is the role
   # discriminator. It must therefore establish *which* generator release and
-  # *which* materialised dependency tree it is authorised to use before any
+  # *which* mise-owned toolchain it is authorised to use before any
   # product task runs. A product with missing or invalid provenance fails in
   # Stage A; it can never fall through into the generator jobs.
   # ---------------------------------------------------------------------------
@@ -580,9 +590,19 @@ jobs:
           set -euo pipefail
           mise exec -- deno task toolchain:install -- --allow-download
 
-      # Stage D — the three identities must agree, with the digest computed by
-      # the verified checkout's own implementation.
-      - name: Verify provenance and materialisation
+      # This job both builds and deploys a product, so it is the one job that
+      # owns both closures: the toolchain for the build, the deployment closure
+      # for the product's deployment dry run. Separate jobs keep them apart.
+      - name: Provision the deployment closure from the verified generator release
+        working-directory: ${{ runner.temp }}/generator
+        run: |
+          set -euo pipefail
+          mise exec -- deno task deployment:install -- --allow-download
+
+      # Stage D — the three identities must agree: the product's record, the
+      # installation's record, and the observation the verified checkout's own
+      # digest implementation computes over the resolved packages.
+      - name: Verify provenance and implementation identity
         env:
           GENERATOR_PROJECT_ROOT: ${{ runner.temp }}/generator
         run: |
@@ -590,7 +610,7 @@ jobs:
           deno run --allow-read --allow-env \
             "$GITHUB_WORKSPACE/scripts/toolchain-source.mjs" verify \
             --generator "${{ runner.temp }}/generator" \
-            --generator-root "$GENERATOR_PROJECT_ROOT/generator/dependencies"
+            --generator-root "$GENERATOR_PROJECT_ROOT/generator/toolchain"
 
       # Stage E — product acceptance, only after every gate above.
       - name: Client typecheck

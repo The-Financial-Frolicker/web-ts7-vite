@@ -23,12 +23,10 @@ import {
   assertAvailable,
   availabilityArgs,
   BUILD_TOOL_PINS,
-  ENGINE_PACKAGES,
   main,
   MISE_TOOL_ID,
   parseSpecification,
   renderMiseToml,
-  renderToolchainPackage,
   SpecificationError,
   SPECIFIED_TOOLS,
 } from "./toolchain-specify.mjs";
@@ -184,31 +182,37 @@ describe("the specification is written, never installed", () => {
     assert.doesNotMatch(toml, /toolchain:prepare/);
   });
 
-  it("renders the toolchain manifest from the specified versions", () => {
-    const manifest = JSON.parse(renderToolchainPackage(SPEC));
-    assert.equal(manifest.dependencies.vite, SPEC.vite);
-    assert.equal(manifest.dependencies.wrangler, SPEC.wrangler);
-    assert.equal(manifest.dependencies.typescript, ENGINE_PACKAGES.typescript);
-    assert.equal(
-      manifest.dependencies["@cloudflare/vite-plugin"],
-      ENGINE_PACKAGES["@cloudflare/vite-plugin"],
-    );
+  it("declares the toolchain packages from the specified versions", () => {
+    // `.mise.toml` is the only specification: the tuple from the command line,
+    // and the additional toolchain packages pinned beside it.
+    const toml = renderMiseToml(SPEC);
+    for (
+      const [id, version] of [
+        ["npm:vite", SPEC.vite],
+        ["npm:wrangler", SPEC.wrangler],
+        ["npm:typescript", "7.0.2"],
+        ["npm:@cloudflare/vite-plugin", "1.66.0"],
+      ]
+    ) {
+      assert.match(toml, new RegExp(`^"${id}" = "${version}"$`, "m"));
+    }
   });
 
-  it("writes both specification files and reports what changed", () => {
+  it("writes the single specification file and reports what changed", () => {
     const root = makeRoot();
     const changed = applySpecification({ root, specification: SPEC });
-    assert.deepEqual(changed, [".mise.toml", "toolchain/package.json"]);
+    // One specification: mise installs the toolchain, so there is no Deno
+    // manifest to render and no lockfile to keep in step.
+    assert.deepEqual(changed, [".mise.toml"]);
     assert.match(
       readFileSync(path.join(root, ".mise.toml"), "utf8"),
       /2\.9\.8/,
     );
-    assert.equal(
-      JSON.parse(
-        readFileSync(path.join(root, "toolchain/package.json"), "utf8"),
-      )
-        .dependencies.wrangler,
-      SPEC.wrangler,
+    // The specification is the only artefact written, and it carries the
+    // specified wrangler version.
+    assert.match(
+      readFileSync(path.join(root, ".mise.toml"), "utf8"),
+      new RegExp(`^"npm:wrangler" = "${SPEC.wrangler}"$`, "m"),
     );
   });
 
@@ -457,11 +461,9 @@ describe("the four-member tuple", () => {
     assert.match(toml, new RegExp(`^ninja = "${BUILD_TOOL_PINS.ninja}"$`, "m"));
   });
 
-  it("is exact for every member in both artefacts", () => {
+  it("is exact for every member in the specification and the contract", () => {
     const tuple = readToolchainTuple(Deno.cwd());
-    const manifest = JSON.parse(
-      readFileSync(path.join(Deno.cwd(), "toolchain", "package.json"), "utf8"),
-    ).dependencies;
+    const toml = readFileSync(path.join(Deno.cwd(), ".mise.toml"), "utf8");
     const document = JSON.parse(
       readFileSync(path.join(Deno.cwd(), "toolchain-contracts.json"), "utf8"),
     );
@@ -473,9 +475,15 @@ describe("the four-member tuple", () => {
     for (const value of Object.values(tuple)) {
       assert.match(value, /^\d+\.\d+\.\d+$/);
     }
-    // A tuple member that is also a Deno dependency is pinned exactly there too.
-    for (const name of ["vite", "wrangler"]) {
-      assert.equal(manifest[name], tuple[name], `${name} must be exact`);
+    // A tuple member that is also an npm package is pinned exactly in the
+    // specification mise installs from.
+    for (
+      const [id, version] of [["npm:vite", tuple.vite], [
+        "npm:wrangler",
+        tuple.wrangler,
+      ]]
+    ) {
+      assert.match(toml, new RegExp(`^"${id}" = "${version}"$`, "m"));
     }
   });
 });
@@ -483,21 +491,27 @@ describe("the four-member tuple", () => {
 describe("the build/deployment ownership boundary", () => {
   const toml = renderMiseToml(SPEC);
 
-  it("keeps the Cloudflare plugin out of the mise toolchain specification", () => {
-    // Deployment integration is application-owned; a mise pin would make it a
-    // certified build-toolchain package and give it private peers of its own.
-    assert.equal(toml.includes("@cloudflare/vite-plugin"), false);
-    assert.doesNotMatch(toml, /cloudflare/);
+  it("declares the Cloudflare plugin as a toolchain package, never as an application dependency", () => {
+    // The plugin is required to operate the Vite build, so mise installs it with
+    // the toolchain. It must not be declared as an application dependency: the
+    // application Deno tree owns application libraries only.
+    assert.match(toml, /^"npm:@cloudflare\/vite-plugin" = "1\.66\.0"$/m);
   });
 
   it("keeps the exact TypeScript build dependency in the specification", () => {
     assert.match(toml, /^"npm:typescript" = "7\.0\.2"$/m);
   });
 
-  it("keeps the plugin in the application-owned dependency manifest", () => {
-    const manifest = JSON.parse(renderToolchainPackage(SPEC));
-    assert.equal(manifest.dependencies["@cloudflare/vite-plugin"], "1.66.0");
-    assert.equal(manifest.dependencies.vite, SPEC.vite);
-    assert.equal(manifest.dependencies.wrangler, SPEC.wrangler);
+  it("pins the Vite plugin in the toolchain specification, not an application tree", () => {
+    // The plugin is a toolchain package installed by mise. It must never be
+    // declared as an application dependency: the application Deno tree owns
+    // application libraries only.
+    const toml = renderMiseToml(SPEC);
+    assert.match(toml, /^"npm:@cloudflare\/vite-plugin" = "1\.66\.0"$/m);
+    assert.match(toml, new RegExp(`^"npm:vite" = "${SPEC.vite}"$`, "m"));
+    assert.match(
+      toml,
+      new RegExp(`^"npm:wrangler" = "${SPEC.wrangler}"$`, "m"),
+    );
   });
 });

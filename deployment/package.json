@@ -1,11 +1,9 @@
 {
-  "name": "web-ts7-vite-toolchain",
+  "name": "web-ts7-vite-deployment",
   "private": true,
   "type": "module",
   "dependencies": {
     "@cloudflare/vite-plugin": "1.66.0",
-    "typescript": "~7.0.2",
-    "vite": "8.3.5",
     "wrangler": "4.156.0"
   }
 }

@@ -32,7 +32,7 @@ elif [[ -z "$GENERATOR_PROJECT_ROOT" ]]; then
     exit 1
 fi
 if [[ -z "${GENERATOR_ROOT+set}" ]]; then
-    GENERATOR_ROOT="$GENERATOR_PROJECT_ROOT/generator/dependencies"
+    GENERATOR_ROOT="$GENERATOR_PROJECT_ROOT/generator/toolchain"
 elif [[ -z "$GENERATOR_ROOT" ]]; then
     echo "ERROR: GENERATOR_ROOT is set but empty" >&2
     exit 1

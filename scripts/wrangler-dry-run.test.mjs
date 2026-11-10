@@ -7,8 +7,8 @@
  */
 
 import assert from "./lib/assert.mjs";
-import path from "./lib/path.mjs";
 import { describe, it } from "./lib/test.mjs";
+import { deploymentInstallationRoot } from "./lib/toolchain/runtime.mjs";
 import {
   buildWranglerDryRunArgs,
   main,
@@ -17,19 +17,14 @@ import {
 } from "./wrangler-dry-run.mjs";
 
 const projectRoot = Deno.cwd();
-// Toolchain packages live in the installed toolchain, outside the application.
-// The generator owns its Deno dependency tree inside its own subroot.
-const generatorInstallationRoot = path.join(
-  projectRoot,
-  "generator",
-  "dependencies",
-);
+// The deployment installation, resolved through the same policy the launcher
+// uses — so an explicit `DEPLOYMENT_ROOT` or `GENERATOR_PROJECT_ROOT` is honoured
+// instead of a hard-coded path.
+const deploymentTree = deploymentInstallationRoot(projectRoot);
 
 describe("Deno-owned Wrangler dry-run", () => {
   it("resolves the direct Wrangler CLI and esbuild", () => {
-    const invocation = resolveWranglerDryRunInvocation(
-      generatorInstallationRoot,
-    );
+    const invocation = resolveWranglerDryRunInvocation(deploymentTree);
 
     assert.ok(invocation.wranglerCli.endsWith("/wrangler-dist/cli.js"));
     assert.ok(
@@ -43,7 +38,7 @@ describe("Deno-owned Wrangler dry-run", () => {
 
   it("builds the dry-run-specific profile and forwards arguments", () => {
     const invocation = resolveWranglerDryRunInvocation(
-      generatorInstallationRoot,
+      deploymentTree,
     );
     const writes = writablePaths(projectRoot);
     const args = buildWranglerDryRunArgs(invocation, projectRoot, [
@@ -131,7 +126,7 @@ function makeDeploymentRoot({ plugin = true, mismatch = false } = {}) {
   const root = Deno.realPathSync(
     Deno.makeTempDirSync({ prefix: "deploy-launcher-" }),
   );
-  const installation = `${root}/generator/dependencies`;
+  const installation = `${root}/generator/deployment`;
   const platform = fixturePlatformPackage();
 
   const write = (relative, contents) =>
@@ -150,7 +145,7 @@ function makeDeploymentRoot({ plugin = true, mismatch = false } = {}) {
     `[tools]\ndeno = "${Deno.version.deno}"\n`,
   );
   write(
-    "toolchain.json",
+    "deployment.json",
     JSON.stringify({
       schema: 1,
       deno: Deno.version.deno,

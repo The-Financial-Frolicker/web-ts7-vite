@@ -15,7 +15,7 @@
  */
 
 import { join } from "./lib/path.mjs";
-import { runtimePolicy } from "./lib/toolchain/runtime.mjs";
+import { deploymentRuntimePolicy } from "./lib/toolchain/runtime.mjs";
 import { assertDeploymentRuntime } from "./lib/cloudflare/deployment-runtime.mjs";
 import { resolveEsbuild, resolveWranglerCli } from "./wrangler-types.mjs";
 
@@ -94,16 +94,19 @@ export function runChild(args, root) {
 /** CLI entry point; returns a process exit code. */
 export function main(argv = Deno.args, root = Deno.cwd(), execute = runChild) {
   try {
-    // Deno pin and installed toolchain, before any resolution or execution.
-    const policy = runtimePolicy(root);
+    // Deno pin, then the deployment installation. The dry run resolves Wrangler,
+    // esbuild and both workerd graphs from the deployment tree only.
+    const policy = deploymentRuntimePolicy(root);
 
     // Deployment policy: the runtime Wrangler will execute must be the one the
     // build-side plugin graph pulled in. Checked here, at the deployment boundary,
     // and never in the toolchain certificate.
-    assertDeploymentRuntime({ nodeModules: policy.generatorInstallationRoot });
+    assertDeploymentRuntime({
+      nodeModules: policy.deploymentInstallationRoot,
+    });
 
     const invocation = resolveWranglerDryRunInvocation(
-      policy.generatorInstallationRoot,
+      policy.deploymentInstallationRoot,
     );
     const extraArgs = argv[0] === "--print-profile" ? [] : argv;
     const args = buildWranglerDryRunArgs(invocation, root, extraArgs);
