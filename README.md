@@ -1246,7 +1246,9 @@ Run these from the project root with dependencies installed. Commands marked
 | `deno task test:deployment` | Deployment integration tests: the deployment runtime policy, the deploy launcher profile, the dry-run launcher, and the deployment installer | `deployment:install` |
 | `deno task toolchain:qualify` | The toolchain phase: formatting, lint, typechecks, the Node boundary, every generator and product suite, and the edge-acceptance logic tests. Runs with no deployment closure installed | `toolchain:install` only |
 | `deno task deployment:qualify` | The deployment phase: `test:deployment`, hand-off verification, the artefact check, B5 and the Wrangler dry run. Runs with no toolchain closure installed | `deployment:install` and a hand-off |
-| `deno task validate` | Both phases in order (`toolchain:qualify`, `deployment:qualify`) and then contract enforcement, which stays the last, fatal gate | Both installations and a hand-off |
+| `deno task validate:toolchain` | Self-contained toolchain validation: confirms the generator template identity, installs or re-establishes the mise-owned toolchain and its resolution view, verifies the committed contract (never refreshes it), then runs `toolchain:qualify`. Leaves the deployment installation untouched | A clean checkout and `mise install` |
+| `deno task validate:deployment` | Self-contained deployment validation: installs or re-establishes the toolchain, builds through `scripts/ci.sh build` in an isolated initialised copy, packs the hand-off there, installs the deployment closure **inside that copy**, runs `deployment:qualify` against the hand-off, then removes the copy | A clean checkout and `mise install` |
+| `deno task validate` | The two self-contained entry points, in order: `validate:toolchain`, then `validate:deployment`. Neither tree state has to be prepared by hand | A clean checkout and `mise install` |
 | `deno task ci` | `scripts/ci.sh all` (static checks plus isolated build validation) | Dependencies; works on the template |
 
 Deno tasks are canonical and are the only task surface. There are no npm script
@@ -1254,11 +1256,63 @@ equivalents: starting a workflow through `npm run` would execute Node to launch
 it, which the Node-exclusion contract forbids. `package.json` remains as package
 metadata (name, type, dependencies) for the tools that read it.
 
-The `validate` chain is the same shape in both trees: a generated product
-rewrites it to the tasks it actually received, and it also keeps
-`check:contracts` **last**, after every independent check and test suite. A
-drifted or unrecorded contract therefore never hides the product's own suites;
-the gate still fails the chain at the end.
+A generated product's `validate` chain is rewritten from the generator's: it runs
+the tasks the product actually received and keeps `check:contracts` **last**,
+after every independent check and test suite. A drifted or unrecorded contract
+therefore never hides the product's own suites; the gate still fails the chain at
+the end. The generator's own `validate` is the two self-contained entry points
+described below.
+
+### Self-contained validation entry points
+
+The two qualification paths need different tree states. Toolchain qualification
+asserts the generator/template identity; deployment qualification needs an
+initialised application identity and a real build/deployment hand-off. Neither
+state has to be prepared by hand: the entry points orchestrate the routines that
+already exist and then qualify what they established.
+
+`deno task validate:toolchain` (`scripts/validate-toolchain.mjs`) runs, in order:
+an identity preflight that refuses a checkout whose template identity was
+replaced; `toolchain:install`, which installs or re-establishes the mise-owned
+toolchain and writes the identity record that carries the resolution view;
+`check:contracts`, which is a verdict and never a rewrite; and
+`toolchain:qualify`. The deployment installation record is read before and after
+and any change is a failure. It reads nothing from a deployment closure and
+deploys nothing.
+
+`deno task validate:deployment` (`scripts/validate-deployment.mjs`) runs, in
+order: the same identity preflight; `toolchain:install`; `scripts/ci.sh build`
+with `CI_WORK_DIR` pointing at a workspace the orchestrator created and
+`CI_PACK_HANDOFF=1`, so the established copy/initialise/build routine writes an
+initialised build copy and packs the hand-off inside it; `deployment:install` in
+that workspace, so the copy owns the tree its qualification resolves; and
+`deployment:qualify` in the workspace with no root override in play. The
+workspace is removed in a `finally` block, on success and on failure, and the
+generator checkout's identity is compared before and after. Nothing is uploaded.
+
+The two tasks keep their state apart. `validate:toolchain` never installs or
+reads a deployment closure; `validate:deployment` installs the deployment closure
+only inside its disposable workspace, so the generator checkout gains no
+deployment tree and no committed identity changes. The build toolchain is shared
+— one mise installation, reused — because its ownership and lifecycle are
+identical for both paths; only the identities, source trees and mutable
+qualification state are isolated.
+
+Both tasks are safe to run repeatedly: the installers stage and swap their trees,
+the workspace is created empty and always removed, and neither closure is
+installed into the other's tree. `deno task validate` runs the two in order and
+needs no manual preparation.
+
+Contract refresh stays separate: `deno task contract:refresh` is the only task
+that rewrites `toolchain-contracts.json`, it requires the authorised platform,
+and it is an authoring action with a reviewed lock diff. The validation entry
+points only verify.
+
+The orchestration itself is tested by `deno task test:validation`
+(`scripts/validate-orchestration.test.mjs`): ordering, the required installation
+calls, workspace and tree ownership, identity isolation, failure propagation,
+cleanup on success and failure, and repeatability, with the process runner
+injected so nothing is installed, built or deployed.
 
 ### `scripts/ci.sh` modes and `deno task ci`
 
@@ -1281,11 +1335,18 @@ mode:
 
 The checkout is never modified. The build mode copies the working tree
 (including uncommitted changes) to a temporary directory, leaving out Git
-metadata, dependencies and generated output (`.git`, `node_modules`, `dist`,
-`build-wasm`, `.wrangler`, `public/wasm`), symlinks the existing `node_modules`,
-and removes the copy on exit. It initialises the copy as `ci-smoke`; if the
-source is already initialised that step is a no-op, so the copy keeps the
-existing identity.
+metadata, dependencies, generated output and the independent `application/`
+project (`.git`, `node_modules`, `dist`, `build-wasm`, `.wrangler`, `public/wasm`,
+`generator`, `application`), and removes the copy on exit. It initialises the copy
+as `ci-smoke`; if the source is already initialised that step is a no-op, so the
+copy keeps the existing identity.
+
+Two opt-in variables hand the copy over, which is how `validate:deployment`
+qualifies a real hand-off without a second workspace mechanism: `CI_WORK_DIR=DIR`
+copies into an existing empty directory instead of creating one — the caller owns
+it, so the script neither creates nor removes it and a failed build cannot orphan
+it — and `CI_PACK_HANDOFF=1` packs the build/deployment hand-off into the copy
+after the build and its artefact check.
 
 The `static` mode does not include `test:scripts` or `test:deploy`; those run
 at the start of the `build` mode. `deno task validate` does include both.

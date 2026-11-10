@@ -65,6 +65,13 @@ export const GENERATOR_ONLY_TASKS = Object.freeze([
   // git and the generator's release state, and imports the generator-only digest
   // implementation. The product's equivalent is `test:provenance-source`.
   "test:provenance",
+  // Self-contained validation entry points establish generator-side state: they
+  // qualify the template identity, install the toolchain and orchestrate a
+  // throwaway build. A product inherits all of that and ships neither the
+  // initialiser nor the copy routine's generator branches.
+  "validate:toolchain",
+  "validate:deployment",
+  "test:validation",
 ]);
 
 /**

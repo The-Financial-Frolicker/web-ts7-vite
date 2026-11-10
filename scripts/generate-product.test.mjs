@@ -386,13 +386,15 @@ describe("generator regression suite boundary", () => {
     const productPkg = readJson(product, "package.json");
 
     assert.equal("test:generator" in generatorDeno.tasks, true);
-    // The regression suite lives in the toolchain qualification phase, which is
-    // the first half of the generator's `validate`.
+    // The regression suite lives in the toolchain qualification phase. `validate`
+    // orchestrates the two self-contained entry points, and the toolchain one
+    // runs that phase.
     assert.match(
       generatorDeno.tasks["toolchain:qualify"],
       /deno task test:generator/,
     );
-    assert.match(generatorDeno.tasks.validate, /deno task toolchain:qualify/);
+    assert.match(generatorDeno.tasks.validate, /deno task validate:toolchain/);
+    assert.match(generatorDeno.tasks.validate, /deno task validate:deployment/);
 
     assert.equal("test:generator" in productDeno.tasks, false);
     assert.equal("test:generator" in productPkg.scripts, false);

@@ -238,6 +238,13 @@ jobs:
       - name: CI workflow contract tests
         run: mise exec -- deno task test:ci-workflow
 
+      # The validation entry points orchestrate the generator's own installation
+      # and initialisation routines, so their suites are generator-only and carry
+      # the same presence guard as the other generator-only steps.
+      - name: Validation orchestration tests (generator only)
+        if: hashFiles('scripts/validate-orchestration.test.mjs') != ''
+        run: mise exec -- deno task test:validation
+
       - name: Vite invocation tests
         run: mise exec -- deno task test:vite
 

@@ -172,6 +172,13 @@ export const GENERATOR_ONLY = Object.freeze([
   "scripts/toolchain-specify.mjs",
   "scripts/toolchain-specify.test.mjs",
   "scripts/toolchain-invariants.test.mjs",
+  // Self-contained validation entry points orchestrate the generator's own
+  // installation, initialisation and copy routines, none of which a product
+  // ships; a product keeps its inherited `validate` chain instead.
+  "scripts/validate-toolchain.mjs",
+  "scripts/validate-deployment.mjs",
+  "scripts/validate-orchestration.test.mjs",
+  "scripts/lib/validation/steps.mjs",
 ]);
 
 /** Fail closed if the two lists ever overlap. */

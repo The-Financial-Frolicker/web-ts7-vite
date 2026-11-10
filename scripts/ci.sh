@@ -32,6 +32,15 @@
 # the toolchain's own manifests and lock into an installation outside this
 # checkout. Ordinary build and development workflows only consume that
 # installation.
+#
+# The build stage's throwaway copy can be handed over, which is how
+# `deno task validate:deployment` qualifies a real hand-off:
+#
+#   CI_WORK_DIR=DIR     copy into DIR instead of creating a directory. The caller
+#                       owns it: this script neither creates nor removes it, so a
+#                       failed build cannot leak or orphan the caller's workspace.
+#   CI_PACK_HANDOFF=1   after the build and its deployment-artefact check, write
+#                       the build/deployment hand-off into the copy.
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -45,9 +54,11 @@ fi
 
 STAGE="${1:-all}"
 WORK_DIR=""
+# Whether this script created the workspace (and must therefore remove it).
+WORK_DIR_OWNED=0
 
 cleanup() {
-    if [[ -n "$WORK_DIR" ]]; then
+    if [[ -n "$WORK_DIR" && "$WORK_DIR_OWNED" == "1" ]]; then
         rm -rf "$WORK_DIR"
     fi
 }
@@ -178,12 +189,28 @@ run_build_checks() {
 
     require_dependencies
 
-    WORK_DIR="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/web-ts7-vite-ci.XXXXXX")"
+    if [[ -n "${CI_WORK_DIR:-}" ]]; then
+        # The caller owns this directory: copy into it, and leave both creating
+        # and removing it to the caller so a failure cannot orphan it.
+        WORK_DIR="$CI_WORK_DIR"
+        WORK_DIR_OWNED=0
+        if [[ ! -d "$WORK_DIR" ]]; then
+            echo "ERROR: CI_WORK_DIR is not an existing directory: $WORK_DIR" >&2
+            exit 1
+        fi
+        if [[ -n "$(ls -A "$WORK_DIR")" ]]; then
+            echo "ERROR: CI_WORK_DIR must be empty: $WORK_DIR" >&2
+            exit 1
+        fi
+    else
+        WORK_DIR="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/web-ts7-vite-ci.XXXXXX")"
+        WORK_DIR_OWNED=1
+    fi
 
     echo "==> Prepare an initialised build copy in $WORK_DIR"
     # Copy the working tree, including uncommitted changes, but not generated
-    # output. node_modules is shared through a symlink so dependencies are not
-    # installed twice.
+    # output. `application/` is an independent project that the generator never
+    # builds, so it is not copied either.
     tar -C "$PROJECT_ROOT" \
         --exclude=./.git \
         --exclude=./node_modules \
@@ -192,6 +219,7 @@ run_build_checks() {
         --exclude=./.wrangler \
         --exclude=./public/wasm \
         --exclude=./generator \
+        --exclude=./application \
         --exclude='./.aider*' \
         -cf - . | tar -C "$WORK_DIR" -xf -
     # No application dependency tree to link: the template has no app packages.
@@ -235,6 +263,13 @@ run_build_checks() {
 
     echo "==> Published-artifact smoke test (dist/client, Deno)"
     deno task test:wasm:published
+
+    # The hand-off is the build's output for the deployment phase. It is packed
+    # only when asked, because a plain CI build has no consumer for it.
+    if [[ "${CI_PACK_HANDOFF:-0}" == "1" ]]; then
+        echo "==> Package the build/deployment hand-off"
+        deno task artefact:pack -- --root "$WORK_DIR" --out "$WORK_DIR"
+    fi
 
     # The Wrangler dry run deliberately does not run here any more. It resolves
     # the deployment installation and the artefact, which is the deployment
